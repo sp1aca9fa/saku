@@ -1,6 +1,6 @@
 # 06. Indicators and numeric rules
 
-All computed locally from verified data, each with documented formula, parameters and warm-up period (`docs/indicators.md` and tooltips, EN/JA).
+All computed locally from verified data, each with documented formula, parameters and warm-up period (`docs/indicators.md` and tooltips in the install's languages).
 
 - **v1:** Price, SMA, EMA, Return over N days, Volatility (close-to-close, sqrt(252)), Parkinson, Garman-Klass and Yang-Zhang volatility, Drawdown from N-day or all-time high, N-day High/Low, Threshold; tolerance bands on any comparison.
 - **v1.1:** RSI, MACD, Bollinger Bands, ATR, moving-average slope, relative strength, rolling correlation.

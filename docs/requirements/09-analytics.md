@@ -20,7 +20,7 @@ Benchmark calibrated to about 50; weakest-link aggregation (geometric mean, capp
 - Predictive check: run **once** on a held-out period not used to design the formula; the result is recorded in `docs/robustness-score.md` whatever it is. Any revision is logged with its reason and validated only on data not used in earlier attempts. Never iterate until it passes.
 
 ## Monte Carlo goal projection
-**Block bootstrap of the underlying asset returns** (preserving volatility clustering and autocorrelation), then re-run the strategy on each simulated path. Output: probability of reaching a user goal (e.g. ¥100,000 to ¥300,000 in 5 years), including contribution plans.
+**Block bootstrap of the underlying asset returns** (preserving volatility clustering and autocorrelation), then re-run the strategy on each simulated path. Output: probability of reaching a user goal (e.g. 100,000 to 300,000 in the base currency in 5 years), including contribution plans.
 
 ## Strategy library
 - 10-15 strategy families with parameter variants (up to about 100 registered variants), in `library/`, approved by the owner before seeding (B2).
@@ -38,7 +38,7 @@ Benchmark calibrated to about 50; weakest-link aggregation (geometric mean, capp
 - **Consider switching (all must hold):** long-run Sharpe ≥ user's + 0.2 and Calmar ≥ user's, with ≥ 90% confidence after the luck check; max drawdown no worse than user's + 2pp; forward results inside the candidate's expected range; estimated after-tax benefit exceeds the switching cost (tax, fees, FX) within 3 years.
 - **Watch:** passes eligibility and most switching criteria.
 - 12-month forward performance is shown as information only.
-- Cost model before C1: 20.315% tax on realized gains plus broker fee and FX spread defaults (editable).
+- Cost model before C1: the regime's flat rate on realized gains (Japan: 20.315%) plus the install's broker fee and FX spread settings (editable).
 
 ## Finder integrity
 Luck check ("N qualify; about M would by luck alone"; no "Consider switching" unless N clearly exceeds M); no look-ahead; finder self-test (follow suggestions vs stay) shown on the panel; optional notifications (20 consecutive days in "Consider switching", 6-month cooldown).

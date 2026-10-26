@@ -3,10 +3,10 @@
 Read for this stage: 08-ux-language.md, 05-strategy-model.md, 11-alerts.md, 12-architecture-stack.md, 07-accounts-tax.md (quota view).
 
 ## D1. Web UI
-- Login (single owner), demo mode with synthetic data, settings, language switch, onboarding, guidance (EN/JA, translation CI gate on).
+- Sign-in (password + TOTP, 2 devices), Settings > Admin (accounts, install settings, source roles, server status, activity), demo account, language toggle, onboarding, guidance (language coverage gate on).
 - Strategy list, detail, comparison, builder (visual + YAML), drafts and registration, starter templates.
 - Backtest and robustness views with decision cards; charts with indicators, switch markers, bar replay.
-- Positions (trade log), rebalance calculator (whole shares, residual cash), NISA quota view, discipline journal UI.
+- Positions (trade log), rebalance calculator (whole shares, residual cash), tax-advantaged quota view, discipline journal UI, download my data.
 - Dashboard, data-health page (status, checks, revisions), chain verification status.
 
 ## D2. Paper trading and health

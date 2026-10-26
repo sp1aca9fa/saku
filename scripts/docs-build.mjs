@@ -20,6 +20,7 @@ const parts = [
   'docs/requirements/12-architecture-stack.md',
   'docs/requirements/13-testing.md',
   'docs/requirements/14-decisions-log.md',
+  'docs/requirements/15-plugins.md',
   'docs/requirements/stages/stage-a.md',
   'docs/requirements/stages/stage-b.md',
   'docs/requirements/stages/stage-c.md',

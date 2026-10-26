@@ -19,3 +19,7 @@ next-env.d.ts
 
 *:Zone.Identifier
 .DS_Store
+
+# Generic Claude rules are public (overrides a global ignore); the owner's own are private
+!CLAUDE.md
+CLAUDE.local.md

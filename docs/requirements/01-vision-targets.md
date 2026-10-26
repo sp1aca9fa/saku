@@ -1,38 +1,38 @@
 # 01. Vision, pillars, product model, targets
 
 ## Vision
-**The best personal investment assistant for rule-based investors: deep strategies on a few assets, verified with honest analytics, powered by free or near-free data, and operated through Claude via MCP.**
+**The best personal investment assistant for rule-based investors: deep strategies on a few assets, verified with honest analytics, powered by data you bring yourself, and operated through Claude via MCP.**
 
 Longer term: make evidence-backed, professional-grade strategies usable by anyone, including people with little investment knowledge, with honest decisions and visible uncertainty.
 
 ## Pillars (priority order)
 1. **Reliability.** We never act on wrong data or wrong calculations. Data and math are checked redundantly and independently. When data is in doubt, the tool never presents a normal signal: yellow status computes with a visible warning; red status switches to the strategy's declared safe state and tells the user exactly what to do.
 2. **Evidence.** Strategies are grounded in published research, verified with robustness and overfitting statistics, and judged on forward (post-registration) results, which are tamper-evident.
-3. **Decision clarity.** Every choice is shown as trade-offs in yen and ranges (return, bad-case loss, recovery time, costs, tax), so the user decides knowingly. The tool educates on decisions, not finance theory.
-4. **Accessibility.** Professional methods usable without understanding the math, executable at a real Japanese broker with real costs, real execution timing and real tax.
+3. **Decision clarity.** Every choice is shown as trade-offs in the base currency and in ranges (return, bad-case loss, recovery time, costs, tax), so the user decides knowingly. The tool educates on decisions, not finance theory.
+4. **Accessibility.** Professional methods usable without understanding the math, executable at a real broker with real costs, real execution timing and real tax.
 5. **Honesty and protection** (cross-cutting). Show uncertainty and luck, never oversell, make risks impossible to miss.
 
 ## Product model
-- **Personal project.** The owner is the user. Each instance has a single owner today.
-- **Multi-user-ready data model:** every user-owned table has an `owner_id` with Row Level Security from day one, so family members can be added later (enable invites, small settings UI) without migration. Market data, checks, data health and the strategy library are shared per instance. Provider keys stay instance-level. Note: Tiingo's free plan is internal use; household use is a gray area, wider use needs per-person instances or a data-plan upgrade.
-- **Hosted as a portfolio project:** the owner's instance is private (login required); public visitors see a demo mode with synthetic data.
-- **Self-hostable:** others can fork and run their own instance with their own API keys (BYOK).
-- **Commercial use** is not a goal; it may only be considered as a consequence of success.
+- **Closed, personal app.** Each install serves a few accounts (a family) with one or more admins. No sign-up page, no public pages, no public demo. Each person sees only their own strategies, positions, journal and tax data; market data, checks, data health and the strategy library are shared within the install.
+- **Bring your own data.** The public repo ships the app, the plug-in framework, public plug-ins for official APIs and a runnable template. Each admin chooses and writes plug-ins for their own sources and is responsible for their terms (15).
+- **Works anywhere.** Base currency, time zone, languages, asset universe, benchmarks, broker costs and tax regime are admin choices or plug-ins, never code edits. The owner's install uses JPY, Asia/Tokyo, English and Japanese, and the Japan tax regime.
+- **Self-hosted** on an always-on machine of the admin's own, reached through a tunnel (12). A demo account (same security as any account, sample strategies, no personal data) is used to show the app to someone.
+- **Template-worthy, source-available.** Anyone can clone and run their own install under PolyForm Noncommercial 1.0.0. Commercial use is not a goal.
 
 ## Audience
-The owner first; designed so an individual with little investment knowledge can use it, in English or Japanese.
+The owner and their family first; designed so an individual with little investment knowledge can use it, in their own languages.
 
 ## Benchmark set
-Judged in yen, after tax and costs, against what an individual in Japan would realistically hold. Index benchmarks are assumed held in **NISA** (tax-free), because that is the realistic alternative:
+Judged in the base currency, after tax and costs, against what an individual would realistically hold. Index benchmarks are assumed held in the regime's best tax-advantaged account (e.g. NISA in Japan), because that is the realistic alternative. The set is an admin setting; the owner's install uses:
 - S&P 500 index fund in NISA (modeled with SPY in yen minus fee)
 - Global index fund in NISA (eMAXIS Slim All Country; modeled with VT in yen minus fee)
 - Balanced 8-asset fund in NISA (ETF composite, defined in C2)
 - Robo-advisor style portfolio (ETF mix, defined in C2)
 - Gold (GLD in yen)
-- Bank deposits (actual current JPY deposit rate)
+- Bank deposits (actual current deposit rate)
 
 ## Outcome targets
-Targets apply to a **strategy slice**, not the whole portfolio (the user may hold e.g. 50% in a safe core and 10% in an aggressive strategy). Measured on the **median rolling 5-year window**, with the share of windows meeting the target and a confidence range always reported. Backtests use next-day execution, realistic costs and tax.
+Targets apply to a **strategy slice**, not the whole portfolio (the user may hold e.g. 50% in a safe core and 10% in an aggressive strategy). Measured on the **median rolling 5-year window**, with the share of windows meeting the target and a confidence range always reported. Backtests use next-day execution, realistic costs and tax. The targets below are the owner's, measured on the owner's install (JPY, Japan regime).
 
 | Tier | Target |
 |---|---|
@@ -45,13 +45,13 @@ Initial evidence for the aggressive target: `docs/evidence/backtests.md` (pre-ta
 ## Pillar targets
 | Pillar | Target | Measurement |
 |---|---|---|
-| Reliability | 100% of injected material faults detected (faults larger than the relevant tolerance); zero normal signals presented on red data | Fault-injection suite (CI); audit log |
+| Reliability | 100% of injected material faults detected (faults larger than the relevant tolerance, all sources available); zero normal signals presented on red data | Fault-injection suite (CI); audit log |
 | Reliability (process) | Data status green on ≥ 99% of trading days (yellow and red tracked separately) | Data-health history |
 | Evidence | 100% of library strategies cite research and show tamper-evident post-registration results | Library review; chain verification |
-| Decision clarity | ≥ 4 of 5 test users correctly state a strategy's bad-case loss in yen after reading its page | Usability test (3-5 people) |
+| Decision clarity | ≥ 4 of 5 test users correctly state a strategy's bad-case loss in the base currency after reading its page | Usability test (3-5 people) |
 | Decision clarity | 100% coverage of the information-parity metric set for every strategy | Automated check |
-| Accessibility | 100% tooltip coverage; on a deployed instance, a novice reaches a first strategy in < 15 minutes | CI check; usability test |
-| Accessibility (language) | 100% of user-facing strings exist in EN and JA | CI check (enforced from D1) |
+| Accessibility | 100% tooltip coverage; on a running install, a novice reaches a first strategy in < 15 minutes | CI check; usability test |
+| Accessibility (language) | 100% of user-facing strings exist in the install's chosen languages | `pnpm languages` check (enforced from D1) |
 | Execution (process) | ≥ 95% of signals acted on within one trading day; live results inside the backtest's expected range | Discipline journal; forward tracking |
 
 ## Target reviews

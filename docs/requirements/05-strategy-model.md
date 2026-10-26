@@ -8,16 +8,16 @@
   - **Holdings:** fixed weights; **ranked blocks** (top N by an indicator); **exposure scaling** (volatility targeting in discrete steps across 0x/1x/2x/3x instruments; ensemble share can also scale exposure).
   - **Drawdown circuit breaker** (optional).
   - **Synthetic leverage:** `SPY?L=3&E=0.9`, daily return = L * r - (L - 1) * cashRate/252 - E/100/252.
-  - **Cash:** `CASH_USD` (USD T-bill yield, carries FX exposure in yen terms) or `CASH_JPY` (JPY deposit rate; converting incurs FX spread and may realize taxable gains). Decision cards show the yen impact of either choice.
+  - **Cash:** `CASH_USD` (USD T-bill yield, carries FX exposure in base-currency terms) or `CASH_BASE` (the base currency's deposit rate, an admin setting; converting incurs FX spread and may realize taxable gains). Decision cards show the base-currency impact of either choice.
   - **Safe state** (required for every strategy, see 04).
-  - **Trading frequency:** daily, weekly, monthly. **Costs:** slippage (bps), fees and FX spread, defaulting to the owner's broker schedule (C2).
-  - **Account type:** 特定口座 by default; NISA where eligible (07).
+  - **Trading frequency:** daily, weekly, monthly. **Costs:** slippage (bps), fees and FX spread, defaulting to the install's broker cost settings (C2).
+  - **Account type:** one of the account types the install's tax regime defines (07); every regime defines a `taxable` default. Tax-advantaged accounts where eligible.
 - **Tolerance semantics:** true when value > ref * (1 + tolerancePct/100); false when value < ref * (1 - tolerancePct/100); otherwise unchanged. Initial state on the first valid day: plain comparison (value > ref). Verified against testfol parity.
 
 ## Execution model
-- Signals are computed from a close that is final in the JST morning; the earliest realistic trade is the next US session.
+- Signals are computed from a close once the day's data is final (the next morning in Japan); the earliest realistic trade is the next US session.
 - `execution: next_open | next_close | same_close`. **Default: next_open** (with slippage) for backtests, forward tracking and alerts.
-- `same_close` exists only for testfol parity tests and is labeled "not achievable from Japan" wherever shown.
+- `same_close` exists only for testfol parity tests and is labeled "not achievable: it trades at a close that is not yet known" wherever shown.
 - Small amounts: optional whole-share modeling in backtests; the rebalance calculator always rounds to whole shares and shows residual cash.
 
 ## Versions and registration
@@ -27,11 +27,11 @@
 - The forward record stores what was actually signaled at the time (including safe-state days); later recomputations are annotations, never edits.
 
 ## YAML
-Canonical YAML validated by zod; visual builder and YAML round-trip without loss.
+Canonical YAML validated by zod; visual builder and YAML round-trip without loss. Keys and values are language-neutral (names are free text). `account` refers to an account type key of the install's tax regime and is validated against it.
 
 ```yaml
 name: SPY 3x trend + vol filter (ensemble)
-account: tokutei
+account: taxable
 execution: next_open
 safeState: { holdings: [{ ticker: SPY, weight: 100 }] }
 evaluation: { frequency: daily }
@@ -61,9 +61,9 @@ allocations:
 ```
 
 ## Positions and journal
-- A dated trade log (date, ticker, quantity, price, currency, fees, FX rate, account type); holdings derived; cash per currency.
+- Per user: a dated trade log (date, ticker, quantity, price, currency, fees, FX rate, account type); holdings derived; cash per currency.
 - **Discipline journal** (v1): for each signal, the user records done / skipped / delayed (with date). Feeds the execution target and later the behavior-gap analysis.
 
 ## Entities
-Settings, NotificationChannel (per user), Symbol, Bar, IssuerRecord, BarRevision, FxRate, CheckResult, DataHealthStatus, Strategy (draft), StrategyVersion (registered), StrategyState, ForwardEntry (hash-chained), ChainAnchor (external timestamp), PaperPortfolio, Trade, CashBalance, JournalEntry, NisaQuotaLedger, TaxLot, Alert, FinderCriteria, FinderResult, RobustnessReport, EventCalendar, JobRun.
+User, Device, BackupCode, LoginAttempt, AppSettings (admin, install-wide), UserSettings, NotificationChannel (per user), PluginInfo (descriptions saved by plug-ins), SourceRole, Symbol, Bar, IssuerRecord, BarRevision, FxRate, CheckResult, DataHealthStatus, Strategy (draft), StrategyVersion (registered), StrategyState, ForwardEntry (hash-chained), ChainAnchor (external timestamp), PaperPortfolio, Trade, CashBalance, JournalEntry, TaxAccount (per user, regime-defined type), QuotaLedger, TaxLot, LossCarryforward, Alert, FinderCriteria, FinderResult, RobustnessReport, EventCalendar, JobRun.
 
