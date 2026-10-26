@@ -31,13 +31,13 @@ Findings on each source's limits, API and terms, checked 2026-10-27 from the pro
 | FRED | Free; show "This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis."; for apps used by others, link the terms | Allowed for public-domain series. Copyrighted series (the notes say "Copyright", e.g. `SP500` from S&P Dow Jones Indices) are personal use only | Not mentioned | `false` (SP500: see below) |
 | ECB | Free reuse; cite the ECB as the source; state any modification (a USD/JPY cross derived from two euro rates is one) | Allowed with the citation | Not mentioned | `false` |
 
-### Owner decisions needed
-1. **Family accounts and "personal use" terms.** Tiingo's free plan, and probably Alpaca's and Massive's, allow use by the key holder only. Other accounts on the owner's install seeing prices, charts or signals built from them may count as display or sharing. Options:
+### Owner decisions
+1. **Family accounts and "personal use" terms.** Decided 2026-10-27: the owner's install has a single user, which is personal use; revisit before adding another account (family, demo with real data, usability test). Background: Tiingo's free plan, and probably Alpaca's and Massive's, allow use by the key holder only. Other accounts on the owner's install seeing prices, charts or signals built from them may count as display or sharing. Options:
    - each person brings their own key (the install keeps per-source data per key holder, which goes against shared market data);
    - other accounts see only signals and health, no prices from those sources (whether derived signals count as display is unclear);
    - a paid plan that allows it (Tiingo Power or other), only with the owner's approval;
    - ask Tiingo support in writing.
-2. **AI use (`noAi`).** None of the pages read mention AI. Until the owner reads Tiingo's terms and the exchange agreements, Tiingo, Alpaca, Massive and Yahoo stay `noAi: true`: their raw values never reach the MCP server or AI exports (derived results and health still do).
+2. **AI use (`noAi`).** Matters from E1 (MCP), when the flags are revisited. None of the pages read mention AI. Until the owner reads Tiingo's terms and the exchange agreements, Tiingo, Alpaca, Massive and Yahoo stay `noAi: true`: their raw values never reach the MCP server or AI exports (derived results and health still do).
 3. **FRED `SP500`** is S&P copyrighted and personal use only. It is a check (layer C), so its values never need to be shown to other accounts or given to AI; the plug-in marks it `noAi` per series.
 
 ## Data finalization times

@@ -64,6 +64,12 @@ Notes and assumptions:
 - **`unchanged_close`** flags a close equal to the previous session's (two days with the same close).
 - Gate counting (`pnpm spike`): a day's "pass" is all of its results for that layer green.
 
+## Attribution
+
+Shown on the app's data sources page (with the UI, D1; the text goes through `packages/content`):
+- FRED: "This product uses the FRED® API but is not endorsed or certified by the Federal Reserve Bank of St. Louis."
+- ECB: "Exchange rates: European Central Bank. USD/base-currency rates are derived as a cross of two euro reference rates."
+
 ## A1 measurement
 
 - `pnpm probe` logs, every hour, the last sessions of one ticker from every bar source (`~/.local/state/saku/probe.jsonl`). For each source and date: when the bar first appeared and when its values last changed. That sets the daily run time (default 20:00 New York until measured).
