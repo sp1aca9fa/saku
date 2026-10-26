@@ -191,6 +191,8 @@ importers:
         specifier: ^5.0.3
         version: 5.0.5(@types/node@24.19.2)(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15))
 
+  packages/auth: {}
+
   packages/core: {}
 
   packages/db:
@@ -198,6 +200,9 @@ importers:
       '@libsql/client':
         specifier: ^0.18.0
         version: 0.18.0
+      '@saku/auth':
+        specifier: workspace:*
+        version: link:../auth
       '@saku/core':
         specifier: workspace:*
         version: link:../core

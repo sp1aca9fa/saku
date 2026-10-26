@@ -13,10 +13,12 @@
   "scripts": {
     "typecheck": "tsc -p .",
     "generate": "drizzle-kit generate",
-    "migrate": "tsx src/scripts/migrate.ts"
+    "migrate": "tsx src/scripts/migrate.ts",
+    "user": "tsx src/scripts/user.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",
+    "@saku/auth": "workspace:*",
     "@saku/core": "workspace:*",
     "drizzle-orm": "^0.45.4"
   },
