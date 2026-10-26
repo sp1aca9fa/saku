@@ -7,7 +7,7 @@ export default defineConfig({
     projects: [
       'packages/*',
       'apps/*',
-      'plugins-public/*',
+      'plugins-public',
       ...(existsSync('plugins/package.json') ? ['plugins'] : []),
     ],
   },

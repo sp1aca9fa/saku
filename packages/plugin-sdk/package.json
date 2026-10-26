@@ -8,5 +8,9 @@
   },
   "scripts": {
     "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@saku/core": "workspace:*",
+    "@saku/db": "workspace:*"
   }
 }

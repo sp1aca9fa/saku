@@ -214,7 +214,14 @@ importers:
         specifier: ^0.31.11
         version: 0.31.11
 
-  packages/plugin-sdk: {}
+  packages/plugin-sdk:
+    dependencies:
+      '@saku/core':
+        specifier: workspace:*
+        version: link:../core
+      '@saku/db':
+        specifier: workspace:*
+        version: link:../db
 
 packages:
 
