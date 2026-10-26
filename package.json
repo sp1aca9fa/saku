@@ -16,6 +16,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check:all": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test && pnpm docs:check",
+    "db:generate": "pnpm --filter @saku/db generate",
+    "db:migrate": "pnpm --filter @saku/db migrate",
     "docs:build": "node scripts/docs-build.mjs",
     "docs:check": "node scripts/docs-build.mjs --check"
   },

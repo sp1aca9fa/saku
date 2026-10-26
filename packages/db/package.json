@@ -1,0 +1,26 @@
+{
+  "name": "@saku/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema.ts",
+    "./env": "./src/env.ts",
+    "./migrate": "./src/migrate.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "generate": "drizzle-kit generate",
+    "migrate": "tsx src/scripts/migrate.ts"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "@saku/core": "workspace:*",
+    "drizzle-orm": "^0.45.4"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.11"
+  }
+}
