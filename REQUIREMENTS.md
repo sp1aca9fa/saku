@@ -577,6 +577,7 @@ The owner's personal notes are kept outside the repository (the repo is public).
 - 2026-10-07: Name Saku. Full EN/JA requirement explicit. Next.js kept.
 - 2026-10-07 (external review): single owner per instance (hosted portfolio demo, self-hostable); targets apply to a strategy slice, median rolling 5-year window, vs S&P 500 in NISA after tax, with evidence file; declared safe state on red data; next-day execution default (same-close only for parity); ECB daily FX, FRED as weekly confirmation, broker-style FX for tax; USD vs JPY cash; Yahoo un-splitting and return-based comparisons; volatility-scaled layer C; severity rules; near-tie rule; reference implementation for core math only, external golden values emphasized; issuer data best effort, not a gate; A1 run ≥ 10 calendar days; thin slice (A2) to start forward records early; draft vs registered versions; tamper-evident hash chain; deflated Sharpe and backtest-overfitting probability; pre-registered score validation; block-bootstrap Monte Carlo; library 10-15 families; finder ranked on long-run robustness; parameter ensembles by default; discipline journal in v1; NISA opt-in with quota enforcement, timing strategies in 特定口座; Japan tax optimization added (F4); whole-share handling; heavy compute off Vercel; usability test 3-5 users; translation CI gate from D1; owner notes outside the repo.
 - 2026-10-26: Multi-user-ready data model (owner_id + RLS on user-owned tables, per-user notification channels) while staying single owner; provider keys instance-level since market data is shared.
+- 2026-10-26: The living docs (`docs/evidence/backtests.md`, `docs/backlog.md`, `docs/stage-reviews.md`, `docs/target-reviews.md`) are standalone and no longer part of `REQUIREMENTS.md`, so adding a backlog idea or a review needs no rebuild.
 
 <!-- split: docs/requirements/stages/stage-a.md -->
 # Stage A: Trust foundation (Reliability)
@@ -688,54 +689,3 @@ Email/Telegram/LINE; summary digests; SBI CSV trade import; watchlist; screener 
 
 > **Completion check:** at the end of each F item, read the full `REQUIREMENTS.md`, confirm consistency, list gaps, then run the stage review.
 
-<!-- split: docs/evidence/backtests.md -->
-# Evidence: initial backtests (testfol.io, run by the owner)
-
-Period 1996-09-27 to 2026-09-25 (30 years). Simulated S&P 500 (SPYSIM) and simulated leverage (`SPYSIM?L=3&E=0.9`), daily trading, USD, **same-close execution, before tax and FX**.
-
-| Strategy | CAGR | Max drawdown | Longest drawdown | Volatility | Sharpe |
-|---|---|---|---|---|---|
-| S&P 500 buy and hold | 10.38% | -55.14% | 6.58 years | 19.30% | 0.49 |
-| 3x buy and hold | 11.96% | -98.29% | 19.61 years | 57.89% | 0.45 |
-| 3x + 200-day SMA filter (else cash) | 15.42% | -71.17% | 14.26 years | 36.97% | 0.51 |
-| Setup 1: 3x if trend up (SMA 200, ±3% tolerance) and 20-day volatility < 25%; 1x if trend up only; else cash | 19.90% | -54.63% | 4.46 years | 36.23% | 0.62 |
-| Setup 2: same, but 1x instead of cash (found by accident) | 20.52% | -65.95% | 7.34 years | 39.06% | 0.62 |
-
-## Caveats (must accompany these numbers)
-- Before tax: switches in 特定口座 realize 20.315% tax on gains.
-- Same-close execution is not achievable from Japan; next-day execution will reduce results.
-- Leverage is simulated, not real ETF history (UPRO exists only from 2009).
-- Parameters were chosen after seeing results; Setup 2 was selected because it looked best (selection bias).
-- One strategy family on one index; a single 30-year history (about six non-overlapping 5-year windows).
-- USD terms; yen results depend on FX.
-
-Interpretation: Setup 1's pre-tax edge over S&P 500 (+9.5pp/year) is near the aggressive target range. Whether it survives tax, next-day execution and the future is what TR1 and forward records will show.
-
-<!-- split: docs/backlog.md -->
-# Backlog
-
-| Date | Idea | Raised by | Pillar | Status (new / accepted / rejected / experiment) | Notes |
-|---|---|---|---|---|---|
-
-<!-- split: docs/stage-reviews.md -->
-# Stage reviews
-
-## Stage X review (YYYY-MM-DD)
-- **Demo:**
-- **Completion check (gaps found and resolved):**
-- **What worked:**
-- **What didn't:**
-- **What we learned:**
-- **Backlog decisions:**
-- **Target review (if due):**
-- **Next stage plan (stage file updated):**
-
-<!-- split: docs/target-reviews.md -->
-# Target reviews
-
-## TRn (YYYY-MM-DD)
-- **Evidence (with confidence ranges):**
-- **Targets assessed:**
-- **Decision (keep / raise / lower, per target):**
-- **Rationale:**
-- **Integrity note (no tuning to reach targets):**

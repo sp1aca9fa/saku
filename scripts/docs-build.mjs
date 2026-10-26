@@ -26,10 +26,6 @@ const parts = [
   'docs/requirements/stages/stage-d.md',
   'docs/requirements/stages/stage-e.md',
   'docs/requirements/stages/stage-f.md',
-  'docs/evidence/backtests.md',
-  'docs/backlog.md',
-  'docs/stage-reviews.md',
-  'docs/target-reviews.md',
 ];
 
 const out = parts.map((p) => `<!-- split: ${p} -->\n${readFileSync(p, 'utf8')}`).join('');
