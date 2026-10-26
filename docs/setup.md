@@ -10,15 +10,15 @@ Stage A1 sets up the data jobs only: the web app (and its Tailscale Funnel addre
 ## 1. Node and the code
 
 ```bash
-# Node with nvm, the version in .nvmrc; pnpm comes from package.json through corepack.
-nvm install && corepack enable
+git clone --recurse-submodules <public repo> ~/code/saku && cd ~/code/saku
+# (The private plug-ins submodule needs GitHub ssh access; leave the flag out without one.)
+
+# Node with nvm, the version in .nvmrc (the machine's default Node is left alone).
+nvm install && nvm use && corepack enable
 # A stable path the services run Node through (move the link when .nvmrc changes).
 mkdir -p ~/.local/share/saku
-ln -sfn "$(dirname "$(dirname "$(nvm which default)")")" ~/.local/share/saku/node
-
-git clone <public repo> ~/code/saku && cd ~/code/saku
-# Optional: your private plug-ins as the plugins/ submodule.
-git submodule update --init plugins
+ln -sfn "$(dirname "$(dirname "$(nvm which "$(cat .nvmrc)")")")" ~/.local/share/saku/node
+pnpm --version   # corepack fetches the pinned pnpm once
 pnpm install
 ```
 
