@@ -9,7 +9,8 @@
   },
   "scripts": {
     "typecheck": "tsc -p .",
-    "jobs": "tsx src/cli/jobs.ts"
+    "jobs": "tsx src/cli/jobs.ts",
+    "plugins": "tsx src/cli/plugins.ts"
   },
   "dependencies": {
     "@saku/core": "workspace:*",

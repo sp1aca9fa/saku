@@ -107,3 +107,20 @@ rsync -a --delete <server>:.local/share/saku/backups/ ~/saku-backups/
 
 `pnpm restore <file> [target.db]` unpacks a backup into a new database file only (never over an
 existing one); then `pnpm db:migrate`. A restored database needs the same `AUTH_SECRET`.
+
+## 7. Updates
+
+The server updates itself: every 5 minutes it checks GitHub, and when there are new commits it
+pulls both repos, installs the Node version in `.nvmrc` when it changed (nvm's default is left
+alone), installs packages, migrates, and checks the new version (the plug-ins load, typecheck,
+tests). Never while a job runs (it waits for the next check), and no job starts during it. When a
+step fails, it goes back to the version before and does not try that version again until a newer
+push. Every update is in the activity log; the log is `~/.local/state/saku/update.log`.
+
+```bash
+sudo cp ops/systemd/saku-update.* /etc/systemd/system/
+sudo sed -i "s/<user>/$USER/g" /etc/systemd/system/saku-update.service
+sudo systemctl daemon-reload && sudo systemctl enable --now saku-update.timer
+```
+
+By hand, any time: `ssh -t <server> code/saku/ops/update-server.sh`.

@@ -1,0 +1,16 @@
+# Copy to /etc/systemd/system/ and replace <user> (see docs/setup.md).
+[Unit]
+Description=Saku update: new commits from GitHub, installed and checked (rolls back on failure)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=<user>
+WorkingDirectory=/home/<user>/code/saku
+Environment=PATH=/home/<user>/.local/share/saku/node/bin:/usr/bin:/bin
+Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+Nice=10
+CPUQuota=150%
+ExecStart=/home/<user>/code/saku/ops/update-server.sh --auto
+TimeoutStartSec=30min

@@ -675,6 +675,7 @@ Market data and testfol daily equity curves are never committed to the public re
 - 2026-10-26 (pre-build review): Secondary bar sources: evaluate Alpaca and Massive (official, free) in A1 alongside Yahoo (private, unofficial, full history). Automatic stand-in rule when the primary is missing (decision-margin test, max 2 days, later comparison and annotation). Point-in-time rates and FX through one shared `asOf` function; expected holiday gaps green. Weekly full-history check passes stored as summaries plus non-green rows. Hashes over RFC 8785 canonical JSON with the hashed text stored; daily RFC 3161 timestamps. A1 runs 20 trading days with a pre-registered gate (≥ 95% secondary availability); A2 development allowed during A1's window without registration. Fault-injection target scoped to "all sources available"; single-source days never green. Real-data tests run on the server (`pnpm verify`); public fixtures are synthetic.
 - 2026-10-26: Revision log covers raw fields only; provider re-adjustments of adjusted values are one event per refetch. Our adjusted series is a forward-accumulated total-return index (history never rewritten). Sign-in checks device slots first; every refusal (unknown user, wrong password, disabled, slots full) shows one combined message, every path runs the password hash (same timing) and counts toward lockout.
 - 2026-10-26: Sign-in refusal message also covers accounts whose authenticator is not set up yet (that case otherwise appeared only after a correct password). Every path does the same work, including the device count. A "2 devices" refusal at the authenticator step is allowed when another device signed in meanwhile.
+- 2026-10-27: Self-update script moved from A3 to A1 (owner's request; ops only, no data or calculations), so the server stays current during the 20-day run. Until the web app exists it checks a new version by loading the plug-ins, typecheck and tests instead of build, restart and the app answering; failures go to the update log and activity log until A2 alerts exist. It holds the jobs lock while it runs and leaves nvm's default Node alone (shared machine).
 <!-- split: docs/requirements/15-plugins.md -->
 # 15. Plug-ins
 
@@ -728,7 +729,7 @@ Read for this stage: 04-data-pipeline.md, 15-plugins.md, 03-assets.md, 05-strate
 - Read each provider's current limits and terms and record them in `docs/data-spike.md`: personal-use conditions, and whether data may be given to AI models (sets `noAi`).
 - Compute our adjusted series; run layers A-C over full history.
 - Measure when each bar source's daily data is final after the US close (sets the daily run time).
-- Server setup on the owner's machine: systemd units, state folders, backups, healthchecks.io.
+- Server setup on the owner's machine: systemd units, state folders, backups, healthchecks.io, self-update script (12; the app's build and restart steps join with the app).
 - Daily runs from the server over **20 trading days**; record each secondary source's availability per day (a day counts if any run that day got data; a library break counts as unavailable).
 - Deliverables: `docs/data-spike.md`, first `docs/data-pipeline.md`, the chosen secondary sources and their roles.
 - **Gate** (pre-registered, not changed after data is seen): the primary succeeds on every trading day (after retries); at least one secondary available on ≥ 95% of days; layer B passes on ≥ 99% of days where a secondary was available; layer C passes on ≥ 99% of days; every failure explained.
@@ -743,7 +744,7 @@ Read for this stage: 04-data-pipeline.md, 15-plugins.md, 03-assets.md, 05-strate
 - Later engine changes must reproduce this strategy's recorded signals or annotate differences; recorded entries are never edited.
 
 ## A3. Hardened pipeline
-- Full Tier 0; revision log; weekly refetch and diff; quota guard; CSV fallback; self-update script; layer D best effort (`IssuerSource`); data-health CLI report; `pnpm verify` on the server.
+- Full Tier 0; revision log; weekly refetch and diff; quota guard; CSV fallback; layer D best effort (`IssuerSource`); data-health CLI report; `pnpm verify` on the server.
 - Fault-injection suite (material faults) in CI.
 - Acceptance: injected faults produce yellow/red as specified and never a normal signal on red; a broken run triggers the heartbeat alert.
 

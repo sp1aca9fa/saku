@@ -8,7 +8,7 @@ Read for this stage: 04-data-pipeline.md, 15-plugins.md, 03-assets.md, 05-strate
 - Read each provider's current limits and terms and record them in `docs/data-spike.md`: personal-use conditions, and whether data may be given to AI models (sets `noAi`).
 - Compute our adjusted series; run layers A-C over full history.
 - Measure when each bar source's daily data is final after the US close (sets the daily run time).
-- Server setup on the owner's machine: systemd units, state folders, backups, healthchecks.io.
+- Server setup on the owner's machine: systemd units, state folders, backups, healthchecks.io, self-update script (12; the app's build and restart steps join with the app).
 - Daily runs from the server over **20 trading days**; record each secondary source's availability per day (a day counts if any run that day got data; a library break counts as unavailable).
 - Deliverables: `docs/data-spike.md`, first `docs/data-pipeline.md`, the chosen secondary sources and their roles.
 - **Gate** (pre-registered, not changed after data is seen): the primary succeeds on every trading day (after retries); at least one secondary available on ≥ 95% of days; layer B passes on ≥ 99% of days where a secondary was available; layer C passes on ≥ 99% of days; every failure explained.
@@ -23,7 +23,7 @@ Read for this stage: 04-data-pipeline.md, 15-plugins.md, 03-assets.md, 05-strate
 - Later engine changes must reproduce this strategy's recorded signals or annotate differences; recorded entries are never edited.
 
 ## A3. Hardened pipeline
-- Full Tier 0; revision log; weekly refetch and diff; quota guard; CSV fallback; self-update script; layer D best effort (`IssuerSource`); data-health CLI report; `pnpm verify` on the server.
+- Full Tier 0; revision log; weekly refetch and diff; quota guard; CSV fallback; layer D best effort (`IssuerSource`); data-health CLI report; `pnpm verify` on the server.
 - Fault-injection suite (material faults) in CI.
 - Acceptance: injected faults produce yellow/red as specified and never a normal signal on red; a broken run triggers the heartbeat alert.
 
