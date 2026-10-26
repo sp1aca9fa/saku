@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "1509e833-d8c1-458f-9bb7-ca4397fedb56",
+  "id": "3ac4fdfb-54dd-4700-8a77-b58dd4331644",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "activity_log": {
@@ -1006,7 +1006,7 @@
       "checkConstraints": {
         "job_runs_type_check": {
           "name": "job_runs_type_check",
-          "value": "\"job_runs\".\"job_type\" IN ('daily', 'weekly', 'monthly', 'bootstrap')"
+          "value": "\"job_runs\".\"job_type\" IN ('daily', 'weekly', 'monthly', 'bootstrap', 'checks')"
         },
         "job_runs_status_check": {
           "name": "job_runs_status_check",

@@ -26,7 +26,7 @@ export type PluginKind = (typeof PLUGIN_KINDS)[number];
 export const CHECK_LAYERS = ['A', 'B', 'C', 'D', 'E'] as const;
 export type CheckLayer = (typeof CHECK_LAYERS)[number];
 
-export const JOB_TYPES = ['daily', 'weekly', 'monthly', 'bootstrap'] as const;
+export const JOB_TYPES = ['daily', 'weekly', 'monthly', 'bootstrap', 'checks'] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
 export const JOB_STATUSES = ['running', 'success', 'failed'] as const;

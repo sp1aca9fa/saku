@@ -23,6 +23,8 @@ export interface CheckResult {
   observed?: number;
   expected?: number;
   tolerance?: number;
+  /** How far off, in the tolerance's unit (relative or absolute). */
+  deviation?: number;
   message?: string;
 }
 
@@ -183,6 +185,7 @@ export function layerB(primary: RawBar[], secondary: RawBar[], source: string): 
       check: 'close_match',
       date: p.date,
       status: statusB(dev, TOLERANCE.close),
+      deviation: dev,
       observed: s.close,
       expected: p.close,
       tolerance: TOLERANCE.close,
@@ -212,6 +215,7 @@ export function layerB(primary: RawBar[], secondary: RawBar[], source: string): 
         check: ev.check,
         date,
         status: statusB(dev, TOLERANCE.event),
+        ...(Number.isFinite(dev) && { deviation: dev }),
         observed: b,
         expected: a,
         tolerance: TOLERANCE.event,
@@ -256,6 +260,7 @@ export function adjReturnCheck(
       source,
       date,
       status: statusB(dev, TOLERANCE.adjReturn),
+      deviation: dev,
       observed: their,
       expected: our,
       tolerance: TOLERANCE.adjReturn,
@@ -291,6 +296,7 @@ export function leverageCheck(
       check: 'leverage_track',
       date,
       status: streak >= 3 ? 'red' : statusC(dev, tol),
+      deviation: dev,
       observed,
       expected,
       tolerance: tol,
@@ -313,11 +319,13 @@ export function indexCheck(
     if (a === undefined || b === undefined) continue;
     const expected = b / a - 1;
     const observed = priceReturn(fund[i - 1]!, fund[i]!);
+    const dev = Math.abs(observed - expected);
     out.push({
       layer: 'C',
       check: 'index_match',
       date: fund[i]!.date,
-      status: statusC(Math.abs(observed - expected), TOLERANCE.index),
+      status: statusC(dev, TOLERANCE.index),
+      deviation: dev,
       observed,
       expected,
       tolerance: TOLERANCE.index,
@@ -344,6 +352,7 @@ export function fxCheck(
         source,
         date: p.date,
         status: statusB(dev, TOLERANCE.fx),
+        deviation: dev,
         observed: s,
         expected: p.rate,
         tolerance: TOLERANCE.fx,

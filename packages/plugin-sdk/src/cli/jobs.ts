@@ -4,15 +4,17 @@
 //   pnpm daily             once per trading day, at the first check after the day's data is
 //                          final; exits at once when the day is done (the hourly timer calls it)
 //   pnpm daily --force     run again for the latest final day
+//   pnpm checks            layers A-C over the full history (summaries and non-green results)
 import { Sessions } from '@saku/data';
 import { createDb, finishRun, seedSourceRoles, startRun } from '@saku/db';
 import { dbConfigFromEnv, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { PoliteHttp } from '../http';
-import { ingest, type SourceReport } from '../jobs/ingest';
+import { DAILY_OVERLAP, ingest, type SourceReport } from '../jobs/ingest';
 import { lock, readStamp, writeStamp } from '../jobs/lock';
 import { jobLogger } from '../jobs/log';
 import { dailyTarget } from '../jobs/target';
+import { verify } from '../jobs/verify';
 import { allInfos, loadPlugins, pluginContext, savePluginInfos } from '../registry';
 import { assertServerOnly } from '../server-only';
 
@@ -21,8 +23,8 @@ const DATA_KIND = { bar: 'bars', series: 'series', fx: 'fx' } as const;
 assertServerOnly();
 loadRootEnv();
 const job = process.argv[2];
-if (job !== 'bootstrap' && job !== 'daily') {
-  console.error('Usage: pnpm bootstrap | pnpm daily [--force]');
+if (job !== 'bootstrap' && job !== 'daily' && job !== 'checks') {
+  console.error('Usage: pnpm bootstrap | pnpm daily [--force] | pnpm checks');
   process.exit(1);
 }
 const force = process.argv.includes('--force');
@@ -48,7 +50,7 @@ if (job === 'daily' && !force && (readStamp('daily') ?? '') >= target) {
   process.exit(0);
 }
 
-const runId = await startRun(db, job, now);
+const runId = await startRun(db, job === 'checks' ? 'checks' : job, now);
 let ok = false;
 let error: string | undefined;
 let heartbeatSent = false;
@@ -72,22 +74,39 @@ try {
   if (plugins.missing.length > 0) log.info(`Not present: ${plugins.missing.join(', ')}`);
   log.info(`${job} for ${target}`, { runId });
 
-  const reports = await ingest(db, plugins, {
-    mode: job,
-    to: target,
-    sessions,
-    runId,
-    log,
-    context: (info) => pluginContext(info, log),
-  });
-  for (const r of reports)
-    log.info(summary(r), { source: r.source, failed: r.failed, missing: r.missing });
+  let incomplete: string[] = [];
+  if (job !== 'checks') {
+    const reports = await ingest(db, plugins, {
+      mode: job,
+      to: target,
+      sessions,
+      runId,
+      log,
+      context: (info) => pluginContext(info, log),
+    });
+    for (const r of reports) {
+      log.info(summary(r), { source: r.source, failed: r.failed, missing: r.missing });
+    }
+    incomplete = reports.filter((r) => r.stopped || r.failed.length > 0).map((r) => r.source);
+  }
 
-  // A1: the run counts as done when every source answered for every item. Checks and health
-  // (layers A-C) join this step next.
-  const incomplete = reports.filter((r) => r.stopped || r.failed.length > 0);
+  // Checks run whatever the sources did: a missing source is itself a finding.
+  const checked = await verify(db, {
+    runId,
+    sessions,
+    to: target,
+    ...(job === 'daily'
+      ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
+      : { mode: 'full' as const }),
+  });
+  log.info(`Checks: ${checked.results} results`, {
+    byStatus: checked.byStatus,
+    stored: checked.stored,
+  });
+
+  // The run is done when every source answered for every item.
   ok = incomplete.length === 0;
-  if (!ok) error = `incomplete: ${incomplete.map((r) => r.source).join(', ')}`;
+  if (!ok) error = `incomplete: ${incomplete.join(', ')}`;
   if (ok && job === 'daily') {
     writeStamp('daily', target);
     heartbeatSent = await heartbeat();

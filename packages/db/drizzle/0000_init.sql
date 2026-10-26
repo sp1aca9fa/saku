@@ -144,7 +144,7 @@ CREATE TABLE `job_runs` (
 	`dates_processed` text,
 	`error` text,
 	`heartbeat_sent` integer DEFAULT false NOT NULL,
-	CONSTRAINT "job_runs_type_check" CHECK("job_runs"."job_type" IN ('daily', 'weekly', 'monthly', 'bootstrap')),
+	CONSTRAINT "job_runs_type_check" CHECK("job_runs"."job_type" IN ('daily', 'weekly', 'monthly', 'bootstrap', 'checks')),
 	CONSTRAINT "job_runs_status_check" CHECK("job_runs"."status" IN ('running', 'success', 'failed'))
 );
 --> statement-breakpoint

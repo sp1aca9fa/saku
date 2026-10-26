@@ -23,6 +23,7 @@
     "symbols": "pnpm --silent --filter @saku/db symbols",
     "bootstrap": "pnpm --silent --filter @saku/plugin-sdk jobs bootstrap",
     "daily": "pnpm --silent --filter @saku/plugin-sdk jobs daily",
+    "checks": "pnpm --silent --filter @saku/plugin-sdk jobs checks",
     "docs:build": "node scripts/docs-build.mjs",
     "docs:check": "node scripts/docs-build.mjs --check"
   },
