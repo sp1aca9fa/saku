@@ -15,7 +15,7 @@ export interface FixtureContext extends PluginContext {
  */
 export function fixtureContext(
   answer: (url: URL) => unknown,
-  options: { apiKey?: string; now?: Date } = {},
+  options: { apiKey?: string; keys?: Record<string, string>; now?: Date } = {},
 ): FixtureContext {
   const requested: string[] = [];
   const headers: Record<string, string>[] = [];
@@ -33,6 +33,7 @@ export function fixtureContext(
     log: { info: () => {}, warn: () => {} },
     requested,
     headers,
-    ...(options.apiKey ? { apiKey: options.apiKey } : {}),
+    ...(options.apiKey && { apiKey: options.apiKey }),
+    ...(options.keys && { keys: options.keys }),
   };
 }

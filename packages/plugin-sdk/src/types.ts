@@ -22,11 +22,13 @@ export interface PluginInfo {
   provides: { tickers?: string[]; series?: string[]; pairs?: string[]; markets?: string[] };
   suggestedRole: SourceRole;
   limits?: ProviderLimits;
-  /** Environment variable holding the provider key, when one is needed. */
-  keyEnv?: string;
+  /** Environment variable(s) holding the provider's key, when one is needed. */
+  keyEnv?: string | string[];
   termsUrl: string;
   /** The provider's terms forbid giving its data to AI models (left out of MCP and AI exports). */
   noAi?: boolean;
+  /** Tickers, series or pairs treated as `noAi` when the rest of the plug-in's data is not. */
+  noAiItems?: string[];
   /** Not an official API. */
   unofficial?: boolean;
 }
@@ -41,8 +43,10 @@ export interface PluginContext {
   http: PoliteHttp;
   now: Date;
   log: Logger;
-  /** The provider key from the server's `.env`, when the plug-in declares `keyEnv`. */
+  /** The provider key from the server's `.env` (the first `keyEnv`). */
   apiKey?: string;
+  /** Every declared `keyEnv` with its value. */
+  keys?: Record<string, string>;
 }
 
 /** One daily bar as the source sent it. Raw fields only; adjusted values are for checks. */

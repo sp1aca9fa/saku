@@ -1,0 +1,8 @@
+{
+  "ticker": "AAA",
+  "name": "Example Index Fund",
+  "exchangeCode": "NYSE ARCA",
+  "startDate": "1999-03-10",
+  "endDate": "2026-01-06",
+  "description": "A made-up fund."
+}

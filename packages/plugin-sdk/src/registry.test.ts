@@ -50,5 +50,9 @@ describe('plug-in registry', () => {
     const keyed = { ...info, keyEnv: 'EXAMPLE_KEY' };
     expect(pluginContext(keyed, log, { env: { EXAMPLE_KEY: 'k' } }).apiKey).toBe('k');
     expect(() => pluginContext(keyed, log, { env: {} })).toThrow(/EXAMPLE_KEY/);
+    const two = { ...info, keyEnv: ['EXAMPLE_ID', 'EXAMPLE_SECRET'] };
+    expect(() => pluginContext(two, log, { env: { EXAMPLE_ID: 'i' } })).toThrow(/EXAMPLE_SECRET/);
+    const ctx = pluginContext(two, log, { env: { EXAMPLE_ID: 'i', EXAMPLE_SECRET: 's' } });
+    expect(ctx.keys).toEqual({ EXAMPLE_ID: 'i', EXAMPLE_SECRET: 's' });
   });
 });

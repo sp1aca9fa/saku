@@ -85,12 +85,17 @@ export function pluginContext(
   options: { env?: Record<string, string | undefined>; http?: PoliteHttpOptions; now?: Date } = {},
 ): PluginContext {
   const env = options.env ?? process.env;
-  const apiKey = info.keyEnv ? env[info.keyEnv]?.trim() : undefined;
-  if (info.keyEnv && !apiKey) throw new Error(`${info.keyEnv} is not set in .env (${info.name}).`);
+  const names = info.keyEnv === undefined ? [] : [info.keyEnv].flat();
+  const keys: Record<string, string> = {};
+  for (const name of names) {
+    const value = env[name]?.trim();
+    if (!value) throw new Error(`${name} is not set in .env (${info.name}).`);
+    keys[name] = value;
+  }
   return {
     http: new PoliteHttp({ limits: info.limits, ...options.http }),
     now: options.now ?? new Date(),
     log,
-    ...(apiKey ? { apiKey } : {}),
+    ...(names.length > 0 && { apiKey: keys[names[0]!], keys }),
   };
 }

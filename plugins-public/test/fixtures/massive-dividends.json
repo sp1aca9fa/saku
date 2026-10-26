@@ -1,0 +1,20 @@
+{
+  "request_id": "r2",
+  "status": "OK",
+  "results": [
+    {
+      "id": "d1",
+      "ticker": "AAA",
+      "ex_dividend_date": "2026-01-05",
+      "cash_amount": 0.5,
+      "currency": "USD",
+      "frequency": 4,
+      "distribution_type": "recurring",
+      "declaration_date": "2025-12-20",
+      "record_date": "2026-01-05",
+      "pay_date": "2026-01-09",
+      "split_adjusted_cash_amount": 0.25,
+      "historical_adjustment_factor": 0.995
+    }
+  ]
+}

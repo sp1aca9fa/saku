@@ -1,0 +1,15 @@
+{
+  "request_id": "r3",
+  "status": "OK",
+  "results": [
+    {
+      "id": "s1",
+      "ticker": "AAA",
+      "execution_date": "2026-01-06",
+      "split_from": 1,
+      "split_to": 2,
+      "adjustment_type": "forward_split",
+      "historical_adjustment_factor": 0.5
+    }
+  ]
+}
