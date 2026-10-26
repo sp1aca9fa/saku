@@ -113,7 +113,7 @@ flowchart TD
 
 SQLite through Drizzle. Prices and returns as `real` (float64); money, tax and quota amounts as decimal `text` with a currency column; trading dates as `text` (`YYYY-MM-DD`, America/New_York); timestamps as ISO 8601 `text`. Enum columns with CHECK constraints. Migrations add first and drop in a later migration.
 
-Stage A tables:
+Stage A tables (A1 creates the market data, auth, settings and operations tables; `issuer_records` comes with A3 and the strategy, forward record, journal and channel tables with A2):
 
 | Table | Key columns | Notes |
 |---|---|---|
@@ -130,8 +130,8 @@ Stage A tables:
 | `bar_revisions` | id, symbol_id, date, source, field, old_value, new_value, detected_at, run_id | Raw fields only |
 | `readjustments` | id, symbol_id, source, from_date, to_date, factor, detected_at, run_id | One row per provider re-adjustment of adjusted values |
 | `issuer_records` | symbol_id, date, nav, distribution_amount, ex_date, split_ratio, source_url, fetched_at | Best effort |
-| `fx_rates` | pair, date, source, kind (valuation, tax_ttm/tts/ttb), rate, fetched_at; PK (pair, date, source, kind) | Valuation vs tax rates kept separate |
-| `series` | series, date, value, source, published_at | Rates, index, later macro; `published_at` serves `asOf` |
+| `fx_rates` | pair, date, source, kind (valuation, tax_mid, tax_buy, tax_sell), rate, published_at, fetched_at; PK (pair, date, source, kind, fetched_at) | Valuation vs tax rates kept separate; generic tax kinds, each regime maps its names (TTM/TTS/TTB) onto them. A changed value is a new row (vintage), so `asOf` returns what was known at any moment |
+| `series` | series, date, value, source, published_at, fetched_at; PK (series, date, source, fetched_at) | Rates, index, later macro; kept by vintage like `fx_rates`; `published_at` (else `fetched_at`) serves `asOf` |
 | `check_results` | id, run_id, layer, check_name, symbol_id, date, status, observed, expected, tolerance, message | Daily: all; weekly full history: non-green only |
 | `check_summaries` | run_id, layer, check_name, checked, passed, max_deviation | Weekly full-history passes |
 | `data_health` | date, symbol_id (null = overall), status, reasons, run_id | |
