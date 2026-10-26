@@ -1,0 +1,19 @@
+# Copy to /etc/systemd/system/ and replace <user> (see docs/setup.md).
+[Unit]
+Description=Saku hourly check: finalization probe, then the daily job when the day is due
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=<user>
+WorkingDirectory=/home/<user>/code/saku
+Environment=PATH=/home/<user>/.local/share/saku/node/bin:/usr/bin:/bin
+Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# Lower priority and a CPU cap, so other apps on the machine stay responsive.
+Nice=10
+CPUQuota=150%
+# The probe is a measurement: its failure never stops the daily job.
+ExecStart=-/home/<user>/.local/share/saku/node/bin/pnpm probe
+ExecStart=/home/<user>/.local/share/saku/node/bin/pnpm daily
+TimeoutStartSec=2h
