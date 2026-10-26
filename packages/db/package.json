@@ -20,9 +20,11 @@
     "@libsql/client": "^0.18.0",
     "@saku/auth": "workspace:*",
     "@saku/core": "workspace:*",
-    "drizzle-orm": "^0.45.4"
+    "drizzle-orm": "^0.45.4",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.6",
     "drizzle-kit": "^0.31.11"
   }
 }

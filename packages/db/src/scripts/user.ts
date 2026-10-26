@@ -1,7 +1,7 @@
 // `pnpm user <command>`: account management from the server (there is no sign-up page).
 //
 //   pnpm user list
-//   pnpm user create <username> [--admin]   password + authenticator + backup codes
+//   pnpm user create <username> [--admin]   password + authenticator (QR code) + backup codes
 //
 // AUTH_SECRET in .env must equal the app's: it encrypts the authenticator secrets.
 import {
@@ -14,6 +14,7 @@ import {
   verifyTotp,
 } from '@saku/auth';
 import { createInterface } from 'node:readline/promises';
+import QRCode from 'qrcode';
 import { createDb } from '../client';
 import { dbConfigFromEnv, loadRootEnv } from '../env';
 import { exitIfUnmigrated } from '../migrate';
@@ -76,9 +77,11 @@ async function askPassword(): Promise<string> {
 /** Requires one valid code before saving, so a mistyped key cannot lock the account out. */
 async function enrollAuthenticator(username: string) {
   const secret = generateTotpSecret();
-  console.log('\nAdd this key to your authenticator app (Google Authenticator, 1Password, ...):');
-  console.log(`  ${secret.match(/.{1,4}/g)!.join(' ')}`);
-  console.log(`Or open this link on the phone: ${otpauthUri(secret, username)}\n`);
+  const uri = otpauthUri(secret, username);
+  console.log('\nScan with your authenticator app (Google Authenticator, 1Password, ...):\n');
+  console.log(await QRCode.toString(uri, { type: 'terminal', small: true }));
+  console.log('Or add this key to the app by hand:');
+  console.log(`  ${secret.match(/.{1,4}/g)!.join(' ')}\n`);
   for (let attempt = 1; ; attempt++) {
     const code = await prompt('Enter the 6-digit code the app shows: ');
     const step = verifyTotp(secret, code);
