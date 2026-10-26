@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b9f0469a-36bc-4ad5-b29c-1e9ede9615a7",
+  "id": "c9863c4e-0080-4be7-97dd-0998b062622b",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "activity_log": {
@@ -890,20 +890,28 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "known_at": {
+          "name": "known_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
         }
       },
       "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {
-        "fx_rates_pair_date_source_kind_fetched_at_pk": {
+        "fx_rates_pair_kind_date_source_known_at_fetched_at_pk": {
           "columns": [
             "pair",
+            "kind",
             "date",
             "source",
-            "kind",
+            "known_at",
             "fetched_at"
           ],
-          "name": "fx_rates_pair_date_source_kind_fetched_at_pk"
+          "name": "fx_rates_pair_kind_date_source_known_at_fetched_at_pk"
         }
       },
       "uniqueConstraints": {},
@@ -1325,19 +1333,27 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "known_at": {
+          "name": "known_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
         }
       },
       "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {
-        "series_series_date_source_fetched_at_pk": {
+        "series_series_date_source_known_at_fetched_at_pk": {
           "columns": [
             "series",
             "date",
             "source",
+            "known_at",
             "fetched_at"
           ],
-          "name": "series_series_date_source_fetched_at_pk"
+          "name": "series_series_date_source_known_at_fetched_at_pk"
         }
       },
       "uniqueConstraints": {},

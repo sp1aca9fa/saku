@@ -287,8 +287,8 @@ export const readjustments = sqliteTable(
 
 /**
  * Exchange rates. A changed value for a date is a new row (the old one stays), so `asOf` can
- * return what was known at any moment: a value counts from `published_at`, or from `fetched_at`
- * when the source does not say when it was published.
+ * return what was known at any moment: `known_at` is when the source published the value, or
+ * when we fetched it if the source does not say.
  */
 export const fxRates = sqliteTable(
   'fx_rates',
@@ -300,9 +300,10 @@ export const fxRates = sqliteTable(
     rate: real('rate').notNull(),
     publishedAt: text('published_at'),
     fetchedAt: text('fetched_at').notNull(),
+    knownAt: text('known_at').notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.pair, t.date, t.source, t.kind, t.fetchedAt] }),
+    primaryKey({ columns: [t.pair, t.kind, t.date, t.source, t.knownAt, t.fetchedAt] }),
     check('fx_rates_kind_check', oneOf(t.kind, FX_KINDS)),
   ],
 );
@@ -317,8 +318,9 @@ export const series = sqliteTable(
     value: real('value').notNull(),
     publishedAt: text('published_at'),
     fetchedAt: text('fetched_at').notNull(),
+    knownAt: text('known_at').notNull(),
   },
-  (t) => [primaryKey({ columns: [t.series, t.date, t.source, t.fetchedAt] })],
+  (t) => [primaryKey({ columns: [t.series, t.date, t.source, t.knownAt, t.fetchedAt] })],
 );
 
 // ---------------------------------------------------------------------------------------------

@@ -1,0 +1,16 @@
+{
+  "name": "@saku/data",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@saku/core": "workspace:*",
+    "@saku/plugin-sdk": "workspace:*"
+  }
+}

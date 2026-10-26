@@ -207,6 +207,15 @@ importers:
 
   packages/core: {}
 
+  packages/data:
+    dependencies:
+      '@saku/core':
+        specifier: workspace:*
+        version: link:../core
+      '@saku/plugin-sdk':
+        specifier: workspace:*
+        version: link:../plugin-sdk
+
   packages/db:
     dependencies:
       '@libsql/client':

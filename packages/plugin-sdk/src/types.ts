@@ -1,7 +1,9 @@
 // Plug-in contracts (requirements 15, system design section 6). A plug-in package exports one
 // array per kind from `src/index.ts`, only the kinds it has.
-import type { PluginKind, SourceRole, TradingDate } from '@saku/core';
+import type { FxRate, PluginKind, RawBar, SeriesPoint, SourceRole, TradingDate } from '@saku/core';
 import type { PoliteHttp } from './http';
+
+export type { FxRate, RawBar, SeriesPoint };
 
 /** A provider's limits as its terms state them. The HTTP client stays under 80% of each. */
 export interface ProviderLimits {
@@ -49,27 +51,6 @@ export interface PluginContext {
   keys?: Record<string, string>;
 }
 
-/** One daily bar as the source sent it. Raw fields only; adjusted values are for checks. */
-export interface RawBar {
-  date: TradingDate;
-  open?: number;
-  high?: number;
-  low?: number;
-  close: number;
-  /**
-   * The source's prices, volume and dividend amount are split-adjusted (on today's share basis);
-   * core un-splits them before comparing.
-   */
-  closeIsSplitAdjusted: boolean;
-  volume?: number;
-  /** Cash dividend going ex on this date, per share (0 when none). */
-  divCash: number;
-  /** Split ratio effective on this date (2 for a 2-for-1 split, 1 when none). */
-  splitFactor: number;
-  /** The provider's adjusted close, if it publishes one. */
-  providerAdjClose?: number;
-}
-
 export interface TickerMeta {
   ticker: string;
   name?: string;
@@ -89,13 +70,6 @@ export interface BarSource {
   fetchMeta?(ticker: string, ctx: PluginContext): Promise<TickerMeta>;
 }
 
-export interface SeriesPoint {
-  date: TradingDate;
-  value: number;
-  /** When the source published this value, if it says (ISO 8601). */
-  publishedAt?: string;
-}
-
 export interface SeriesSource {
   info: PluginInfo;
   fetchSeries(
@@ -104,14 +78,6 @@ export interface SeriesSource {
     to: TradingDate,
     ctx: PluginContext,
   ): Promise<SeriesPoint[]>;
-}
-
-export interface FxRate {
-  /** Base then quote currency, e.g. `USDXXX` = units of XXX per USD. */
-  pair: string;
-  date: TradingDate;
-  rate: number;
-  publishedAt?: string;
 }
 
 export interface FxSource {

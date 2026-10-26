@@ -129,7 +129,8 @@ CREATE TABLE `fx_rates` (
 	`rate` real NOT NULL,
 	`published_at` text,
 	`fetched_at` text NOT NULL,
-	PRIMARY KEY(`pair`, `date`, `source`, `kind`, `fetched_at`),
+	`known_at` text NOT NULL,
+	PRIMARY KEY(`pair`, `kind`, `date`, `source`, `known_at`, `fetched_at`),
 	CONSTRAINT "fx_rates_kind_check" CHECK("fx_rates"."kind" IN ('valuation', 'tax_mid', 'tax_buy', 'tax_sell'))
 );
 --> statement-breakpoint
@@ -198,7 +199,8 @@ CREATE TABLE `series` (
 	`value` real NOT NULL,
 	`published_at` text,
 	`fetched_at` text NOT NULL,
-	PRIMARY KEY(`series`, `date`, `source`, `fetched_at`)
+	`known_at` text NOT NULL,
+	PRIMARY KEY(`series`, `date`, `source`, `known_at`, `fetched_at`)
 );
 --> statement-breakpoint
 CREATE TABLE `source_roles` (

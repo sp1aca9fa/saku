@@ -54,3 +54,41 @@ export type RawBarField = (typeof RAW_BAR_FIELDS)[number];
 
 export const QUOTA_WINDOWS = ['minute', 'hour', 'day', 'month'] as const;
 export type QuotaWindow = (typeof QUOTA_WINDOWS)[number];
+
+// Data as sources deliver it (plug-in contracts, requirements 15).
+
+/** One daily bar as the source sent it. Raw fields only; adjusted values are for checks. */
+export interface RawBar {
+  date: TradingDate;
+  open?: number;
+  high?: number;
+  low?: number;
+  close: number;
+  /**
+   * The source's prices, volume and dividend amount are split-adjusted (on today's share basis);
+   * core un-splits them before comparing.
+   */
+  closeIsSplitAdjusted: boolean;
+  volume?: number;
+  /** Cash dividend going ex on this date, per share (0 when none). */
+  divCash: number;
+  /** Split ratio effective on this date (2 for a 2-for-1 split, 1 when none). */
+  splitFactor: number;
+  /** The provider's adjusted close, if it publishes one. */
+  providerAdjClose?: number;
+}
+
+export interface SeriesPoint {
+  date: TradingDate;
+  value: number;
+  /** When the source published this value, if it says (ISO 8601). */
+  publishedAt?: string;
+}
+
+export interface FxRate {
+  /** Base then quote currency, e.g. `USDXXX` = units of XXX per USD. */
+  pair: string;
+  date: TradingDate;
+  rate: number;
+  publishedAt?: string;
+}

@@ -39,8 +39,18 @@ describe('database', () => {
       source: 'example',
       kind: 'valuation',
     } as const;
-    await db.insert(fxRates).values({ ...rate, rate: 100, fetchedAt: '2026-01-02T16:00:00Z' });
-    await db.insert(fxRates).values({ ...rate, rate: 101, fetchedAt: '2026-01-03T16:00:00Z' });
+    await db.insert(fxRates).values({
+      ...rate,
+      rate: 100,
+      fetchedAt: '2026-01-02T16:00:00Z',
+      knownAt: '2026-01-02T16:00:00Z',
+    });
+    await db.insert(fxRates).values({
+      ...rate,
+      rate: 101,
+      fetchedAt: '2026-01-03T16:00:00Z',
+      knownAt: '2026-01-03T16:00:00Z',
+    });
     const rows = await db.select().from(fxRates).where(eq(fxRates.pair, 'USDXXX'));
     expect(rows.map((r) => r.rate)).toEqual([100, 101]);
   });
