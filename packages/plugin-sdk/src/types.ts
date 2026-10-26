@@ -56,7 +56,10 @@ export interface RawBar {
   high?: number;
   low?: number;
   close: number;
-  /** The close is already split-adjusted by the source (it is un-split before comparing). */
+  /**
+   * The source's prices, volume and dividend amount are split-adjusted (on today's share basis);
+   * core un-splits them before comparing.
+   */
   closeIsSplitAdjusted: boolean;
   volume?: number;
   /** Cash dividend going ex on this date, per share (0 when none). */

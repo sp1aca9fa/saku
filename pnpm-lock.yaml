@@ -169,6 +169,15 @@ importers:
       '@eslint/js':
         specifier: ^9.39.5
         version: 9.39.5
+      '@saku/core':
+        specifier: workspace:*
+        version: link:packages/core
+      '@saku/db':
+        specifier: workspace:*
+        version: link:packages/db
+      '@saku/plugin-sdk':
+        specifier: workspace:*
+        version: link:packages/plugin-sdk
       '@types/node':
         specifier: ^24.19.1
         version: 24.19.2
@@ -190,6 +199,9 @@ importers:
       vitest:
         specifier: ^5.0.3
         version: 5.0.5(@types/node@24.19.2)(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.2)(tsx@4.23.15))
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.7
 
   packages/auth: {}
 

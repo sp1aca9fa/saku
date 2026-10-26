@@ -11,7 +11,7 @@
     "build": "pnpm -r --if-present build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm -r typecheck && node scripts/typecheck-plugins.mjs",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -24,12 +24,16 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "@saku/core": "workspace:*",
+    "@saku/db": "workspace:*",
+    "@saku/plugin-sdk": "workspace:*",
     "@types/node": "^24.19.1",
     "eslint": "^9.39.5",
     "prettier": "^3.9.9",
     "tsx": "^4.23.15",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.71.1",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.3",
+    "zod": "^4.6.5"
   }
 }
