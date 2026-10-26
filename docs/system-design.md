@@ -126,8 +126,9 @@ Stage A tables:
 | `source_roles` | data_kind, plugin_key, role, position | Admin's choice |
 | `symbols` | id, ticker, tier, asset_class, leverage_factor, underlying_symbol_id, issuer, inception_date, active | Leverage and underlying drive layer C |
 | `bars_raw` | symbol_id, date, source, open, high, low, close, close_is_split_adjusted, volume, div_cash, split_factor, provider_adj_close, fetched_at; PK (symbol_id, date, source) | Never deleted |
-| `bars` | symbol_id, date, open, high, low, close (unadjusted), volume, div_cash, split_factor, adj_close (ours), source, stand_in, status; PK (symbol_id, date) | Canonical |
-| `bar_revisions` | id, symbol_id, date, source, field, old_value, new_value, detected_at, run_id | Item 6 open: provider re-adjustments |
+| `bars` | symbol_id, date, open, high, low, close (unadjusted), volume, div_cash, split_factor, adj_close (ours: forward-accumulated total-return index), source, stand_in, status; PK (symbol_id, date) | Canonical |
+| `bar_revisions` | id, symbol_id, date, source, field, old_value, new_value, detected_at, run_id | Raw fields only |
+| `readjustments` | id, symbol_id, source, from_date, to_date, factor, detected_at, run_id | One row per provider re-adjustment of adjusted values |
 | `issuer_records` | symbol_id, date, nav, distribution_amount, ex_date, split_ratio, source_url, fetched_at | Best effort |
 | `fx_rates` | pair, date, source, kind (valuation, tax_ttm/tts/ttb), rate, fetched_at; PK (pair, date, source, kind) | Valuation vs tax rates kept separate |
 | `series` | series, date, value, source, published_at | Rates, index, later macro; `published_at` serves `asOf` |
@@ -224,8 +225,10 @@ No sign-up; password + TOTP + backup codes; 2 devices per account; lockout; auth
 New ADRs go to `docs/adr/`.
 
 ## 15. Open items for Stage A
-- Item 6 (`docs/pre-build-issues.md`): revision log for provider re-adjustments; forward-accumulated adjusted series.
-- Data finalization times per bar source; secondary availability over 20 trading days; Alpaca and Massive coverage, limits and terms (`noAi`).
+- Data finalization times per bar source; secondary availability over 20 trading days.
+- Alpaca: free consolidated daily bars since 2016, 200 calls/min; corporate actions coverage; whether a paper-only account is open to residents of Japan.
+- Massive (formerly Polygon): free end-of-day, 2 years, 5 calls/min, individual use; whether the grouped daily endpoint is on the free plan.
+- Each provider's terms on giving data to AI models (`noAi`); Tiingo runs its own MCP server for AI agents, but its terms decide.
 - ECB rate timing and USD/JPY cross derivation details.
 - Issuer data availability per Tier 0 ETF.
 - Which RFC 3161 authorities (terms, availability).

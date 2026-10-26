@@ -37,7 +37,7 @@ No indicators, signals or derived series are imported.
 ## Import schedule
 - **Bootstrap:** full history from all sources.
 - **Daily:** an hourly timer on the server runs the daily job **once per trading day**, at the first check after the day's data is final (time measured in A1). It fetches the last 10 trading days for every ticker in use (the overlap catches late corrections), issuer data, FX and rates. A run that did not finish is retried at the next check; data still missing stays `pending` and is retried. Catch-up covers every unprocessed trading day (e.g. after the server was off).
-- **Upserts** go through a **revision log** (old value, new value, source, time); stored data is never silently overwritten. *(Open, item 6 of `docs/pre-build-issues.md`: how provider re-adjustments of adjusted values are logged, and whether our adjusted series is a forward-accumulated total-return index.)*
+- **Upserts** go through a **revision log** (old value, new value, source, time); stored data is never silently overwritten. The log covers raw fields only (open, high, low, unadjusted close, volume, dividend, split). Provider-adjusted values (Tiingo `adjClose`, Yahoo split-adjusted closes), which providers rewrite for the whole history after every dividend or split, keep the latest snapshot plus one **re-adjustment event** per refetch (source, date range, implied factor); they are used only for return comparisons, which a rescaling does not change.
 - **Weekly:** full-history refetch and diff; changes go to the revision log and trigger recomputation.
 - **Retries:** through the plug-in SDK's HTTP client (backoff, per-source caps). A source that refuses (403, 429) is stopped for the run.
 - **Calendars:** NYSE holidays and half-days, bond-market holidays and ECB (TARGET) holidays from versioned static tables.
@@ -51,7 +51,7 @@ No indicators, signals or derived series are imported.
 - Assumption: daily cash accrual and synthetic leverage cost use the last published `DTB3` (one-day lag).
 
 ## What is calculated
-Adjusted (total-return) series from raw close, dividends and splits; daily returns; daily cash returns (USD and base currency); synthetic leverage; base-currency series; indicators (06); signals; allocations; equity curves; tax (07); metrics; statistics (09).
+Adjusted series: a **forward-accumulated total-return index** from raw close, dividends and splits (1.0 on the first date; a new dividend never changes past values, so incremental and full recomputation match exactly and signals on total-return series are unaffected, since they compare values of the same series); daily returns; daily cash returns (USD and base currency); synthetic leverage; base-currency series; indicators (06); signals; allocations; equity curves; tax (07); metrics; statistics (09).
 
 ## Verification layers
 | Layer | Check | Default tolerance | Frequency |

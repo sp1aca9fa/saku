@@ -201,7 +201,7 @@ No indicators, signals or derived series are imported.
 ## Import schedule
 - **Bootstrap:** full history from all sources.
 - **Daily:** an hourly timer on the server runs the daily job **once per trading day**, at the first check after the day's data is final (time measured in A1). It fetches the last 10 trading days for every ticker in use (the overlap catches late corrections), issuer data, FX and rates. A run that did not finish is retried at the next check; data still missing stays `pending` and is retried. Catch-up covers every unprocessed trading day (e.g. after the server was off).
-- **Upserts** go through a **revision log** (old value, new value, source, time); stored data is never silently overwritten. *(Open, item 6 of `docs/pre-build-issues.md`: how provider re-adjustments of adjusted values are logged, and whether our adjusted series is a forward-accumulated total-return index.)*
+- **Upserts** go through a **revision log** (old value, new value, source, time); stored data is never silently overwritten. The log covers raw fields only (open, high, low, unadjusted close, volume, dividend, split). Provider-adjusted values (Tiingo `adjClose`, Yahoo split-adjusted closes), which providers rewrite for the whole history after every dividend or split, keep the latest snapshot plus one **re-adjustment event** per refetch (source, date range, implied factor); they are used only for return comparisons, which a rescaling does not change.
 - **Weekly:** full-history refetch and diff; changes go to the revision log and trigger recomputation.
 - **Retries:** through the plug-in SDK's HTTP client (backoff, per-source caps). A source that refuses (403, 429) is stopped for the run.
 - **Calendars:** NYSE holidays and half-days, bond-market holidays and ECB (TARGET) holidays from versioned static tables.
@@ -215,7 +215,7 @@ No indicators, signals or derived series are imported.
 - Assumption: daily cash accrual and synthetic leverage cost use the last published `DTB3` (one-day lag).
 
 ## What is calculated
-Adjusted (total-return) series from raw close, dividends and splits; daily returns; daily cash returns (USD and base currency); synthetic leverage; base-currency series; indicators (06); signals; allocations; equity curves; tax (07); metrics; statistics (09).
+Adjusted series: a **forward-accumulated total-return index** from raw close, dividends and splits (1.0 on the first date; a new dividend never changes past values, so incremental and full recomputation match exactly and signals on total-return series are unaffected, since they compare values of the same series); daily returns; daily cash returns (USD and base currency); synthetic leverage; base-currency series; indicators (06); signals; allocations; equity curves; tax (07); metrics; statistics (09).
 
 ## Verification layers
 | Layer | Check | Default tolerance | Frequency |
@@ -568,7 +568,7 @@ Dependencies must be compatible with PolyForm Noncommercial (MIT, Apache 2.0, BS
 
 ## Accounts and access
 - A few accounts per install, one or more admins. **No sign-up page.** The first account (an admin) is made from the CLI: `pnpm user create <username>`. Afterwards admins manage accounts in Settings > Admin > Accounts (create, reset password or authenticator, revoke devices, disable), each task confirmed with the admin's own authenticator code; a new account or reset gives a one-time setup link (24 hours).
-- Sign-in: username + password + authenticator code (TOTP), or one of 8 one-time backup codes. **At most 2 devices per account**; a third is refused until one is revoked. Lockout: 5 failures per IP per 15 min, 10 per username per hour, 50 overall per hour.
+- Sign-in: username + password + authenticator code (TOTP), or one of 8 one-time backup codes. **At most 2 devices per account**; a third is refused until one is revoked. While both slots are taken, a sign-in is refused before the password is checked, with the same message as a wrong password: a third device learns nothing (not even whether the password was right) and never reaches the authenticator step. The attempt still counts toward lockout. Lockout: 5 failures per IP per 15 min, 10 per username per hour, 50 overall per hour.
 - Authorization is checked in every server action and route handler (never only in middleware), and every query on a user table is scoped by `owner_id`. Tests call each server action as the wrong user.
 - **Demo account:** a normal account (same sign-in and device rules) filled with sample strategies, positions and journal entries by `pnpm demo <username>` (only accounts named `demo*` are touched), on the install's real market data. Used to show the app to someone.
 
@@ -673,6 +673,7 @@ Market data and testfol daily equity curves are never committed to the public re
 - 2026-10-26 (Tora model): Fully country- and person-agnostic. Data sources, tax regimes (account types, quotas, tax rules, FX convention), calendars and event sources are plug-ins with typed contracts, public (official APIs) or private (git submodule `saku-private` at `plugins/`); base currency, time zone, languages, universe, benchmarks, broker costs and deposit rate are admin settings. Accounts and tax data are per user. Japan (NISA + 特定口座) is the first regime plug-in. Hosted options (Vercel + Turso) not supported in v1.
 - 2026-10-26 (Tora model): Languages: code, database and docs in US English; `en.json` is the base, other files may be partial and fall back to English; the admin picks any two languages (neither need be English); the coverage gate checks the languages the owner's install uses (EN, JA) from D1.
 - 2026-10-26 (pre-build review): Secondary bar sources: evaluate Alpaca and Massive (official, free) in A1 alongside Yahoo (private, unofficial, full history). Automatic stand-in rule when the primary is missing (decision-margin test, max 2 days, later comparison and annotation). Point-in-time rates and FX through one shared `asOf` function; expected holiday gaps green. Weekly full-history check passes stored as summaries plus non-green rows. Hashes over RFC 8785 canonical JSON with the hashed text stored; daily RFC 3161 timestamps. A1 runs 20 trading days with a pre-registered gate (≥ 95% secondary availability); A2 development allowed during A1's window without registration. Fault-injection target scoped to "all sources available"; single-source days never green. Real-data tests run on the server (`pnpm verify`); public fixtures are synthetic.
+- 2026-10-26: Revision log covers raw fields only; provider re-adjustments of adjusted values are one event per refetch. Our adjusted series is a forward-accumulated total-return index (history never rewritten). With both device slots taken, sign-in is refused before the password is checked, with the wrong-password message.
 <!-- split: docs/requirements/15-plugins.md -->
 # 15. Plug-ins
 
