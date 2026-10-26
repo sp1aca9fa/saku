@@ -124,16 +124,16 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `user_settings` | owner_id, example_amount, defaults (json) | Per user |
 | `plugin_info` | key, kind, description (json), saved_at | Written by each job run |
 | `source_roles` | data_kind, plugin_key, role, position | Admin's choice |
-| `symbols` | id, ticker, tier, asset_class, leverage_factor, underlying_symbol_id, issuer, inception_date, active | Leverage and underlying drive layer C |
+| `symbols` | id, ticker, tier, asset_class, leverage_factor, underlying_symbol_id, index_series, issuer, inception_date, active | Leverage, underlying and index series drive layer C |
 | `bars_raw` | symbol_id, date, source, open, high, low, close, close_is_split_adjusted, volume, div_cash, split_factor, provider_adj_close, fetched_at; PK (symbol_id, date, source) | Never deleted |
 | `bars` | symbol_id, date, open, high, low, close (unadjusted), volume, div_cash, split_factor, adj_close (ours: forward-accumulated total-return index), source, stand_in, status; PK (symbol_id, date) | Canonical |
 | `bar_revisions` | id, symbol_id, date, source, field, old_value, new_value, detected_at, run_id | Raw fields only |
 | `readjustments` | id, symbol_id, source, from_date, to_date, factor, detected_at, run_id | One row per provider re-adjustment of adjusted values |
 | `issuer_records` | symbol_id, date, nav, distribution_amount, ex_date, split_ratio, source_url, fetched_at | Best effort |
-| `fx_rates` | pair, date, source, kind (valuation, tax_mid, tax_buy, tax_sell), rate, published_at, fetched_at; PK (pair, date, source, kind, fetched_at) | Valuation vs tax rates kept separate; generic tax kinds, each regime maps its names (TTM/TTS/TTB) onto them. A changed value is a new row (vintage), so `asOf` returns what was known at any moment |
-| `series` | series, date, value, source, published_at, fetched_at; PK (series, date, source, fetched_at) | Rates, index, later macro; kept by vintage like `fx_rates`; `published_at` (else `fetched_at`) serves `asOf` |
-| `check_results` | id, run_id, layer, check_name, symbol_id, date, status, observed, expected, tolerance, message | Daily: all; weekly full history: non-green only |
-| `check_summaries` | run_id, layer, check_name, checked, passed, max_deviation | Weekly full-history passes |
+| `fx_rates` | pair, date, source, kind (valuation, tax_mid, tax_buy, tax_sell), rate, published_at, known_at, fetched_at; PK (pair, kind, date, source, known_at, fetched_at) | Valuation vs tax rates kept separate; generic tax kinds, each regime maps its names (TTM/TTS/TTB) onto them. A new value for a date and publication time is a new row (vintage); `known_at` = `published_at`, else `fetched_at`, so `asOf` returns what was known at any moment |
+| `series` | series, date, value, source, published_at, known_at, fetched_at; PK (series, date, source, known_at, fetched_at) | Rates, index, later macro; kept by vintage like `fx_rates`; `known_at` serves `asOf` |
+| `check_results` | id, run_id, layer, check_name, symbol_id, source, date, status, observed, expected, tolerance, message | Daily: all in the window; full-history passes (bootstrap, `checks`, weekly): non-green only |
+| `check_summaries` | run_id, layer, check_name, checked, passed, max_deviation | Full-history passes |
 | `data_health` | date, symbol_id (null = overall), status, reasons, run_id | |
 | `strategies` | id, owner_id, name, yaml, status (draft), updated_at | Drafts: no forward record |
 | `strategy_versions` | id, owner_id (null = library), strategy_id, canonical_json, registered_at, hash | Immutable |
@@ -141,7 +141,7 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `chain_anchors` | id, chain_head_hash, anchored_at, method (rfc3161), authority, proof | |
 | `journal_entries` | owner_id, version_id, signal_date, action (done/skipped/delayed), action_date, note | CLI in A2, UI in D1 |
 | `notification_channels` | id, owner_id, type (discord, telegram), target (encrypted), enabled | Per user; admin channels flagged |
-| `job_runs` | id, job_type, started_at, finished_at, status, dates_processed, error, heartbeat_sent | |
+| `job_runs` | id, job_type (daily, weekly, monthly, bootstrap, checks), started_at, finished_at, status, dates_processed, error, heartbeat_sent | |
 | `provider_usage` | provider, window_type, window_start, request_count, unique_symbols | Quota guard |
 | `activity_log` | id, at, actor, action, detail | Admin tasks, updates, resets |
 
