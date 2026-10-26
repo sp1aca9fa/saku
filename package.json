@@ -1,0 +1,13 @@
+{
+  "name": "saku",
+  "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "docs:build": "node scripts/docs-build.mjs",
+    "docs:check": "node scripts/docs-build.mjs --check"
+  }
+}

@@ -1,0 +1,10 @@
+# 14. Decisions log
+
+- 2026-09-28: TypeScript/Node/React monorepo; Supabase; Vercel; GitHub Actions; Discord first; BYOK.
+- 2026-09-30: PolyForm Noncommercial 1.0.0; MCP read-only first.
+- 2026-10-04: Tier 0 SPY-centric universe; indicators computed locally; tiered asset expansion; beginner-first UX.
+- 2026-10-06: Five pillars; tiered and pillar targets; process; issuer reconciliation, reference implementation, fault injection; macro tier; volatility targeting, ensembles, filtered fallbacks; NISA and 特定口座 with tax engine; decision cards; stages A-F; key-day alerts after v1; no intraday.
+- 2026-10-07: Name Saku. Full EN/JA requirement explicit. Next.js kept.
+- 2026-10-07 (external review): single owner per instance (hosted portfolio demo, self-hostable); targets apply to a strategy slice, median rolling 5-year window, vs S&P 500 in NISA after tax, with evidence file; declared safe state on red data; next-day execution default (same-close only for parity); ECB daily FX, FRED as weekly confirmation, broker-style FX for tax; USD vs JPY cash; Yahoo un-splitting and return-based comparisons; volatility-scaled layer C; severity rules; near-tie rule; reference implementation for core math only, external golden values emphasized; issuer data best effort, not a gate; A1 run ≥ 10 calendar days; thin slice (A2) to start forward records early; draft vs registered versions; tamper-evident hash chain; deflated Sharpe and backtest-overfitting probability; pre-registered score validation; block-bootstrap Monte Carlo; library 10-15 families; finder ranked on long-run robustness; parameter ensembles by default; discipline journal in v1; NISA opt-in with quota enforcement, timing strategies in 特定口座; Japan tax optimization added (F4); whole-share handling; heavy compute off Vercel; usability test 3-5 users; translation CI gate from D1; owner notes outside the repo.
+- 2026-10-26: Multi-user-ready data model (owner_id + RLS on user-owned tables, per-user notification channels) while staying single owner; provider keys instance-level since market data is shared.
+
