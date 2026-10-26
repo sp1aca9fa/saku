@@ -60,6 +60,7 @@ export const massive: BarSource = {
     provides: { markets: ['US'] },
     suggestedRole: 'secondary',
     limits: { perMinute: 5 },
+    history: { years: 2 },
     keyEnv: 'MASSIVE_API_KEY',
     termsUrl: 'https://massive.com/legal/individuals-terms-of-service',
     // Market Data Terms not yet read for AI use (docs/data-spike.md).

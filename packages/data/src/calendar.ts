@@ -1,5 +1,4 @@
-import type { TradingDate } from '@saku/core';
-import type { Calendar } from '@saku/plugin-sdk';
+import type { Calendar, TradingDate } from '@saku/core';
 
 const DAY = 86_400_000;
 const toMs = (date: TradingDate) => Date.parse(`${date}T00:00:00Z`);

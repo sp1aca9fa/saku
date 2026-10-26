@@ -39,6 +39,8 @@ export const ecb: FxSource = {
     termsUrl: 'https://www.ecb.europa.eu/services/using-our-site/disclaimer/html/index.en.html',
   },
 
+  supports: (pair) => /^[A-Z]{6}$/.test(pair) && pair.slice(0, 3) !== pair.slice(3),
+
   async fetchRates(pair, from, to, ctx) {
     const base = pair.slice(0, 3);
     const quote = pair.slice(3);

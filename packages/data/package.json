@@ -10,7 +10,6 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "@saku/core": "workspace:*",
-    "@saku/plugin-sdk": "workspace:*"
+    "@saku/core": "workspace:*"
   }
 }

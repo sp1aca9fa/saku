@@ -84,6 +84,7 @@ export const fredFx: FxSource = {
     provides: { pairs: Object.keys(FRED_FX) },
     suggestedRole: 'secondary',
   },
+  supports: (pair) => Object.hasOwn(FRED_FX, pair),
   async fetchRates(pair, from, to, ctx) {
     const map = FRED_FX[pair];
     if (!map) throw new Error(`FRED has no H.10 series for ${pair}`);

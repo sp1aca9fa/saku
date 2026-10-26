@@ -212,9 +212,6 @@ importers:
       '@saku/core':
         specifier: workspace:*
         version: link:../core
-      '@saku/plugin-sdk':
-        specifier: workspace:*
-        version: link:../plugin-sdk
 
   packages/db:
     dependencies:
@@ -246,6 +243,9 @@ importers:
       '@saku/core':
         specifier: workspace:*
         version: link:../core
+      '@saku/data':
+        specifier: workspace:*
+        version: link:../data
       '@saku/db':
         specifier: workspace:*
         version: link:../db

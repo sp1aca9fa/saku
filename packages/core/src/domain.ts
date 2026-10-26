@@ -92,3 +92,18 @@ export interface FxRate {
   rate: number;
   publishedAt?: string;
 }
+
+/** A holiday table as versioned data (exchange, bond market, central bank). */
+export interface Calendar {
+  /** e.g. `xnys` (an exchange), `us-bond`, `ecb-target`. */
+  id: string;
+  /** Changes whenever the table changes; stored with check results. */
+  version: string;
+  /** Dates the table covers (inclusive); outside them the calendar is unknown. */
+  validFrom: TradingDate;
+  validTo: TradingDate;
+  /** Weekdays with no session. Weekends are always closed. */
+  holidays: TradingDate[];
+  /** Weekdays with a shortened session. */
+  earlyCloses?: TradingDate[];
+}

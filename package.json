@@ -19,6 +19,10 @@
     "db:generate": "pnpm --filter @saku/db generate",
     "db:migrate": "pnpm --filter @saku/db migrate",
     "user": "pnpm --silent --filter @saku/db user",
+    "settings": "pnpm --silent --filter @saku/db settings",
+    "symbols": "pnpm --silent --filter @saku/db symbols",
+    "bootstrap": "pnpm --silent --filter @saku/plugin-sdk jobs bootstrap",
+    "daily": "pnpm --silent --filter @saku/plugin-sdk jobs daily",
     "docs:build": "node scripts/docs-build.mjs",
     "docs:check": "node scripts/docs-build.mjs --check"
   },

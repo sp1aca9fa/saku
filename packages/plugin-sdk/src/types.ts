@@ -1,9 +1,17 @@
 // Plug-in contracts (requirements 15, system design section 6). A plug-in package exports one
 // array per kind from `src/index.ts`, only the kinds it has.
-import type { FxRate, PluginKind, RawBar, SeriesPoint, SourceRole, TradingDate } from '@saku/core';
+import type {
+  Calendar,
+  FxRate,
+  PluginKind,
+  RawBar,
+  SeriesPoint,
+  SourceRole,
+  TradingDate,
+} from '@saku/core';
 import type { PoliteHttp } from './http';
 
-export type { FxRate, RawBar, SeriesPoint };
+export type { Calendar, FxRate, RawBar, SeriesPoint };
 
 /** A provider's limits as its terms state them. The HTTP client stays under 80% of each. */
 export interface ProviderLimits {
@@ -29,6 +37,8 @@ export interface PluginInfo {
   termsUrl: string;
   /** The provider's terms forbid giving its data to AI models (left out of MCP and AI exports). */
   noAi?: boolean;
+  /** How far back the provider's plan reaches (a fixed date, or a number of years from today). */
+  history?: { from?: TradingDate; years?: number };
   /** Tickers, series or pairs treated as `noAi` when the rest of the plug-in's data is not. */
   noAiItems?: string[];
   /** Not an official API. */
@@ -82,27 +92,14 @@ export interface SeriesSource {
 
 export interface FxSource {
   info: PluginInfo;
+  /** Whether the source can provide this pair. */
+  supports(pair: string): boolean;
   fetchRates(
     pair: string,
     from: TradingDate,
     to: TradingDate,
     ctx: PluginContext,
   ): Promise<FxRate[]>;
-}
-
-/** A holiday table as versioned data (exchange, bond market, central bank). */
-export interface Calendar {
-  /** e.g. `xnys` (an exchange), `us-bond`, `ecb-target`. */
-  id: string;
-  /** Changes whenever the table changes; stored with check results. */
-  version: string;
-  /** Dates the table covers (inclusive); outside them the calendar is unknown. */
-  validFrom: TradingDate;
-  validTo: TradingDate;
-  /** Weekdays with no session. Weekends are always closed. */
-  holidays: TradingDate[];
-  /** Weekdays with a shortened session. */
-  earlyCloses?: TradingDate[];
 }
 
 export interface CalendarSource {

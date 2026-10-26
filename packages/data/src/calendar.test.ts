@@ -1,4 +1,4 @@
-import type { Calendar } from '@saku/plugin-sdk';
+import type { Calendar } from '@saku/core';
 import { describe, expect, it } from 'vitest';
 import { Sessions } from './calendar';
 

@@ -8,10 +8,12 @@
     "./testing": "./src/testing.ts"
   },
   "scripts": {
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p .",
+    "jobs": "tsx src/cli/jobs.ts"
   },
   "dependencies": {
     "@saku/core": "workspace:*",
+    "@saku/data": "workspace:*",
     "@saku/db": "workspace:*"
   }
 }

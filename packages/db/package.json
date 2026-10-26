@@ -14,7 +14,9 @@
     "typecheck": "tsc -p .",
     "generate": "drizzle-kit generate",
     "migrate": "tsx src/scripts/migrate.ts",
-    "user": "tsx src/scripts/user.ts"
+    "user": "tsx src/scripts/user.ts",
+    "settings": "tsx src/scripts/settings.ts",
+    "symbols": "tsx src/scripts/symbols.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",

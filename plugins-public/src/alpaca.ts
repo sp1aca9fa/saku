@@ -64,6 +64,7 @@ export const alpaca: BarSource = {
     provides: { markets: ['US'] },
     suggestedRole: 'secondary',
     limits: { perMinute: 200 },
+    history: { from: '2016-01-01' },
     keyEnv: [KEY_ID, SECRET],
     termsUrl: 'https://alpaca.markets/disclosures',
     // Exchange subscriber agreements not yet read for AI use (docs/data-spike.md).
