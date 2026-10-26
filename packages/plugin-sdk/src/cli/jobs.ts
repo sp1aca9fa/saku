@@ -5,8 +5,11 @@
 //                          final; exits at once when the day is done (the hourly timer calls it)
 //   pnpm daily --force     run again for the latest final day
 //   pnpm checks            layers A-C over the full history (summaries and non-green results)
+//   pnpm probe             A1: the last sessions of one ticker from every bar source, to a log
+//   pnpm spike             A1: the gate, day by day, from the daily runs
 import { Sessions } from '@saku/data';
-import { createDb, finishRun, seedSourceRoles, startRun } from '@saku/db';
+import { tradingDateOf } from '@saku/core';
+import { activeSymbols, createDb, finishRun, seedSourceRoles, startRun } from '@saku/db';
 import { dbConfigFromEnv, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { PoliteHttp } from '../http';
@@ -14,6 +17,8 @@ import { DAILY_OVERLAP, ingest, type SourceReport } from '../jobs/ingest';
 import { lock, readStamp, writeStamp } from '../jobs/lock';
 import { jobLogger } from '../jobs/log';
 import { dailyTarget } from '../jobs/target';
+import { probe } from '../jobs/probe';
+import { GATE, type SpikeReport, spikeReport } from '../jobs/spike';
 import { verify } from '../jobs/verify';
 import { allInfos, loadPlugins, pluginContext, savePluginInfos } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -22,9 +27,12 @@ const DATA_KIND = { bar: 'bars', series: 'series', fx: 'fx' } as const;
 
 assertServerOnly();
 loadRootEnv();
-const job = process.argv[2];
-if (job !== 'bootstrap' && job !== 'daily' && job !== 'checks') {
-  console.error('Usage: pnpm bootstrap | pnpm daily [--force] | pnpm checks');
+const JOBS = ['bootstrap', 'daily', 'checks', 'probe', 'spike'] as const;
+const job = process.argv[2] as (typeof JOBS)[number];
+if (!JOBS.includes(job)) {
+  console.error(
+    'Usage: pnpm bootstrap | pnpm daily [--force] | pnpm checks | pnpm probe | pnpm spike',
+  );
   process.exit(1);
 }
 const force = process.argv.includes('--force');
@@ -45,12 +53,35 @@ const sessions = new Sessions(calendar);
 const now = new Date();
 const target = dailyTarget(sessions, now, process.env.SAKU_DAILY_AFTER || undefined);
 
+if (job === 'spike') {
+  console.log(spikeMarkdown(await spikeReport(db)));
+  held.release();
+  process.exit(0);
+}
+
+if (job === 'probe') {
+  const ticker = process.env.SAKU_PROBE_TICKER?.trim() || (await activeSymbols(db))[0]?.ticker;
+  if (!ticker) throw new Error('No symbols: run pnpm symbols import first.');
+  const today = sessions.onOrBefore(tradingDateOf(now));
+  const lines = await probe(plugins, {
+    ticker,
+    from: sessions.before(today, 2),
+    to: today,
+    context: (info) => pluginContext(info, log),
+  });
+  for (const l of lines.filter((l) => l.error)) log.warn(`probe ${l.source}: ${l.error}`);
+  held.release();
+  process.exit(0);
+}
+
 if (job === 'daily' && !force && (readStamp('daily') ?? '') >= target) {
   held.release();
   process.exit(0);
 }
 
-const runId = await startRun(db, job === 'checks' ? 'checks' : job, now);
+// From here on, the jobs that record a run.
+const run = job as 'bootstrap' | 'daily' | 'checks';
+const runId = await startRun(db, run, now);
 let ok = false;
 let error: string | undefined;
 let heartbeatSent = false;
@@ -75,9 +106,9 @@ try {
   log.info(`${job} for ${target}`, { runId });
 
   let incomplete: string[] = [];
-  if (job !== 'checks') {
+  if (run !== 'checks') {
     const reports = await ingest(db, plugins, {
-      mode: job,
+      mode: run,
       to: target,
       sessions,
       runId,
@@ -140,4 +171,23 @@ async function heartbeat(): Promise<boolean> {
     log.warn('Heartbeat ping failed', { error: String(e) });
     return false;
   }
+}
+
+function spikeMarkdown(r: SpikeReport): string {
+  const pct = (x: number) => `${(100 * x).toFixed(1)}%`;
+  const sources = Object.keys(r.availability);
+  const lines = [
+    `| Date | Primary | ${sources.join(' | ')} | Layer B | Layer C | Not green |`,
+    `|---|---|${sources.map(() => '---|').join('')}---|---|---|`,
+    ...r.days.map(
+      (d) =>
+        `| ${d.date} | ${d.primaryOk ? 'ok' : 'FAILED'} | ${sources.map((s) => (d.available[s] ? 'yes' : 'no')).join(' | ')} | ${d.layerBPass ? 'pass' : 'fail'} | ${d.layerCPass ? 'pass' : 'fail'} | ${d.nonGreen.length} |`,
+    ),
+    '',
+    `Days: ${r.days.length}. Primary ok: ${r.primaryOkDays}.`,
+    `Secondary availability (gate: one >= ${pct(GATE.secondaryAvailability)}): ${sources.map((s) => `${s} ${pct(r.availability[s] ?? 0)}`).join(', ')}.`,
+    `Layer B (gate >= ${pct(GATE.layerB)}): ${r.layerB.passed}/${r.layerB.days}. Layer C (gate >= ${pct(GATE.layerC)}): ${r.layerC.passed}/${r.layerC.days}.`,
+    `Numeric gate: ${r.passed ? 'passed' : 'not passed'} (every failure must still be explained).`,
+  ];
+  return lines.join('\n');
 }
