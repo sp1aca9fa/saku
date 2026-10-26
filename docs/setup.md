@@ -10,8 +10,10 @@ Stage A1 sets up the data jobs only: the web app (and its Tailscale Funnel addre
 ## 1. Node and the code
 
 ```bash
-git clone --recurse-submodules <public repo> ~/code/saku && cd ~/code/saku
-# (The private plug-ins submodule needs GitHub ssh access; leave the flag out without one.)
+git clone https://github.com/<you>/saku.git ~/code/saku && cd ~/code/saku
+# Optional: your private plug-ins (see "Private plug-ins" below).
+git config submodule.plugins.url git@github-saku-private:<you>/saku-private.git
+git submodule update --init
 
 # Node with nvm, the version in .nvmrc (the machine's default Node is left alone).
 nvm install && nvm use && corepack enable
@@ -21,6 +23,26 @@ ln -sfn "$(dirname "$(dirname "$(nvm which "$(cat .nvmrc)")")")" ~/.local/share/
 pnpm --version   # corepack fetches the pinned pnpm once
 pnpm install
 ```
+
+Private plug-ins: the server reads that repo with its own read-only deploy key.
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/saku-private-deploy -N "" -C "server saku-private"
+cat ~/.ssh/saku-private-deploy.pub   # GitHub: the private repo > Settings > Deploy keys, write access off
+cat >> ~/.ssh/config <<'EOF'
+
+Host github-saku-private
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/saku-private-deploy
+  IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config
+ssh -T github-saku-private          # "Hi <you>/saku-private! ..."
+```
+
+"Repository not found" means GitHub got another key: check the key is on the private repo, and
+that no earlier block in `~/.ssh/config` (`Host *`) offers a different key first.
 
 ## 2. Settings and keys
 
