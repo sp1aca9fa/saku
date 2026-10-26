@@ -1,0 +1,17 @@
+{
+  "name": "@saku/plugins-public",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@saku/core": "workspace:*",
+    "@saku/plugin-sdk": "workspace:*",
+    "zod": "^4.6.5"
+  }
+}

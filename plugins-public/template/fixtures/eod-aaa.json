@@ -1,0 +1,50 @@
+{
+  "symbol": "AAA",
+  "currency": "USD",
+  "prices": [
+    {
+      "date": "2026-01-02",
+      "open": 100.0,
+      "high": 101.5,
+      "low": 99.2,
+      "close": 101.0,
+      "volume": 1200000,
+      "dividend": 0,
+      "split_ratio": 1,
+      "adjusted_close": 50.0
+    },
+    {
+      "date": "2026-01-05",
+      "open": 101.2,
+      "high": 102.0,
+      "low": 100.1,
+      "close": 100.5,
+      "volume": 980000,
+      "dividend": 0.5,
+      "split_ratio": 1,
+      "adjusted_close": 49.997525
+    },
+    {
+      "date": "2026-01-06",
+      "open": 50.3,
+      "high": 51.0,
+      "low": 50.0,
+      "close": 50.8,
+      "volume": 2100000,
+      "dividend": 0,
+      "split_ratio": 2,
+      "adjusted_close": 50.8
+    },
+    {
+      "date": "2026-01-07",
+      "open": null,
+      "high": null,
+      "low": null,
+      "close": 50.9,
+      "volume": null,
+      "dividend": 0,
+      "split_ratio": 1,
+      "adjusted_close": null
+    }
+  ]
+}
