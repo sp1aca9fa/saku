@@ -21,6 +21,7 @@ export interface SymbolInput {
   /** Ticker of the underlying, which must be listed earlier or already stored. */
   underlying?: string;
   issuer?: string;
+  indexSeries?: string;
 }
 
 /** Adds symbols that are missing and updates the descriptive fields of those that exist. */
@@ -37,6 +38,7 @@ export async function upsertSymbols(db: Db, list: SymbolInput[]): Promise<void> 
       leverageFactor: s.leverageFactor ?? 1,
       underlyingSymbolId,
       issuer: s.issuer ?? null,
+      indexSeries: s.indexSeries ?? null,
     };
     await db
       .insert(symbols)

@@ -186,6 +186,8 @@ export const symbols = sqliteTable(
       (): AnySQLiteColumn => symbols.id,
     ),
     issuer: text('issuer'),
+    /** A series of the index the fund tracks (layer C check), e.g. a FRED index level. */
+    indexSeries: text('index_series'),
     inceptionDate: text('inception_date'),
     active: integer('active', { mode: 'boolean' }).notNull().default(true),
   },
@@ -336,6 +338,8 @@ export const checkResults = sqliteTable(
     layer: text('layer', { enum: CHECK_LAYERS }).notNull(),
     checkName: text('check_name').notNull(),
     symbolId: integer('symbol_id').references(() => symbols.id),
+    /** The source checked (layer A), or the secondary compared with the primary (layer B). */
+    source: text('source'),
     date: text('date').notNull(),
     status: text('status', { enum: HEALTH_STATUSES }).notNull(),
     observed: real('observed'),

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "c9863c4e-0080-4be7-97dd-0998b062622b",
+  "id": "1509e833-d8c1-458f-9bb7-ca4397fedb56",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "activity_log": {
@@ -561,6 +561,13 @@
         "symbol_id": {
           "name": "symbol_id",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
@@ -1472,6 +1479,13 @@
         },
         "issuer": {
           "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "index_series": {
+          "name": "index_series",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

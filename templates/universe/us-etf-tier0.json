@@ -4,7 +4,8 @@
     "tier": 0,
     "assetClass": "equity",
     "currency": "USD",
-    "issuer": "State Street"
+    "issuer": "State Street",
+    "indexSeries": "SP500"
   },
   {
     "ticker": "SSO",
@@ -33,7 +34,13 @@
     "underlying": "SPY",
     "issuer": "Direxion"
   },
-  { "ticker": "QQQ", "tier": 0, "assetClass": "equity", "currency": "USD", "issuer": "Invesco" },
+  {
+    "ticker": "QQQ",
+    "tier": 0,
+    "assetClass": "equity",
+    "currency": "USD",
+    "issuer": "Invesco"
+  },
   {
     "ticker": "QLD",
     "tier": 0,
@@ -52,8 +59,20 @@
     "underlying": "QQQ",
     "issuer": "ProShares"
   },
-  { "ticker": "IEF", "tier": 0, "assetClass": "bond", "currency": "USD", "issuer": "iShares" },
-  { "ticker": "TLT", "tier": 0, "assetClass": "bond", "currency": "USD", "issuer": "iShares" },
+  {
+    "ticker": "IEF",
+    "tier": 0,
+    "assetClass": "bond",
+    "currency": "USD",
+    "issuer": "iShares"
+  },
+  {
+    "ticker": "TLT",
+    "tier": 0,
+    "assetClass": "bond",
+    "currency": "USD",
+    "issuer": "iShares"
+  },
   {
     "ticker": "GLD",
     "tier": 0,

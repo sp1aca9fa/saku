@@ -82,6 +82,7 @@ CREATE TABLE `check_results` (
 	`layer` text NOT NULL,
 	`check_name` text NOT NULL,
 	`symbol_id` integer,
+	`source` text,
 	`date` text NOT NULL,
 	`status` text NOT NULL,
 	`observed` real,
@@ -222,6 +223,7 @@ CREATE TABLE `symbols` (
 	`leverage_factor` real DEFAULT 1 NOT NULL,
 	`underlying_symbol_id` integer,
 	`issuer` text,
+	`index_series` text,
 	`inception_date` text,
 	`active` integer DEFAULT true NOT NULL,
 	FOREIGN KEY (`underlying_symbol_id`) REFERENCES `symbols`(`id`) ON UPDATE no action ON DELETE no action
