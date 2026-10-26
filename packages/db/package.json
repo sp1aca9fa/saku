@@ -8,7 +8,8 @@
     "./schema": "./src/schema.ts",
     "./env": "./src/env.ts",
     "./migrate": "./src/migrate.ts",
-    "./testing": "./src/testing.ts"
+    "./testing": "./src/testing.ts",
+    "./backup": "./src/backup.ts"
   },
   "scripts": {
     "typecheck": "tsc -p .",
@@ -16,7 +17,9 @@
     "migrate": "tsx src/scripts/migrate.ts",
     "user": "tsx src/scripts/user.ts",
     "settings": "tsx src/scripts/settings.ts",
-    "symbols": "tsx src/scripts/symbols.ts"
+    "symbols": "tsx src/scripts/symbols.ts",
+    "backup": "tsx src/scripts/backup.ts",
+    "restore": "tsx src/scripts/restore.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",

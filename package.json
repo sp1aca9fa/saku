@@ -21,6 +21,8 @@
     "user": "pnpm --silent --filter @saku/db user",
     "settings": "pnpm --silent --filter @saku/db settings",
     "symbols": "pnpm --silent --filter @saku/db symbols",
+    "backup": "pnpm --silent --filter @saku/db backup",
+    "restore": "pnpm --silent --filter @saku/db restore",
     "bootstrap": "pnpm --silent --filter @saku/plugin-sdk jobs bootstrap",
     "daily": "pnpm --silent --filter @saku/plugin-sdk jobs daily",
     "checks": "pnpm --silent --filter @saku/plugin-sdk jobs checks",

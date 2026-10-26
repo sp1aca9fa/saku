@@ -10,6 +10,7 @@
 import { Sessions } from '@saku/data';
 import { tradingDateOf } from '@saku/core';
 import { activeSymbols, createDb, finishRun, seedSourceRoles, startRun } from '@saku/db';
+import { backupDatabase, backupDir, localDay, pruneBackups } from '@saku/db/backup';
 import { dbConfigFromEnv, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { PoliteHttp } from '../http';
@@ -138,7 +139,12 @@ try {
   // The run is done when every source answered for every item.
   ok = incomplete.length === 0;
   if (!ok) error = `incomplete: ${incomplete.join(', ')}`;
-  if (ok && job === 'daily') {
+  if (run === 'daily') {
+    const backup = await backupDatabase(dbConfigFromEnv().url, backupDir(), localDay(now));
+    await pruneBackups(backupDir());
+    log.info(`Backup ${backup.file} (${(backup.bytes / 1e6).toFixed(1)} MB)`);
+  }
+  if (ok && run === 'daily') {
     writeStamp('daily', target);
     heartbeatSent = await heartbeat();
   }
