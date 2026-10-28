@@ -15,6 +15,7 @@ import {
 import { type SQL, sql } from 'drizzle-orm';
 import {
   type AnySQLiteColumn,
+  blob,
   check,
   index,
   integer,
@@ -471,4 +472,115 @@ export const activityLog = sqliteTable(
     detail: text('detail', { mode: 'json' }),
   },
   (t) => [index('activity_log_at_idx').on(t.at)],
+);
+
+// ---------------------------------------------------------------------------------------------
+// Strategies and the forward record (A2). Registered versions, forward entries and annotations are
+// append-only: database triggers refuse updates and deletes (migration 0002).
+
+export const strategies = sqliteTable(
+  'strategies',
+  {
+    id: id(),
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id),
+    name: text('name').notNull(),
+    /** The draft definition (requirements 05); drafts create no forward record. */
+    definition: text('definition', { mode: 'json' }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: text('updated_at').notNull().$defaultFn(nowIso),
+  },
+  (t) => [index('strategies_owner_idx').on(t.ownerId)],
+);
+
+export const strategyVersions = sqliteTable(
+  'strategy_versions',
+  {
+    id: id(),
+    /** Null for a library strategy (shared, read-only). */
+    ownerId: text('owner_id').references(() => users.id),
+    strategyId: text('strategy_id').references(() => strategies.id),
+    name: text('name').notNull(),
+    /** The registration as hashed: RFC 8785 canonical JSON text. */
+    canonicalJson: text('canonical_json').notNull(),
+    registeredAt: text('registered_at').notNull(),
+    hash: text('hash').notNull(),
+  },
+  (t) => [index('strategy_versions_owner_idx').on(t.ownerId)],
+);
+
+export const forwardEntries = sqliteTable(
+  'forward_entries',
+  {
+    versionId: text('version_id')
+      .notNull()
+      .references(() => strategyVersions.id),
+    date: text('date').notNull(),
+    /** The entry as hashed: RFC 8785 canonical JSON text (includes the previous hash). */
+    payload: text('payload').notNull(),
+    allocation: text('allocation').notNull(),
+    holdings: text('holdings', { mode: 'json' }).notNull(),
+    safeStateApplied: integer('safe_state_applied', { mode: 'boolean' }).notNull(),
+    dataStatus: text('data_status', { enum: HEALTH_STATUSES }).notNull(),
+    equity: real('equity'),
+    prevHash: text('prev_hash').notNull(),
+    hash: text('hash').notNull(),
+    runId: text('run_id').references(() => jobRuns.id),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.versionId, t.date] }),
+    check('forward_entries_status_check', oneOf(t.dataStatus, HEALTH_STATUSES)),
+  ],
+);
+
+/** Later findings about a recorded day (a corrected stand-in, a recomputation); never edits. */
+export const forwardAnnotations = sqliteTable(
+  'forward_annotations',
+  {
+    id: serial(),
+    versionId: text('version_id')
+      .notNull()
+      .references(() => strategyVersions.id),
+    date: text('date').notNull(),
+    kind: text('kind').notNull(),
+    detail: text('detail', { mode: 'json' }).notNull(),
+    runId: text('run_id').references(() => jobRuns.id),
+    createdAt: createdAt(),
+  },
+  (t) => [index('forward_annotations_version_idx').on(t.versionId, t.date)],
+);
+
+export const chainAnchors = sqliteTable('chain_anchors', {
+  id: serial(),
+  /** Hash over every version's chain head that day (RFC 8785 text of {date, heads}). */
+  chainHeadHash: text('chain_head_hash').notNull(),
+  heads: text('heads').notNull(),
+  anchoredAt: text('anchored_at').notNull(),
+  method: text('method').notNull(),
+  authority: text('authority'),
+  proof: blob('proof'),
+});
+
+export const journalEntries = sqliteTable(
+  'journal_entries',
+  {
+    id: serial(),
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id),
+    versionId: text('version_id')
+      .notNull()
+      .references(() => strategyVersions.id),
+    signalDate: text('signal_date').notNull(),
+    action: text('action', { enum: ['done', 'skipped', 'delayed'] }).notNull(),
+    actionDate: text('action_date'),
+    note: text('note'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index('journal_entries_owner_idx').on(t.ownerId, t.versionId),
+    check('journal_entries_action_check', oneOf(t.action, ['done', 'skipped', 'delayed'])),
+  ],
 );
