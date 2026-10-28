@@ -1,6 +1,6 @@
 # Data pipeline
 
-How data gets from the sources into Saku and how it is checked. Requirements: `docs/requirements/04-data-pipeline.md`. Status: Stage A1 (ingestion, adjusted series, layers A-C). Severity rules, the stand-in rule and health status come with A2; issuer data (layer D), the quota guard, the weekly refetch and the fault-injection suite with A3.
+How data gets from the sources into Saku and how it is checked. Requirements: `docs/requirements/04-data-pipeline.md`. Status: Stage A1 (ingestion, adjusted series, layers A-C) and the first A2 parts (health status, the stand-in rule; the decision-margin test comes with the strategy engine); issuer data (layer D), the quota guard, the weekly refetch and the fault-injection suite with A3.
 
 ## Flow
 
@@ -63,6 +63,27 @@ Notes and assumptions:
 - **Move flags for 2x funds** are interpolated (42.5%); the requirements name 1x and 3x only.
 - **`unchanged_close`** flags a close equal to the previous session's (two days with the same close).
 - Gate counting (`pnpm spike`): a day's "pass" is all of its results for that layer green.
+
+## Data health
+
+Each run grades every symbol and trading day (`data_health`, and `bars.status` on the canonical bar), and the day overall:
+- **Per symbol:** the worst of its check results that day (any source, any layer); a day only one source had a bar is at least yellow (`single_source`); a day with neither a primary bar nor a stand-in is red (`primary_missing`). Reasons are codes such as `B.close_match@alpaca`.
+- **Overall:** the worst symbol, and the FX checks; the reasons name the symbols that were not green and the FX checks that failed.
+- Daily runs store every row in their window; full-history passes store the non-green rows.
+
+Assumption: a failed check of a secondary also counts (a layer A failure or a mismatch above 2x tolerance is red whichever source looks wrong), since the two sources disagreeing means neither can be trusted alone.
+
+## Stand-ins (primary missing, secondary present)
+
+For a session the primary has no bar (from its first bar to the target date), a secondary's bar stands in when:
+1. it passes layer A (structure, no move or unchanged-close flag) that day;
+2. when two or more secondaries have a valid bar, they agree within the close tolerance (0.05%); the first in role order is used;
+3. it passes layer C where it applies: against the underlying's canonical bars (themselves possibly stand-ins), and against the fund's index;
+4. the primary has been missing at most 2 sessions in a row (the 3rd and later are refused).
+
+A stand-in day is yellow (`stand_in@<source>`); a refused one red (`stand_in_refused:<reason>`). Each stand-in records its **band** for the decision-margin test (A2, with the strategy engine): the close tolerance when two secondaries agreed, else the index tolerance (0.1pp) when the index check passed, else the layer C tolerance of that day; with no independent check at all (a 1x fund without an index, one secondary), the layer C base tolerance (0.5pp). Assumption: that last case is not named in the requirements.
+
+Stand-ins are kept in `stand_ins`. When the primary's bar arrives, the canonical bar is rebuilt from it and the stand-in row gets the primary's close and the difference; a difference above the close tolerance is logged (the alert and the forward-record annotation come with A2's alerts and records).
 
 ## Attribution
 

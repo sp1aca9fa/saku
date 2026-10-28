@@ -10,7 +10,7 @@ import {
   upsertSymbols,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
-import { asc } from 'drizzle-orm';
+import { and, asc, eq, isNull } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { verify } from './verify';
 
@@ -36,7 +36,7 @@ const bars = (closes: number[], extra: (i: number) => Partial<RawBar> = () => ({
     ...extra(i),
   }));
 
-async function setup() {
+async function setup(o: { aaaPrimaryDays?: number } = {}) {
   const db = await testDb();
   await upsertSymbols(db, [
     { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', indexSeries: 'IDX' },
@@ -70,7 +70,7 @@ async function setup() {
     bars([100, 101, 101.51, 100.4949], (i) => ({
       divCash: i === 2 ? 0.5 : 0,
       providerAdjClose: [50, 50.5, 51.005, 50.495][i],
-    })),
+    })).slice(0, o.aaaPrimaryDays ?? 4),
   );
   await store(
     'AAA',
@@ -87,12 +87,12 @@ async function setup() {
     })),
     fetchedAt: 't',
   });
-  return db;
+  return { db, store };
 }
 
 describe('verify', () => {
   it('writes canonical bars with our adjusted series and stores daily results', async () => {
-    const db = await setup();
+    const { db } = await setup();
     const runId = await startRun(db, 'daily');
     const summary = await verify(db, {
       runId,
@@ -129,7 +129,7 @@ describe('verify', () => {
   });
 
   it('full passes store summaries and only non-green results', async () => {
-    const db = await setup();
+    const { db } = await setup();
     const runId = await startRun(db, 'weekly');
     await verify(db, { runId, sessions, mode: 'full', to: '2026-01-08' });
     const results = await db.select().from(schema.checkResults);
@@ -138,5 +138,81 @@ describe('verify', () => {
     const close = summaries.find((s) => s.checkName === 'close_match')!;
     expect(close).toMatchObject({ checked: 4, passed: 3 });
     expect(close.maxDeviation).toBeCloseTo(101.5 / 100.4949 - 1, 12);
+  });
+
+  it('grades each symbol and day; one source alone is never green', async () => {
+    const { db } = await setup();
+    const runId = await startRun(db, 'daily');
+    const summary = await verify(db, {
+      runId,
+      sessions,
+      mode: 'daily',
+      from: '2026-01-06',
+      to: '2026-01-08',
+    });
+    expect(summary.health).toBe('red');
+    const rows = await db.select().from(schema.dataHealth).orderBy(asc(schema.dataHealth.date));
+    const overall = rows.filter((r) => r.symbolId === null);
+    expect(overall.map((r) => `${r.date} ${r.status}`)).toEqual([
+      '2026-01-06 yellow',
+      '2026-01-07 yellow',
+      '2026-01-08 red',
+    ]);
+    expect(overall[2]!.reasons).toEqual(['AAA', 'AAA2']);
+    const aaa2 = rows.find(
+      (r) => r.symbolId !== null && r.date === '2026-01-06' && r.reasons.includes('single_source'),
+    );
+    expect(aaa2?.status).toBe('yellow');
+    const canonical = await db.select().from(schema.bars).where(eq(schema.bars.date, '2026-01-08'));
+    expect(canonical.map((b) => b.status).sort()).toEqual(['red', 'yellow']);
+  });
+
+  it('stands a secondary bar in for a missing primary day, then resolves it', async () => {
+    const { db, store } = await setup({ aaaPrimaryDays: 3 });
+    // The secondary's last close matches the index this time.
+    await store(
+      'AAA',
+      's',
+      bars([100, 101, 101.51, 100.4949], (i) => ({ divCash: i === 2 ? 0.5 : 0 })),
+    );
+    const first = await startRun(db, 'daily');
+    const summary = await verify(db, {
+      runId: first,
+      sessions,
+      mode: 'daily',
+      from: '2026-01-06',
+      to: '2026-01-08',
+    });
+    expect(summary.standIns).toBe(1);
+    const aaa = (await symbolId(db, 'AAA'))!;
+    const [bar] = await db
+      .select()
+      .from(schema.bars)
+      .where(and(eq(schema.bars.symbolId, aaa), eq(schema.bars.date, '2026-01-08')));
+    expect(bar).toMatchObject({ source: 's', standIn: true, close: 100.4949, status: 'yellow' });
+    const [row] = await db.select().from(schema.standIns);
+    expect(row).toMatchObject({ date: '2026-01-08', source: 's', basis: 'index', band: 0.001 });
+
+    // The primary arrives, 0.1% off the stand-in: resolved and reported.
+    await store('AAA', 'p', [bars([100, 101, 101.51, 100.5954])[3]!]);
+    const second = await startRun(db, 'daily');
+    const after = await verify(db, {
+      runId: second,
+      sessions,
+      mode: 'daily',
+      from: '2026-01-06',
+      to: '2026-01-08',
+    });
+    expect(after.standIns).toBe(0);
+    expect(after.standInsOff).toHaveLength(1);
+    expect(after.standInsOff[0]!.deviation).toBeCloseTo(100.5954 / 100.4949 - 1, 12);
+    expect(
+      await db.select().from(schema.standIns).where(isNull(schema.standIns.resolvedAt)),
+    ).toEqual([]);
+    const [now] = await db
+      .select()
+      .from(schema.bars)
+      .where(and(eq(schema.bars.symbolId, aaa), eq(schema.bars.date, '2026-01-08')));
+    expect(now).toMatchObject({ source: 'p', standIn: false, close: 100.5954 });
   });
 });

@@ -375,6 +375,34 @@ export const checkSummaries = sqliteTable(
 );
 
 /** Health per trading date and symbol (null symbol = overall), as each run found it. */
+/**
+ * Secondary bars used for a day the primary lacked (requirements 04, stand-in rule). The primary's
+ * value, once it arrives, is filled in with the difference; forward records that used the
+ * stand-in are annotated from here, never edited.
+ */
+export const standIns = sqliteTable(
+  'stand_ins',
+  {
+    symbolId: integer('symbol_id')
+      .notNull()
+      .references(() => symbols.id),
+    date: text('date').notNull(),
+    source: text('source').notNull(),
+    close: real('close').notNull(),
+    /** Relative price uncertainty for the decision-margin test. */
+    band: real('band').notNull(),
+    basis: text('basis').notNull(),
+    runId: text('run_id').references(() => jobRuns.id),
+    createdAt: createdAt(),
+    primaryClose: real('primary_close'),
+    /** |primary / stand-in - 1| once the primary arrived. */
+    deviation: real('deviation'),
+    resolvedAt: text('resolved_at'),
+    resolvedRunId: text('resolved_run_id').references(() => jobRuns.id),
+  },
+  (t) => [primaryKey({ columns: [t.symbolId, t.date] })],
+);
+
 export const dataHealth = sqliteTable(
   'data_health',
   {

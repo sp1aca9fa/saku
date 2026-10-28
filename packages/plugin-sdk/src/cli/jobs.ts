@@ -135,6 +135,12 @@ try {
     byStatus: checked.byStatus,
     stored: checked.stored,
   });
+  log.info(`Data health on ${target}: ${checked.health}`, { standIns: checked.standIns });
+  for (const s of checked.standInsOff) {
+    log.warn(
+      `${s.ticker} ${s.date}: the stand-in was off the primary by ${(100 * s.deviation).toFixed(3)}%`,
+    );
+  }
 
   // The run is done when every source answered for every item.
   ok = incomplete.length === 0;

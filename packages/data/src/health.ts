@@ -1,0 +1,199 @@
+// Data health (requirements 04, severity rules): check results rolled up per symbol and date, and
+// the stand-in rule for a day the primary has no bar but a secondary does. Pure functions; the
+// verify job stores what they return.
+import {
+  type HealthStatus,
+  type RawBar,
+  type TradingDate,
+  priceReturn,
+  totalReturn,
+} from '@saku/core';
+import type { Sessions } from './calendar';
+import { type CheckResult, TOLERANCE, layerA } from './checks';
+
+export const RANK: Record<HealthStatus, number> = { green: 0, yellow: 1, red: 2 };
+export const worst = (a: HealthStatus, b: HealthStatus): HealthStatus =>
+  RANK[b] > RANK[a] ? b : a;
+
+/** At most this many stand-in days in a row per ticker; the next one is red (04). */
+export const MAX_STAND_IN_DAYS = 2;
+
+export interface StandIn {
+  date: TradingDate;
+  source: string;
+  bar: RawBar;
+  /**
+   * Relative price uncertainty for the decision-margin test: the tolerance of the tightest
+   * independent check that passed (two secondaries agreeing, the index, else layer C).
+   */
+  band: number;
+  basis: 'secondaries_agree' | 'index' | 'layer_c';
+}
+
+export interface StandInRefusal {
+  date: TradingDate;
+  reason: 'no_valid_secondary' | 'secondaries_disagree' | 'layer_c' | 'index' | 'too_many_days';
+}
+
+export interface StandInInput {
+  /** The primary's bars (raw), sorted by date. */
+  primary: RawBar[];
+  /** Each secondary's bars, un-split, in role order. */
+  secondaries: [source: string, bars: RawBar[]][];
+  sessions: Sessions;
+  leverage: number;
+  /** The underlying's canonical bars (its own stand-ins included), for layer C. */
+  underlying?: RawBar[];
+  /** The fund's index, for the index check. */
+  index?: { date: TradingDate; value: number }[];
+  to: TradingDate;
+}
+
+/**
+ * Stand-ins for the sessions the primary lacks, from its first bar to `to` (04, "Primary
+ * missing, secondary present"). A secondary bar qualifies when it passes layer A; when two or
+ * more qualify they must agree within the layer B close tolerance; the bar must pass layer C
+ * where it applies; at most two days in a row.
+ */
+export function standIns(o: StandInInput): { standIns: StandIn[]; refused: StandInRefusal[] } {
+  const out: StandIn[] = [];
+  const refused: StandInRefusal[] = [];
+  const first = o.primary[0]?.date;
+  if (!first || first > o.to) return { standIns: out, refused };
+
+  const own = new Map(o.primary.map((b) => [b.date, b]));
+  const secondaries = o.secondaries.map(([source, bars]) => {
+    const ok = new Map<TradingDate, boolean>();
+    for (const r of layerA(bars, {
+      source,
+      primary: false,
+      leverage: o.leverage,
+      sessions: o.sessions,
+    })) {
+      if (r.check === 'missing_day') continue;
+      ok.set(r.date, (ok.get(r.date) ?? true) && r.status === 'green');
+    }
+    return { source, byDate: new Map(bars.map((b) => [b.date, b])), ok };
+  });
+  const u = o.underlying && new Map(o.underlying.map((b) => [b.date, b]));
+  const level = o.index && new Map(o.index.map((p) => [p.date, p.value]));
+
+  let prev: RawBar | undefined;
+  let run = 0;
+  for (const date of o.sessions.between(first, o.to)) {
+    const p = own.get(date);
+    if (p) {
+      prev = p;
+      run = 0;
+      continue;
+    }
+    // Days in a row without the primary, whatever stood in for them.
+    run++;
+    const available = secondaries.filter((s) => s.byDate.has(date));
+    if (available.length === 0) {
+      prev = undefined;
+      continue;
+    }
+    const refuse = (reason: StandInRefusal['reason']) => {
+      refused.push({ date, reason });
+      prev = undefined;
+    };
+    const valid = available.filter((s) => s.ok.get(date));
+    if (valid.length === 0) {
+      refuse('no_valid_secondary');
+      continue;
+    }
+    const pick = valid[0]!;
+    const bar = pick.byDate.get(date)!;
+    if (valid.some((s) => Math.abs(s.byDate.get(date)!.close / bar.close - 1) > TOLERANCE.close)) {
+      refuse('secondaries_disagree');
+      continue;
+    }
+    if (run > MAX_STAND_IN_DAYS) {
+      refuse('too_many_days');
+      continue;
+    }
+
+    let basis: StandIn['basis'] = 'layer_c';
+    let band: number = TOLERANCE.leverageBase;
+    if (valid.length >= 2) {
+      basis = 'secondaries_agree';
+      band = TOLERANCE.close;
+    }
+    const before = o.sessions.before(date);
+    if (prev && prev.date === before) {
+      const ub = u?.get(date);
+      const ua = u?.get(before);
+      if (ub && ua) {
+        const expected = o.leverage * priceReturn(ua, ub);
+        const tol = TOLERANCE.leverageBase + TOLERANCE.leverageShare * Math.abs(expected);
+        if (Math.abs(totalReturn(prev, bar) - expected) > tol) {
+          refuse('layer_c');
+          continue;
+        }
+        if (basis === 'layer_c') band = tol;
+      }
+      const ia = level?.get(before);
+      const ib = level?.get(date);
+      if (ia !== undefined && ib !== undefined) {
+        if (Math.abs(priceReturn(prev, bar) - (ib / ia - 1)) > TOLERANCE.index) {
+          refuse('index');
+          continue;
+        }
+        if (basis !== 'secondaries_agree') {
+          basis = 'index';
+          band = TOLERANCE.index;
+        }
+      }
+    }
+    out.push({ date, source: pick.source, bar, band, basis });
+    prev = bar;
+  }
+  return { standIns: out, refused };
+}
+
+export interface DayHealth {
+  status: HealthStatus;
+  /** Codes, e.g. `B.close_match@alpaca`, `stand_in@yahoo`, `single_source`. */
+  reasons: string[];
+}
+
+/**
+ * One symbol's status per date (04, severity rules): the worst of its check results, with the
+ * primary's missing day replaced by the stand-in when one was accepted (red without one), and
+ * never green on a day only one source had a bar.
+ */
+export function symbolHealth(o: {
+  dates: TradingDate[];
+  results: CheckResult[];
+  primary: string;
+  /** Dates the primary has a bar. */
+  primaryDates: Set<TradingDate>;
+  /** How many sources (primary and secondaries) had a bar, per date. */
+  sources: Map<TradingDate, number>;
+  standIns: StandIn[];
+  refused: StandInRefusal[];
+}): Map<TradingDate, DayHealth> {
+  const out = new Map<TradingDate, DayHealth>(
+    o.dates.map((d) => [d, { status: 'green' as HealthStatus, reasons: [] as string[] }]),
+  );
+  const add = (date: TradingDate, status: HealthStatus, reason: string) => {
+    const h = out.get(date);
+    if (!h) return;
+    h.status = worst(h.status, status);
+    if (!h.reasons.includes(reason)) h.reasons.push(reason);
+  };
+  const stood = new Map(o.standIns.map((s) => [s.date, s]));
+  for (const r of o.results) {
+    if (r.status === 'green') continue;
+    if (r.check === 'missing_day' && r.source === o.primary && stood.has(r.date)) continue;
+    add(r.date, r.status, `${r.layer}.${r.check}${r.source ? `@${r.source}` : ''}`);
+  }
+  for (const s of o.standIns) add(s.date, 'yellow', `stand_in@${s.source}`);
+  for (const r of o.refused) add(r.date, 'red', `stand_in_refused:${r.reason}`);
+  for (const date of o.dates) {
+    if (!o.primaryDates.has(date) && !stood.has(date)) add(date, 'red', 'primary_missing');
+    if ((o.sources.get(date) ?? 0) < 2) add(date, 'yellow', 'single_source');
+  }
+  return out;
+}

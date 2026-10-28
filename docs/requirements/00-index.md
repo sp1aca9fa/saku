@@ -9,8 +9,8 @@
 ## Status
 | Stage | Topic | Status |
 |---|---|---|
-| A1 | Data spike (gate) | next |
-| A2 | Thin slice (forward records start) | not started (development allowed during A1's observation window, see stage-a) |
+| A1 | Data spike (gate) | in progress (server run) |
+| A2 | Thin slice (forward records start) | in development (allowed during A1's observation window, see stage-a) |
 | A3 | Hardened pipeline | not started |
 | B-F | See `stages/` | not started |
 

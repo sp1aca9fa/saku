@@ -134,7 +134,8 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `series` | series, date, value, source, published_at, known_at, fetched_at; PK (series, date, source, known_at, fetched_at) | Rates, index, later macro; kept by vintage like `fx_rates`; `known_at` serves `asOf` |
 | `check_results` | id, run_id, layer, check_name, symbol_id, source, date, status, observed, expected, tolerance, message | Daily: all in the window; full-history passes (bootstrap, `checks`, weekly): non-green only |
 | `check_summaries` | run_id, layer, check_name, checked, passed, max_deviation | Full-history passes |
-| `data_health` | date, symbol_id (null = overall), status, reasons, run_id | |
+| `stand_ins` | symbol_id, date, source, close, band, basis, run_id, created_at, primary_close, deviation, resolved_at, resolved_run_id; PK (symbol_id, date) | Secondary bars used for a missing primary day; resolved when the primary arrives |
+| `data_health` | id, run_id, date, symbol_id (null = overall), status, reasons | Daily: all in the window; full passes: non-green |
 | `strategies` | id, owner_id, name, yaml, status (draft), updated_at | Drafts: no forward record |
 | `strategy_versions` | id, owner_id (null = library), strategy_id, canonical_json, registered_at, hash | Immutable |
 | `forward_entries` | version_id, date, payload (canonical JSON text as hashed), signal_state, holdings, safe_state_applied, equity, data_status, prev_hash, hash; PK (version_id, date) | Append-only |
