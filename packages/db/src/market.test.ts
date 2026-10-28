@@ -4,6 +4,8 @@ import {
   groupFactors,
   storeFx,
   storeRawBars,
+  seriesPointInTime,
+  fxPointInTime,
   storeSeries,
   symbolId,
   upsertSymbols,
@@ -156,6 +158,9 @@ describe('vintages', () => {
     expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't1' })).toBe(2);
     expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't2' })).toBe(0);
     expect(await db.select().from(series)).toHaveLength(2);
+    const pit = await seriesPointInTime(db, 'S', 'x');
+    expect(pit.asOf('2026-01-02', '2026-01-06')!.value).toBe(3.61);
+    expect(pit.asOf('2026-01-02', '2026-01-08')!.value).toBe(3.62);
   });
 
   it('without a publication time, a changed value is a new row known from its fetch', async () => {
@@ -171,5 +176,7 @@ describe('vintages', () => {
       [101, 't3'],
       [100, 't4'],
     ]);
+    const pit = await fxPointInTime(db, 'USDXXX', 'x');
+    expect(pit.asOf('2026-01-02', 't3x')!.value).toBe(101);
   });
 });

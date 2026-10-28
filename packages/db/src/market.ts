@@ -1,7 +1,15 @@
 // Storing what sources deliver. Nothing stored is silently overwritten: changed raw bar fields go
 // to `bar_revisions`, a provider's rewrite of its adjusted values becomes `readjustments` events,
 // and series and FX values keep every vintage.
-import type { FxKind, FxRate, RawBar, RawBarField, SeriesPoint, TradingDate } from '@saku/core';
+import {
+  type FxKind,
+  type FxRate,
+  PointInTime,
+  type RawBar,
+  type RawBarField,
+  type SeriesPoint,
+  type TradingDate,
+} from '@saku/core';
 import { and, asc, between, eq } from 'drizzle-orm';
 import type { Db } from './client';
 import { barRevisions, barsRaw, fxRates, readjustments, series, symbols } from './schema';
@@ -329,4 +337,27 @@ export async function storeFx(
     count += rows.length;
   }
   return count;
+}
+
+/** Every vintage of a series from one source, for point-in-time reads (`asOf`). */
+export async function seriesPointInTime(db: Db, id: string, source: string): Promise<PointInTime> {
+  const rows = await db
+    .select({ date: series.date, value: series.value, knownAt: series.knownAt })
+    .from(series)
+    .where(and(eq(series.series, id), eq(series.source, source)));
+  return new PointInTime(rows);
+}
+
+/** Every vintage of an FX pair of one kind from one source, for point-in-time reads. */
+export async function fxPointInTime(
+  db: Db,
+  pair: string,
+  source: string,
+  kind: FxKind = 'valuation',
+): Promise<PointInTime> {
+  const rows = await db
+    .select({ date: fxRates.date, value: fxRates.rate, knownAt: fxRates.knownAt })
+    .from(fxRates)
+    .where(and(eq(fxRates.pair, pair), eq(fxRates.source, source), eq(fxRates.kind, kind)));
+  return new PointInTime(rows);
 }
