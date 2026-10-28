@@ -54,6 +54,9 @@ const plugins = await loadPlugins();
 const calendar = plugins.calendars.flatMap((c) => c.calendars).find((c) => c.id === 'xnys');
 if (!calendar) throw new Error('No xnys calendar plug-in is loaded.');
 const sessions = new Sessions(calendar);
+// Business days of the cash series (FRED's DTB3 follows the Federal Reserve holidays).
+const fed = plugins.calendars.flatMap((c) => c.calendars).find((c) => c.id === 'us-fed');
+const seriesSessions = fed ? new Sessions(fed) : undefined;
 const now = new Date();
 const target = dailyTarget(sessions, now, process.env.SAKU_DAILY_AFTER || undefined);
 
@@ -138,6 +141,7 @@ try {
     runId,
     sessions,
     to: target,
+    ...(seriesSessions && { seriesSessions }),
     ...(job === 'daily'
       ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
       : { mode: 'full' as const }),

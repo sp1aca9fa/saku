@@ -15,6 +15,25 @@ export const RANK: Record<HealthStatus, number> = { green: 0, yellow: 1, red: 2 
 export const worst = (a: HealthStatus, b: HealthStatus): HealthStatus =>
   RANK[b] > RANK[a] ? b : a;
 
+/** A series more than this many business days behind is red (04). */
+export const MAX_STALE_DAYS = 5;
+
+/**
+ * A series' freshness on `date` (04): `sessions` is the series' own calendar, so its holidays
+ * are expected gaps. Missing the latest business day is the normal publication lag (green); more
+ * is an unexpected gap (yellow); more than MAX_STALE_DAYS is red.
+ */
+export function seriesHealth(
+  sessions: Sessions,
+  date: TradingDate,
+  lastObservation: TradingDate | undefined,
+): { status: HealthStatus; behind: number } {
+  if (lastObservation === undefined) return { status: 'red', behind: Infinity };
+  const behind = sessions.between(lastObservation, date).filter((d) => d > lastObservation).length;
+  const status = behind <= 1 ? 'green' : behind <= MAX_STALE_DAYS ? 'yellow' : 'red';
+  return { status, behind };
+}
+
 /** At most this many stand-in days in a row per ticker; the next one is red (04). */
 export const MAX_STAND_IN_DAYS = 2;
 

@@ -2,7 +2,7 @@ import type { RawBar } from '@saku/core';
 import { describe, expect, it } from 'vitest';
 import { Sessions } from './calendar';
 import type { CheckResult } from './checks';
-import { type StandInInput, standIns, symbolHealth } from './health';
+import { type StandInInput, seriesHealth, standIns, symbolHealth } from './health';
 
 const sessions = new Sessions({
   id: 't',
@@ -173,5 +173,25 @@ describe('symbolHealth', () => {
     });
     expect(h.get(D[2]!)!.status).toBe('red');
     expect(h.get(D[2]!)!.reasons).toContain('stand_in_refused:layer_c');
+  });
+});
+
+describe('seriesHealth', () => {
+  const fed = new Sessions({
+    id: 'f',
+    version: 'f',
+    validFrom: '2026-01-01',
+    validTo: '2026-12-31',
+    holidays: ['2026-01-19'],
+  });
+  it('allows the publication lag and holidays, warns on a gap, is red past 5 business days', () => {
+    expect(seriesHealth(fed, '2026-01-08', '2026-01-08')).toEqual({ status: 'green', behind: 0 });
+    expect(seriesHealth(fed, '2026-01-08', '2026-01-07').status).toBe('green');
+    // Friday's value on Tuesday after a Monday holiday: one business day behind.
+    expect(seriesHealth(fed, '2026-01-20', '2026-01-16').status).toBe('green');
+    expect(seriesHealth(fed, '2026-01-08', '2026-01-05')).toEqual({ status: 'yellow', behind: 3 });
+    expect(seriesHealth(fed, '2026-01-12', '2026-01-05').status).toBe('yellow');
+    expect(seriesHealth(fed, '2026-01-13', '2026-01-05')).toEqual({ status: 'red', behind: 6 });
+    expect(seriesHealth(fed, '2026-01-13', undefined).status).toBe('red');
   });
 });

@@ -16,12 +16,14 @@ import {
   layerA,
   layerB,
   leverageCheck,
+  seriesHealth,
   standIns,
   symbolHealth,
   unsplit,
   worst,
 } from '@saku/data';
-import { type Db, activeSymbols, getSetting, schema } from '@saku/db';
+import { type Db, activeSymbols, getSetting, schema, seriesPointInTime } from '@saku/db';
+import { CASH_SERIES } from './forward';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 
 const CHUNK = 500;
@@ -34,6 +36,10 @@ export interface VerifyOptions {
   mode: 'daily' | 'full';
   from?: TradingDate;
   to: TradingDate;
+  /** The cash series' calendar (business days); without it, its freshness is not checked. */
+  seriesSessions?: Sessions;
+  /** When the run looks (only values known by then count). */
+  now?: Date;
 }
 
 export interface VerifySummary {
@@ -352,6 +358,15 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
         if (overall.has(r.date)) grade(r.date, r.status, `${r.layer}.${r.check}@${source}`);
       }
     }
+  }
+  // The cash series' freshness on the run's date (rates are read only through asOf).
+  const seriesRole = (await roles(db, 'series')).primary;
+  if (o.seriesSessions && seriesRole && overall.has(o.to)) {
+    const cash = await seriesPointInTime(db, CASH_SERIES, seriesRole);
+    const last = cash.asOf(o.to, (o.now ?? new Date()).toISOString())?.date;
+    const s = seriesHealth(o.seriesSessions, o.to, last);
+    const what = last === undefined ? 'missing' : `stale(${s.behind})`;
+    grade(o.to, s.status, `${CASH_SERIES}:${what}@${seriesRole}`);
   }
   for (const [date, h] of overall) healthRows.push({ symbolId: null, date, health: h });
 

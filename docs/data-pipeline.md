@@ -68,7 +68,8 @@ Notes and assumptions:
 
 Each run grades every symbol and trading day (`data_health`, and `bars.status` on the canonical bar), and the day overall:
 - **Per symbol:** the worst of its check results that day (any source, any layer); a day only one source had a bar is at least yellow (`single_source`); a day with neither a primary bar nor a stand-in is red (`primary_missing`). Reasons are codes such as `B.close_match@alpaca`.
-- **Overall:** the worst symbol, and the FX checks; the reasons name the symbols that were not green and the FX checks that failed.
+- **Overall:** the worst symbol, the FX checks and the cash series' freshness on the run's date; the reasons name the symbols that were not green and the FX checks that failed.
+- **Cash series freshness** (`DTB3`, on the Federal Reserve's business days): the latest value known at the run may miss only the run's own day (FRED publishes the next business day), green; 2-5 business days behind is yellow (`DTB3:stale(3)@fred`); more, or no value, red. It grades the day overall but no symbol, so it does not apply a strategy's safe state (the rate moves the equity of cash and synthetic leverage, not the signal).
 - Daily runs store every row in their window; full-history passes store the non-green rows.
 
 Assumption: a failed check of a secondary also counts (a layer A failure or a mismatch above 2x tolerance is red whichever source looks wrong), since the two sources disagreeing means neither can be trusted alone.

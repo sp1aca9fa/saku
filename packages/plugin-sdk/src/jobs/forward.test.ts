@@ -1,9 +1,11 @@
 import type { RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
+  addChannel,
   createUser,
   forwardRecord,
   registerVersion,
+  schema,
   seedSourceRoles,
   setSetting,
   startRun,
@@ -14,6 +16,8 @@ import {
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
+import type { Notifier } from '../types';
+import { sendStrategyAlerts } from './alerts';
 import { forward } from './forward';
 import { verify } from './verify';
 
@@ -147,5 +151,33 @@ describe('forward', () => {
       holdings: [{ ticker: 'AAA', weight: 100 }],
     });
     expect(JSON.parse(last.payload).reasons).toContain('AAA2:B.close_match@s');
+  });
+
+  it('acceptance: a simulated red day reaches the owner as the safe-state alert', async () => {
+    const { db, runId } = await setup();
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    const [owner] = await db.select().from(schema.users);
+    await addChannel(db, owner!.id, { type: 'fake', target: 't', authSecret: 's'.repeat(32) });
+    const texts: string[] = [];
+    const notifier: Notifier = {
+      info: { key: 'fake', kind: 'notifier', name: 'Fake', termsUrl: 'x', maxLength: 1000 },
+      validTarget: () => true,
+      send: async (_target, text) => void texts.push(text),
+    };
+    await forward(db, { runId, sessions, to: D[4]! });
+    const quiet = { info() {}, warn() {} };
+    await sendStrategyAlerts(db, {
+      date: D[4]!,
+      sessions,
+      notifiers: [notifier],
+      authSecret: 's'.repeat(32),
+      context: () => ({ http: null as never, now: new Date(), log: quiet }),
+      log: quiet,
+    });
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toContain('Trend: safe state for 2026-01-09');
+    expect(texts[0]).toContain('Target: AAA 100%.');
+    expect(texts[0]).toContain('Trade at the US open on 2026-01-12.');
+    expect(texts[0]).toContain('Data health: red');
   });
 });

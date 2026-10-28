@@ -167,6 +167,32 @@ describe('verify', () => {
     expect(canonical.map((b) => b.status).sort()).toEqual(['red', 'yellow']);
   });
 
+  it('grades the cash series freshness on the run date', async () => {
+    const { db } = await setup();
+    const cash = async (last: number) =>
+      storeSeries(db, {
+        series: 'DTB3',
+        source: 'idx',
+        points: dates.slice(0, last).map((date) => ({ date, value: 4 })),
+        fetchedAt: '2026-01-02T00:00:00Z',
+      });
+    const overallOn = async (to: string) => {
+      const runId = await startRun(db, 'daily');
+      await verify(db, { runId, sessions, mode: 'daily', from: to, to, seriesSessions: sessions });
+      const rows = await db
+        .select()
+        .from(schema.dataHealth)
+        .where(and(eq(schema.dataHealth.runId, runId), isNull(schema.dataHealth.symbolId)));
+      return rows[0]!;
+    };
+    expect((await overallOn('2026-01-07')).reasons).toContain('DTB3:missing@idx');
+    await cash(1);
+    const gap = await overallOn('2026-01-08');
+    expect(gap.reasons).toContain('DTB3:stale(3)@idx');
+    await cash(3);
+    expect((await overallOn('2026-01-08')).reasons.some((r) => r.startsWith('DTB3'))).toBe(false);
+  });
+
   it('stands a secondary bar in for a missing primary day, then resolves it', async () => {
     const { db, store } = await setup({ aaaPrimaryDays: 3 });
     // The secondary's last close matches the index this time.
