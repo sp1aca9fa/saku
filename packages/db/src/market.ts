@@ -10,9 +10,19 @@ import {
   type SeriesPoint,
   type TradingDate,
 } from '@saku/core';
-import { and, asc, between, eq } from 'drizzle-orm';
+import { and, asc, between, desc, eq, lte } from 'drizzle-orm';
 import type { Db } from './client';
-import { barRevisions, barsRaw, fxRates, readjustments, series, symbols } from './schema';
+import {
+  barRevisions,
+  bars,
+  barsRaw,
+  dataHealth,
+  fxRates,
+  readjustments,
+  series,
+  standIns,
+  symbols,
+} from './schema';
 
 /** Rows per insert statement (SQLite caps bound variables per statement). */
 const CHUNK = 500;
@@ -360,4 +370,39 @@ export async function fxPointInTime(
     .from(fxRates)
     .where(and(eq(fxRates.pair, pair), eq(fxRates.source, source), eq(fxRates.kind, kind)));
   return new PointInTime(rows);
+}
+
+export type CanonicalRow = typeof bars.$inferSelect;
+
+/** A symbol's canonical bars (primary or stand-in) up to a date, oldest first. */
+export async function canonicalBars(
+  db: Db,
+  symbolId: number,
+  to: TradingDate,
+): Promise<CanonicalRow[]> {
+  return db
+    .select()
+    .from(bars)
+    .where(and(eq(bars.symbolId, symbolId), lte(bars.date, to)))
+    .orderBy(asc(bars.date));
+}
+
+/** The latest health grade of a symbol on a date (null symbol: the day overall). */
+export async function latestHealth(db: Db, symbolId: number, date: TradingDate) {
+  const [row] = await db
+    .select()
+    .from(dataHealth)
+    .where(and(eq(dataHealth.symbolId, symbolId), eq(dataHealth.date, date)))
+    .orderBy(desc(dataHealth.id))
+    .limit(1);
+  return row;
+}
+
+/** The stand-in recorded for a symbol and date, if any. */
+export async function standInOn(db: Db, symbolId: number, date: TradingDate) {
+  const [row] = await db
+    .select()
+    .from(standIns)
+    .where(and(eq(standIns.symbolId, symbolId), eq(standIns.date, date)));
+  return row;
 }

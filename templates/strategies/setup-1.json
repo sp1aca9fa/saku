@@ -1,0 +1,55 @@
+{
+  "name": "Setup 1: 3x on trend and calm, 1x on trend, else cash",
+  "account": "taxable",
+  "execution": "next_open",
+  "safeState": { "holdings": [{ "ticker": "SPY", "weight": 100 }] },
+  "evaluation": { "frequency": "daily" },
+  "costs": { "slippageBps": 5 },
+  "signals": [
+    {
+      "id": "trend",
+      "type": "ensemble",
+      "members": [
+        {
+          "left": { "indicator": "price", "ticker": "SPY", "totalReturn": true },
+          "op": ">",
+          "right": { "indicator": "sma", "ticker": "SPY", "length": 150, "totalReturn": true },
+          "tolerancePct": 3
+        },
+        {
+          "left": { "indicator": "price", "ticker": "SPY", "totalReturn": true },
+          "op": ">",
+          "right": { "indicator": "sma", "ticker": "SPY", "length": 200, "totalReturn": true },
+          "tolerancePct": 3
+        },
+        {
+          "left": { "indicator": "price", "ticker": "SPY", "totalReturn": true },
+          "op": ">",
+          "right": { "indicator": "sma", "ticker": "SPY", "length": 250, "totalReturn": true },
+          "tolerancePct": 3
+        }
+      ],
+      "threshold": 0.5
+    },
+    {
+      "id": "calm",
+      "type": "compare",
+      "left": { "indicator": "volatility", "ticker": "SPY", "length": 20 },
+      "op": "<",
+      "right": { "threshold": 25 }
+    }
+  ],
+  "allocations": [
+    {
+      "name": "Risk on",
+      "when": { "all": ["trend", "calm"] },
+      "holdings": [{ "ticker": "UPRO", "weight": 100 }]
+    },
+    {
+      "name": "Trend only",
+      "when": { "all": ["trend"] },
+      "holdings": [{ "ticker": "SPY", "weight": 100 }]
+    },
+    { "name": "Cash", "holdings": [{ "ticker": "CASH_USD", "weight": 100 }] }
+  ]
+}

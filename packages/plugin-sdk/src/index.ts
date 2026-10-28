@@ -7,3 +7,4 @@ export * from './jobs/verify';
 export * from './registry';
 export * from './server-only';
 export type * from './types';
+export * from './jobs/forward';

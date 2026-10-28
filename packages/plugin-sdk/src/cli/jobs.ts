@@ -20,6 +20,7 @@ import { jobLogger } from '../jobs/log';
 import { dailyTarget } from '../jobs/target';
 import { probe } from '../jobs/probe';
 import { GATE, type SpikeReport, spikeReport } from '../jobs/spike';
+import { forward } from '../jobs/forward';
 import { verify } from '../jobs/verify';
 import { allInfos, loadPlugins, pluginContext, savePluginInfos } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -140,6 +141,23 @@ try {
     log.warn(
       `${s.ticker} ${s.date}: the stand-in was off the primary by ${(100 * s.deviation).toFixed(3)}%`,
     );
+  }
+
+  // Forward records (A2; nothing before forward_records_from is set, the A1 gate).
+  if (run === 'daily') {
+    const f = await forward(db, {
+      runId,
+      sessions,
+      to: target,
+      standInsOff: checked.standInsOff,
+    });
+    if (f.skipped) log.info(`Forward records: ${f.skipped}`);
+    else {
+      log.info(`Forward records: ${f.appended} new entries, ${f.safeStateDays} on the safe state`, {
+        annotations: f.annotations,
+      });
+      for (const t of f.today) log.info(`${t.version}: ${t.allocation} (${t.dataStatus})`, t);
+    }
   }
 
   // The run is done when every source answered for every item.

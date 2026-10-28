@@ -137,7 +137,8 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `stand_ins` | symbol_id, date, source, close, band, basis, run_id, created_at, primary_close, deviation, resolved_at, resolved_run_id; PK (symbol_id, date) | Secondary bars used for a missing primary day; resolved when the primary arrives |
 | `data_health` | id, run_id, date, symbol_id (null = overall), status, reasons | Daily: all in the window; full passes: non-green |
 | `strategies` | id, owner_id, name, yaml, status (draft), updated_at | Drafts: no forward record |
-| `strategy_versions` | id, owner_id (null = library), strategy_id, canonical_json, registered_at, hash | Immutable |
+| `strategy_versions` | id, owner_id (null = library), strategy_id, name, canonical_json, registered_at, hash | Immutable |
+| `forward_annotations` | id, version_id, date, kind, detail, run_id, created_at | Append-only; corrections and recomputations |
 | `forward_entries` | version_id, date, payload (canonical JSON text as hashed), signal_state, holdings, safe_state_applied, equity, data_status, prev_hash, hash; PK (version_id, date) | Append-only |
 | `chain_anchors` | id, chain_head_hash, anchored_at, method (rfc3161), authority, proof | |
 | `journal_entries` | owner_id, version_id, signal_date, action (done/skipped/delayed), action_date, note | CLI in A2, UI in D1 |
@@ -182,10 +183,11 @@ A plug-in package's `src/index.ts`: `export const bars: BarSource[] = [...]; exp
 
 ## 8. Integrity: registration and hash chain
 - Canonical form: RFC 8785 (JCS) JSON of the zod-parsed object. The exact hashed text is stored (`canonical_json`, `payload`), so database round-trips never change what is verified. This format never changes; a change would need a new chain version.
-- Registering a draft writes `strategy_versions` with `hash = sha256(canonical_json)`, where the JSON includes `registered_at`.
-- Each `forward_entries` row stores `prev_hash` and `hash = sha256(prev_hash + payload)`.
+- Registering writes `strategy_versions` with `hash = sha256(canonical_json)`, where the JSON is `{kind: registration, owner, name, registeredAt, strategy}`. Registration and the forward record open only once the admin sets `forward_records_from` (after the A1 gate); the record starts with the first close after registration.
+- Each `forward_entries` row stores `payload` (canonical JSON including `prevHash`: the previous entry's hash, or the version's hash for the first entry) and `hash = sha256(payload)`. The columns (allocation, holdings, safe state, data status, equity) repeat the payload for queries; verification checks they match. `strategy_versions`, `forward_entries`, `forward_annotations` and `chain_anchors` are append-only: SQLite triggers refuse updates and deletes.
 - Daily, the chain heads are timestamped by an RFC 3161 timestamp authority (`openssl ts`, no npm dependency; a second authority as fallback) and recorded in `chain_anchors`. Signed git tags are not used: they prove who, not when.
-- `pnpm chain verify` recomputes the chain, checks the stored text matches the structured columns and validates the timestamp tokens; status on the admin page and in the MCP.
+- `pnpm strategy verify` recomputes every chain and checks the stored text matches the structured columns (timestamp tokens join with the RFC 3161 anchors); status on the admin page and in the MCP later.
+- Each day's entry: the decision at the close with the data health of every dependency (signal tickers and anything the strategy may hold). Yellow: the decision with its reasons. Red, or a stand-in price that could flip a signal within its band (decision-margin test): the declared safe state, recorded as such. Missed days are caught up in order. A stand-in later corrected by the primary adds a `stand_in_corrected` annotation (recorded vs corrected allocation), never an edit.
 
 ## 9. Numerics and time
 - Trading dates are `YYYY-MM-DD` strings (America/New_York), never `Date` objects in core logic. Display in the install's time zone.

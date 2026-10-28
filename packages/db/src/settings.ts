@@ -16,6 +16,11 @@ export const SETTINGS = {
       return false;
     }
   },
+  /**
+   * First trading date of forward records (registration and the daily record). Unset until the
+   * A1 gate passes: before it, nothing is registered or recorded (stage A).
+   */
+  forward_records_from: (v: string) => /^\d{4}-\d{2}-\d{2}$/.test(v),
 } as const;
 
 export type SettingKey = keyof typeof SETTINGS;
