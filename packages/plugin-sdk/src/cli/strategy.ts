@@ -20,12 +20,15 @@ import {
   getUserByUsername,
   journalOf,
   registerVersion,
+  schema,
+  sha256,
   verifyChain,
 } from '@saku/db';
 import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { SYSTEM_CA, verifyToken } from '../jobs/anchor';
 import { assertServerOnly } from '../server-only';
 
 assertServerOnly();
@@ -103,6 +106,25 @@ if (tool === 'strategy' && command === 'check') {
     const problems = await verifyChain(db, v);
     if (problems.length) bad++;
     console.log(`${v.name} (${v.id}): ${problems.length ? problems.join('; ') : 'chain ok'}`);
+  }
+  const caFile = process.env.SAKU_TSA_CAFILE?.trim() || SYSTEM_CA;
+  for (const a of await db.select().from(schema.chainAnchors)) {
+    const heads = JSON.parse(a.heads) as { date: string; heads: Record<string, string> };
+    const problems: string[] = [];
+    if (sha256(a.heads) !== a.chainHeadHash) problems.push('hash');
+    for (const [versionId, hash] of Object.entries(heads.heads)) {
+      const known =
+        (await forwardRecord(db, versionId)).some((e) => e.hash === hash) ||
+        (await allVersions(db)).some((v) => v.id === versionId && v.hash === hash);
+      if (!known) problems.push(`head of ${versionId} not in the record`);
+    }
+    if (!a.proof || !(await verifyToken(a.proof as Uint8Array, a.chainHeadHash, caFile))) {
+      problems.push('timestamp token');
+    }
+    if (problems.length) bad++;
+    console.log(
+      `Anchor ${heads.date} (${a.authority}): ${problems.length ? problems.join('; ') : 'ok'}`,
+    );
   }
   process.exit(bad ? 1 : 0);
 } else if (tool === 'journal' && command === 'add') {

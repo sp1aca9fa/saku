@@ -20,6 +20,7 @@ import { jobLogger } from '../jobs/log';
 import { dailyTarget } from '../jobs/target';
 import { probe } from '../jobs/probe';
 import { GATE, type SpikeReport, spikeReport } from '../jobs/spike';
+import { anchor } from '../jobs/anchor';
 import { forward } from '../jobs/forward';
 import { verify } from '../jobs/verify';
 import { allInfos, loadPlugins, pluginContext, savePluginInfos } from '../registry';
@@ -157,6 +158,20 @@ try {
         annotations: f.annotations,
       });
       for (const t of f.today) log.info(`${t.version}: ${t.allocation} (${t.dataStatus})`, t);
+      const a = await anchor(db, {
+        date: target,
+        authorities: (process.env.SAKU_TSA_URLS ?? '')
+          .split(',')
+          .map((u) => u.trim())
+          .filter(Boolean),
+        ...(process.env.SAKU_TSA_CAFILE?.trim() && { caFile: process.env.SAKU_TSA_CAFILE.trim() }),
+      });
+      if (a.status === 'anchored') log.info(`Chain heads timestamped by ${a.authority}`);
+      else if (a.status === 'skipped') log.warn(`Chain heads not timestamped: ${a.reason}`);
+      else {
+        log.warn('Timestamping failed', { errors: a.errors });
+        incomplete.push('timestamp');
+      }
     }
   }
 

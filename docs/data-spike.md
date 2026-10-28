@@ -58,7 +58,14 @@ Found on the issuers' fund pages (2026-10-29); whether each file answers a serve
 | QQQ | Invesco | No file link found on the fund page | Web table | |
 
 ## RFC 3161 timestamp authorities
-To choose in A2 (terms, availability).
+Built (A2): the daily anchor asks each authority in `SAKU_TSA_URLS` in order and keeps the first token that verifies. Candidates (2026-10-29), owner to choose:
+
+| Authority | URL | Cost and terms | Verification |
+|---|---|---|---|
+| FreeTSA | `https://freetsa.org/tsr` | Free; no stated limits; no uptime promise; "do not abuse" | Its own CA (`https://freetsa.org/files/cacert.pem`, SHA-256 `2151b611...4438`), added to the CA file; SHA-256 supported; TSA certificate renewed 2026-03 (ECC P-384) |
+| DigiCert | `http://timestamp.digicert.com` | Free public service used for code signing; no published terms found | Chains to a public root in the system CA bundle |
+
+Proposal: FreeTSA first, DigiCert as fallback (two independent authorities; a day neither answers leaves the run incomplete, so healthchecks.io alerts).
 
 ## 20-day run
 Per day and source: data received (any run that day), failures and their reasons. Filled from the server's job runs.

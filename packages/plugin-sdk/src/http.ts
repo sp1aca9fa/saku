@@ -122,7 +122,24 @@ export class PoliteHttp {
     }
   }
 
-  private async request(url: string, headers: Record<string, string>): Promise<Response> {
+  /** POSTs a body (e.g. a timestamp query) and returns the answer as bytes. */
+  async post(
+    url: string,
+    body: Uint8Array,
+    headers: Record<string, string> = {},
+  ): Promise<{ data: Uint8Array; contentType: string | null }> {
+    const res = await this.request(url, headers, body);
+    return {
+      data: new Uint8Array(await res.arrayBuffer()),
+      contentType: res.headers.get('content-type'),
+    };
+  }
+
+  private async request(
+    url: string,
+    headers: Record<string, string>,
+    body?: Uint8Array,
+  ): Promise<Response> {
     const shown = redactUrl(url);
     for (let attempt = 0; ; attempt++) {
       if (this.blocked) throw new BlockedError(`stopped for this run: ${this.blocked}`);
@@ -131,6 +148,7 @@ export class PoliteHttp {
       let res: Response;
       try {
         res = await this.o.fetchImpl(url, {
+          ...(body && { method: 'POST', body }),
           headers: { 'User-Agent': this.o.userAgent, ...headers },
           signal: AbortSignal.timeout(this.o.timeoutMs),
         });
