@@ -11,5 +11,8 @@
   },
   "dependencies": {
     "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@saku/reference": "workspace:*"
   }
 }

@@ -210,6 +210,10 @@ importers:
       zod:
         specifier: ^4.6.5
         version: 4.6.7
+    devDependencies:
+      '@saku/reference':
+        specifier: workspace:*
+        version: link:../reference
 
   packages/data:
     dependencies:
@@ -256,6 +260,8 @@ importers:
       drizzle-orm:
         specifier: ^0.45.4
         version: 0.45.4(@libsql/client@0.18.0)
+
+  packages/reference: {}
 
   plugins-public:
     dependencies:
