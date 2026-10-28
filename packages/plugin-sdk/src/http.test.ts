@@ -36,6 +36,26 @@ describe('PoliteHttp', () => {
     expect(await http.json('https://example.test/a')).toEqual({ a: 1 });
   });
 
+  it('returns files as bytes with their content type', async () => {
+    const file = () =>
+      new Response(new Uint8Array([0x50, 0x4b, 3, 4]), {
+        headers: { 'content-type': 'application/vnd.ms-excel' },
+      });
+    const { http } = fakeClient([file]);
+    const got = await http.bytes('https://example.test/f.xlsx');
+    expect([...got.data]).toEqual([0x50, 0x4b, 3, 4]);
+    expect(got.contentType).toBe('application/vnd.ms-excel');
+  });
+
+  it('stops on a challenge page served instead of a file', async () => {
+    const page = () =>
+      new Response('<title>Just a moment...</title>', {
+        headers: { 'content-type': 'text/html' },
+      });
+    const { http } = fakeClient([page]);
+    await expect(http.bytes('https://example.test/f.xlsx')).rejects.toBeInstanceOf(BlockedError);
+  });
+
   it('retries server errors with backoff, then gives up', async () => {
     const { http, calls } = fakeClient([() => new Response('', { status: 503 }), ok]);
     expect(await http.json('https://example.test/a')).toEqual({ a: 1 });

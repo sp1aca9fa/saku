@@ -46,6 +46,17 @@ To be measured on the server. Tiingo says most US end-of-day prices are ready ar
 ## Issuer data (best effort)
 To record per Tier 0 ETF: issuer, whether daily NAV, distributions and splits are published in a machine-readable form, and the URL.
 
+Found on the issuers' fund pages (2026-10-29); whether each file answers a server, and what it holds, is checked by a probe run on the server (private, by hand; results below when run). Issuer files are published downloads, not APIs: any `IssuerSource` built on them (A3) goes in the private plug-ins.
+
+| ETF | Issuer | NAV history | Distributions | Notes |
+|---|---|---|---|---|
+| SPY | State Street (SPDR) | xlsx per fund (`navhist-us-en-<ticker>.xlsx`) | Web page and a yearly schedule (PDF); tax summaries (xlsx) | |
+| GLD | World Gold Trust (SPDR) | Historical archive (xlsx) on the trust's site; also the SPDR NAV file | None (pays no distributions) | NAV from the LBMA Gold Price PM |
+| SSO, UPRO, QLD, TQQQ | ProShares | CSV per fund (`<ticker>-historical_nav.csv`) | Web table | |
+| IEF, TLT | iShares | "Data Download" spreadsheet per fund (contents to confirm) | In the same file if it keeps its former layout | |
+| SPXL | Direxion | No file link found; the site refuses automated reads | Web table | |
+| QQQ | Invesco | No file link found on the fund page | Web table | |
+
 ## RFC 3161 timestamp authorities
 To choose in A2 (terms, availability).
 

@@ -101,6 +101,20 @@ export class PoliteHttp {
     return body;
   }
 
+  /** A file as bytes (spreadsheets, archives) with its content type; an HTML page is checked for a challenge. */
+  async bytes(
+    url: string,
+    headers: Record<string, string> = {},
+  ): Promise<{ data: Uint8Array; contentType: string | null }> {
+    const res = await this.request(url, headers);
+    const data = new Uint8Array(await res.arrayBuffer());
+    const contentType = res.headers.get('content-type');
+    if (contentType?.includes('text/html')) {
+      this.checkChallenge(new TextDecoder().decode(data.subarray(0, 50_000)), url);
+    }
+    return { data, contentType };
+  }
+
   private checkChallenge(body: string, url: string): void {
     if (body.length < 50_000 && CHALLENGE_MARKERS.some((m) => m.test(body))) {
       this.blocked = `challenge page at ${redactUrl(url)}`;
