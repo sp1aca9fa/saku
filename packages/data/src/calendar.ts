@@ -44,6 +44,13 @@ export class Sessions {
     return fromMs(ms);
   }
 
+  /** The next session after `date`. */
+  after(date: TradingDate): TradingDate {
+    let ms = toMs(date) + DAY;
+    while (!this.isSession(fromMs(ms))) ms += DAY;
+    return fromMs(ms);
+  }
+
   /** The latest session on or before `date`. */
   onOrBefore(date: TradingDate): TradingDate {
     return this.isSession(date) ? date : this.before(date);

@@ -20,6 +20,7 @@ import { jobLogger } from '../jobs/log';
 import { dailyTarget } from '../jobs/target';
 import { probe } from '../jobs/probe';
 import { GATE, type SpikeReport, spikeReport } from '../jobs/spike';
+import { type AlertOptions, sendJobFailure, sendStrategyAlerts } from '../jobs/alerts';
 import { anchor } from '../jobs/anchor';
 import { forward } from '../jobs/forward';
 import { verify } from '../jobs/verify';
@@ -88,6 +89,14 @@ const runId = await startRun(db, run, now);
 let ok = false;
 let error: string | undefined;
 let heartbeatSent = false;
+let health: string | undefined;
+const alerting: AlertOptions = {
+  date: target,
+  notifiers: plugins.notifiers,
+  authSecret: process.env.AUTH_SECRET?.trim() ?? '',
+  context: (n) => pluginContext(n.info, log),
+  log,
+};
 try {
   const infos = allInfos(plugins);
   await savePluginInfos(db, infos, now);
@@ -137,6 +146,7 @@ try {
     byStatus: checked.byStatus,
     stored: checked.stored,
   });
+  health = checked.health;
   log.info(`Data health on ${target}: ${checked.health}`, { standIns: checked.standIns });
   for (const s of checked.standInsOff) {
     log.warn(
@@ -172,6 +182,10 @@ try {
         log.warn('Timestamping failed', { errors: a.errors });
         incomplete.push('timestamp');
       }
+      // Undelivered alerts are retried at the next check (sent ones are not repeated).
+      const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
+      log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
+      if (sent.failed.length > 0) incomplete.push('alerts');
     }
   }
 
@@ -192,6 +206,19 @@ try {
   log.warn('Run failed', { error });
 } finally {
   await finishRun(db, runId, { ok, error, datesProcessed: [target], heartbeatSent });
+  if (!ok) {
+    try {
+      const sent = await sendJobFailure(db, {
+        ...alerting,
+        job,
+        error: error ?? 'unknown',
+        ...(health && { health }),
+      });
+      if (sent.failed.length) log.warn('Admin alert not delivered', { failed: sent.failed });
+    } catch (e) {
+      log.warn('Admin alert failed', { error: String(e) });
+    }
+  }
   held.release();
 }
 log.info(ok ? `${job} done` : `${job} not complete: ${error}`);

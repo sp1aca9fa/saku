@@ -59,7 +59,7 @@ flowchart LR
 | CI | GitHub Actions on the public repo | Lint, typecheck, tests, build, coverage gates; synthetic data only, no secrets; jobs refuse to run here |
 | Production | The admin's machine | App, database, jobs, backups, `pnpm verify` on real data |
 
-**Secrets** (the server's `.env` only): `AUTH_SECRET` (signs sessions, encrypts TOTP secrets and alert channel targets; kept in a password manager, a restored database needs the same one), provider keys (`TIINGO_API_KEY`, `FRED_API_KEY`, `ALPACA_*`, `MASSIVE_API_KEY`), `HEALTHCHECK_URL`, admin alert targets.
+**Secrets** (the server's `.env` only): `AUTH_SECRET` (signs sessions, encrypts TOTP secrets and alert channel targets; kept in a password manager, a restored database needs the same one), provider keys (`TIINGO_API_KEY`, `FRED_API_KEY`, `ALPACA_*`, `MASSIVE_API_KEY`), `HEALTHCHECK_URL`, `TELEGRAM_BOT_TOKEN` (one bot per install). Alert targets (webhook addresses, chat ids) are stored encrypted in `notification_channels`, admins' operational channels flagged there.
 
 ## 3. Schedules (systemd timers, server time zone)
 The US close is 05:00 or 06:00 JST (summer/winter). A1 measures when each bar source's data is final.
@@ -142,7 +142,8 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `forward_entries` | version_id, date, payload (canonical JSON text as hashed), signal_state, holdings, safe_state_applied, equity, data_status, prev_hash, hash; PK (version_id, date) | Append-only |
 | `chain_anchors` | id, chain_head_hash, anchored_at, method (rfc3161), authority, proof | |
 | `journal_entries` | owner_id, version_id, signal_date, action (done/skipped/delayed), action_date, note | CLI in A2, UI in D1 |
-| `notification_channels` | id, owner_id, type (discord, telegram), target (encrypted), enabled | Per user; admin channels flagged |
+| `notification_channels` | id, owner_id, type (the `Notifier` plug-in key), target_enc, admin, enabled | Per user; admin channels flagged; disabled, never deleted |
+| `alerts_sent` | owner_id, channel_id, subject (version id or job type), date, type, allocation, sent_at; unique (channel, subject, date, type) | Idempotency; `allocation` is what the channel was last told |
 | `job_runs` | id, job_type (daily, weekly, monthly, bootstrap, checks), started_at, finished_at, status, dates_processed, error, heartbeat_sent | |
 | `provider_usage` | provider, window_type, window_start, request_count, unique_symbols | Quota guard |
 | `activity_log` | id, at, actor, action, detail | Admin tasks, updates, resets |
@@ -167,7 +168,7 @@ interface IssuerSource { info: PluginInfo; supports(ticker: string): boolean; fe
 interface TaxRegime { info: PluginInfo; accountTypes: AccountType[]; rules: RegimeRules; } // declarative, C1
 interface Check { id: string; layer: 'A'|'B'|'C'|'D'|'E'; run(ctx: CheckContext): CheckResult[]; } // pure
 type HealthStatus = 'green' | 'yellow' | 'red';
-interface Notifier { send(alert: LocalizedAlert): Promise<void>; }
+interface Notifier { info: NotifierInfo; validTarget(target: string): boolean; send(target: string, text: string, ctx: PluginContext): Promise<void>; } // A2; text already in the user's language
 type Execution = 'next_open' | 'next_close' | 'same_close';
 ```
 

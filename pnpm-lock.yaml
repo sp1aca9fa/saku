@@ -205,6 +205,8 @@ importers:
 
   packages/auth: {}
 
+  packages/content: {}
+
   packages/core:
     dependencies:
       zod:
@@ -248,6 +250,9 @@ importers:
 
   packages/plugin-sdk:
     dependencies:
+      '@saku/content':
+        specifier: workspace:*
+        version: link:../content
       '@saku/core':
         specifier: workspace:*
         version: link:../core

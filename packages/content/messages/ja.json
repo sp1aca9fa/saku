@@ -1,0 +1,37 @@
+{
+  "alerts": {
+    "health": {
+      "green": "データ状態: 緑。",
+      "yellow": "データ状態: 黄(警告付きで計算)。",
+      "red": "データ状態: 赤(通常のシグナルなし)。",
+      "unknown": "データ状態: 不明(処理が完了していません)。"
+    },
+    "safeStateName": "セーフステート",
+    "cash": "現金({currency})",
+    "timing": {
+      "next_open": "{date} の米国市場の寄り付きで売買してください。",
+      "next_close": "{date} の米国市場の引けで売買してください。",
+      "same_close": "{date} の引けのシグナル(実際には実行できません)。"
+    },
+    "stateChange": {
+      "title": "{strategy}: 配分の変更",
+      "body": "{from} → {to}({date} のシグナル)。",
+      "first": "最初に記録された配分: {to}({date} のシグナル)。"
+    },
+    "holdings": "目標: {holdings}。",
+    "dataYellow": {
+      "title": "{strategy}: {date} のデータ警告",
+      "body": "シグナルは計算されましたが、一部のデータに警告があります。配分: {allocation}。"
+    },
+    "dataRed": {
+      "title": "{strategy}: {date} はセーフステート",
+      "body": "データの信頼性が通常のシグナルに足りないため、戦略のセーフステートを適用します。"
+    },
+    "reasons": "詳細: {reasons}。",
+    "jobFailure": {
+      "title": "Saku: {date} の {job} 処理が完了しませんでした",
+      "body": "理由: {error}。次の毎時チェックで再実行されます。サーバーのログを確認してください。"
+    },
+    "test": "Saku: このチャンネルは動作しています。アラートはここに届きます。"
+  }
+}

@@ -9,18 +9,26 @@
 //   pnpm journal add <version id> <signal date> done|skipped|delayed --user <username>
 //                    [--date <action date>] [--note <text>]
 //   pnpm journal list <version id> --user <username>
+//   pnpm channel add discord|telegram --user <username> [--admin]   asks for the webhook address
+//                    or chat id (kept out of the shell history), stored encrypted
+//   pnpm channel list|disable|enable|test [<channel id>] --user <username>
 import { Strategy, dependencies, isTradingDate } from '@saku/core';
+import { translator } from '@saku/content';
 import {
   activeSymbols,
+  addChannel,
   addJournalEntry,
   allVersions,
+  channelsOf,
   createDb,
+  deliveryTargets,
   forwardRecord,
   getSetting,
   getUserByUsername,
   journalOf,
   registerVersion,
   schema,
+  setChannelEnabled,
   sha256,
   verifyChain,
 } from '@saku/db';
@@ -28,7 +36,9 @@ import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { SYSTEM_CA, verifyToken } from '../jobs/anchor';
+import { loadPlugins, pluginContext } from '../registry';
 import { assertServerOnly } from '../server-only';
 
 assertServerOnly();
@@ -150,9 +160,52 @@ if (tool === 'strategy' && command === 'check') {
       `${j.signalDate}  ${j.action}${j.actionDate ? ` on ${j.actionDate}` : ''}${j.note ? `  ${j.note}` : ''}`,
     );
   }
+} else if (tool === 'channel') {
+  const authSecret = process.env.AUTH_SECRET?.trim() || fail('AUTH_SECRET is not set in .env.');
+  const owner = await userId();
+  const { notifiers } = await loadPlugins();
+  if (command === 'add') {
+    const notifier =
+      notifiers.find((n) => n.info.key === rest[0]) ??
+      fail(`Channel types: ${notifiers.map((n) => n.info.key).join(', ')}.`);
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const target = (await rl.question(`${notifier.info.name} webhook address or chat id: `)).trim();
+    rl.close();
+    if (!notifier.validTarget(target)) fail(`That is not a ${notifier.info.name} target.`);
+    const id = await addChannel(db, owner, {
+      type: notifier.info.key,
+      target,
+      admin: rest.includes('--admin'),
+      authSecret,
+    });
+    console.log(`Added channel ${id}. Try it: pnpm channel test ${id} --user ${flag('user')}`);
+  } else if (command === 'list') {
+    for (const c of await channelsOf(db, owner)) {
+      console.log(`${c.id}  ${c.type}${c.admin ? '  admin' : ''}  ${c.enabled ? 'on' : 'off'}`);
+    }
+  } else if (command === 'disable' || command === 'enable') {
+    await setChannelEnabled(
+      db,
+      owner,
+      rest[0] ?? fail('Name the channel id.'),
+      command === 'enable',
+    );
+    console.log(`Channel ${command}d.`);
+  } else if (command === 'test') {
+    const channel =
+      (await deliveryTargets(db, owner, authSecret)).find((c) => c.id === rest[0]) ??
+      fail('No enabled channel with that id.');
+    const notifier =
+      notifiers.find((n) => n.info.key === channel.type) ?? fail(`No ${channel.type} plug-in.`);
+    const user = await getUserByUsername(db, flag('user')!);
+    const t = translator(user?.language ?? (await getSetting(db, 'primary_language')) ?? 'en');
+    const log = { info: () => {}, warn: () => {} };
+    await notifier.send(channel.target, t('alerts.test'), pluginContext(notifier.info, log));
+    console.log('Sent.');
+  } else fail('pnpm channel add|list|disable|enable|test');
 } else {
   fail(
-    'Usage: pnpm strategy check|register|list|show|verify ... | pnpm journal add|list ... ' +
+    'Usage: pnpm strategy check|register|list|show|verify ... | pnpm journal add|list ... | pnpm channel ... ' +
       '(see packages/plugin-sdk/src/cli/strategy.ts)',
   );
 }

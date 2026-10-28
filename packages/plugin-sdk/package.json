@@ -14,6 +14,7 @@
     "cli": "tsx src/cli/strategy.ts"
   },
   "dependencies": {
+    "@saku/content": "workspace:*",
     "@saku/core": "workspace:*",
     "@saku/data": "workspace:*",
     "@saku/db": "workspace:*",

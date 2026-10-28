@@ -1,0 +1,37 @@
+{
+  "alerts": {
+    "health": {
+      "green": "Data health: green.",
+      "yellow": "Data health: yellow (computed with a warning).",
+      "red": "Data health: red (no normal signal).",
+      "unknown": "Data health: unknown (the run did not finish)."
+    },
+    "safeStateName": "Safe state",
+    "cash": "Cash ({currency})",
+    "timing": {
+      "next_open": "Trade at the US open on {date}.",
+      "next_close": "Trade at the US close on {date}.",
+      "same_close": "Signal for the close of {date} (not achievable in practice)."
+    },
+    "stateChange": {
+      "title": "{strategy}: new allocation",
+      "body": "{from} → {to} (signal of {date}).",
+      "first": "First recorded allocation: {to} (signal of {date})."
+    },
+    "holdings": "Target: {holdings}.",
+    "dataYellow": {
+      "title": "{strategy}: data warning for {date}",
+      "body": "The signal was computed, but some data has a warning. Allocation: {allocation}."
+    },
+    "dataRed": {
+      "title": "{strategy}: safe state for {date}",
+      "body": "Data is not reliable enough for a normal signal, so the strategy's safe state applies."
+    },
+    "reasons": "Details: {reasons}.",
+    "jobFailure": {
+      "title": "Saku: the {job} run for {date} did not finish",
+      "body": "Reason: {error}. It runs again at the next hourly check. The job log on the server has the details."
+    },
+    "test": "Saku: this channel works. Alerts will arrive here."
+  }
+}

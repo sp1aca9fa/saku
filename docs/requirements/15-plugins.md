@@ -16,6 +16,7 @@ Contracts are typed interfaces in `packages/plugin-sdk`. A plug-in package expor
 | `EventCalendarSource` | Scheduled market events | F1 |
 | `TaxRegime` | A country's account types and tax rules (07) | C1 (hooks from B1) |
 | `CalendarSource` | Exchange and series holiday tables, as versioned data | A1 |
+| `Notifier` | An alert channel (Discord, Telegram; later email, LINE): checks a target's shape and sends plain text | A2 |
 
 ## Self-describing
 Each plug-in exports a description (`PluginInfo`): key (never changed once data exists), name, what it provides (kinds, tickers or series, currencies, markets), suggested role, the provider's limits (requests per minute/hour/day, symbols per month), whether it needs a key and which env variable, a link to the provider's terms, and flags:

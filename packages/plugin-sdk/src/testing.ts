@@ -7,6 +7,8 @@ export interface FixtureContext extends PluginContext {
   requested: string[];
   /** Headers of each request, in order. */
   headers: Record<string, string>[];
+  /** Bodies of POST requests, as text, in order. */
+  bodies: string[];
 }
 
 /**
@@ -19,9 +21,11 @@ export function fixtureContext(
 ): FixtureContext {
   const requested: string[] = [];
   const headers: Record<string, string>[] = [];
+  const bodies: string[] = [];
   const fetchImpl = (async (input: string, init?: RequestInit) => {
     requested.push(input);
     headers.push({ ...(init?.headers as Record<string, string>) });
+    if (init?.body) bodies.push(new TextDecoder().decode(init.body as Uint8Array));
     const body = answer(new URL(input));
     if (body instanceof Response) return body;
     if (body === undefined) return new Response('', { status: 404 });
@@ -33,6 +37,7 @@ export function fixtureContext(
     log: { info: () => {}, warn: () => {} },
     requested,
     headers,
+    bodies,
     ...(options.apiKey && { apiKey: options.apiKey }),
     ...(options.keys && { keys: options.keys }),
   };

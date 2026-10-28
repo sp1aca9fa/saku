@@ -1,3 +1,4 @@
+export * from './alerts';
 export * from './client';
 export * from './env';
 export * from './market';

@@ -16,6 +16,8 @@ export const SETTINGS = {
       return false;
     }
   },
+  /** Language code of the install's primary language (default for users who chose none). */
+  primary_language: (v: string) => /^[a-z]{2,3}(-[A-Z]{2})?$/.test(v),
   /**
    * First trading date of forward records (registration and the daily record). Unset until the
    * A1 gate passes: before it, nothing is registered or recorded (stage A).

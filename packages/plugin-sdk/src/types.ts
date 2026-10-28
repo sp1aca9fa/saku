@@ -107,10 +107,33 @@ export interface CalendarSource {
   calendars: Calendar[];
 }
 
+/** A notification channel (requirements 11). Sends plain text to one stored target. */
+export interface NotifierInfo {
+  /** Stored as the channel's type. Never changed once channels exist. */
+  key: string;
+  kind: 'notifier';
+  name: string;
+  limits?: ProviderLimits;
+  /** Install-wide credential (e.g. a bot token), when the service needs one. */
+  keyEnv?: string;
+  termsUrl: string;
+  /** Longest message the service accepts, in characters. */
+  maxLength: number;
+}
+
+export interface Notifier {
+  info: NotifierInfo;
+  /** Whether a target (a webhook address, a chat id) has the right shape before it is stored. */
+  validTarget(target: string): boolean;
+  /** Errors must not contain the target or the key (they are logged). */
+  send(target: string, text: string, ctx: PluginContext): Promise<void>;
+}
+
 /** What a plug-in package's `src/index.ts` exports. */
 export interface PluginModule {
   bars?: BarSource[];
   series?: SeriesSource[];
   fx?: FxSource[];
   calendars?: CalendarSource[];
+  notifiers?: Notifier[];
 }

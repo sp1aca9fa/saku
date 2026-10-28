@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PoliteHttp, type PoliteHttpOptions } from './http';
-import type { Logger, PluginContext, PluginInfo, PluginModule } from './types';
+import type { Logger, NotifierInfo, PluginContext, PluginInfo, PluginModule } from './types';
 
 /**
  * Plug-in packages, loaded by path so the public repo works without the private `plugins/`
@@ -20,7 +20,7 @@ export interface LoadedPlugins extends Required<PluginModule> {
 }
 
 export function emptyPlugins(): LoadedPlugins {
-  return { bars: [], series: [], fx: [], calendars: [], missing: [] };
+  return { bars: [], series: [], fx: [], calendars: [], notifiers: [], missing: [] };
 }
 
 export async function loadPlugins(root: string = findRepoRoot()): Promise<LoadedPlugins> {
@@ -36,8 +36,9 @@ export async function loadPlugins(root: string = findRepoRoot()): Promise<Loaded
     loaded.series.push(...(mod.series ?? []));
     loaded.fx.push(...(mod.fx ?? []));
     loaded.calendars.push(...(mod.calendars ?? []));
+    loaded.notifiers.push(...(mod.notifiers ?? []));
   }
-  validateInfos(allInfos(loaded));
+  validateInfos([...allInfos(loaded), ...loaded.notifiers.map((n) => n.info)]);
   return loaded;
 }
 
@@ -51,7 +52,9 @@ export function allInfos(plugins: PluginModule): PluginInfo[] {
 }
 
 /** Keys are lowercase identifiers, unique per kind, and each source names its terms. */
-export function validateInfos(infos: PluginInfo[]): void {
+export function validateInfos(
+  infos: Pick<PluginInfo | NotifierInfo, 'key' | 'kind' | 'termsUrl'>[],
+): void {
   const seen = new Set<string>();
   for (const info of infos) {
     if (!/^[a-z][a-z0-9-]{1,39}$/.test(info.key)) {
@@ -80,7 +83,7 @@ export async function savePluginInfos(db: Db, infos: PluginInfo[], now = new Dat
 
 /** A run's context for one source: its own HTTP client at the provider's pace, and its key. */
 export function pluginContext(
-  info: PluginInfo,
+  info: Pick<PluginInfo | NotifierInfo, 'name' | 'keyEnv' | 'limits'>,
   log: Logger,
   options: { env?: Record<string, string | undefined>; http?: PoliteHttpOptions; now?: Date } = {},
 ): PluginContext {

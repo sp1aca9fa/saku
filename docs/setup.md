@@ -95,6 +95,21 @@ as `HEALTHCHECK_URL`. Each fully successful daily run pings it; when pings stop 
 down, a source keeps failing, a backup failed), healthchecks.io tells you. The machine cannot report
 its own outage.
 
+Alerts (strategy changes, data health, failed runs for admins) go to Discord or Telegram:
+
+```sh
+# Discord: Server Settings > Integrations > Webhooks > New Webhook, copy its URL.
+# Telegram: create a bot with @BotFather, put TELEGRAM_BOT_TOKEN in .env, send the bot a message,
+# then read your chat id from https://api.telegram.org/bot<token>/getUpdates.
+pnpm channel add discord --user <name> --admin   # asks for the target; --admin: also failed runs
+pnpm channel list --user <name>
+pnpm channel test <channel id> --user <name>
+```
+
+An alert that could not be delivered leaves the run incomplete; it is retried at the next hourly
+check, so a broken channel also stops the healthchecks.io ping. `pnpm channel disable` turns one off.
+Users' languages: `pnpm settings set primary_language ja` (the default for users who chose none).
+
 ## 6. Backups
 
 Each daily run writes `~/.local/share/saku/backups/saku-<date>.db.gz` (checked with SQLite's

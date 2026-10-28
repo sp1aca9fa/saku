@@ -584,3 +584,47 @@ export const journalEntries = sqliteTable(
     check('journal_entries_action_check', oneOf(t.action, ['done', 'skipped', 'delayed'])),
   ],
 );
+
+// ---------------------------------------------------------------------------------------------
+// Alerts (requirements 11)
+
+export const notificationChannels = sqliteTable(
+  'notification_channels',
+  {
+    id: id(),
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id),
+    /** The notifier plug-in's key (e.g. discord, telegram). */
+    type: text('type').notNull(),
+    /** Webhook address or chat id, encrypted with AUTH_SECRET. */
+    targetEnc: text('target_enc').notNull(),
+    /** Also receives the install's operational alerts (admins only). */
+    admin: integer('admin', { mode: 'boolean' }).notNull().default(false),
+    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+    createdAt: createdAt(),
+  },
+  (t) => [index('notification_channels_owner_idx').on(t.ownerId)],
+);
+
+/** One row per alert delivered to a channel; the key makes sending idempotent. */
+export const alertsSent = sqliteTable(
+  'alerts_sent',
+  {
+    id: serial(),
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id),
+    channelId: text('channel_id')
+      .notNull()
+      .references(() => notificationChannels.id),
+    /** The strategy version id, or the job type for operational alerts. */
+    subject: text('subject').notNull(),
+    date: text('date').notNull(),
+    type: text('type').notNull(),
+    /** What the alert said the allocation is (the last state a user was told). */
+    allocation: text('allocation'),
+    sentAt: text('sent_at').notNull().$defaultFn(nowIso),
+  },
+  (t) => [uniqueIndex('alerts_sent_key_idx').on(t.channelId, t.subject, t.date, t.type)],
+);
