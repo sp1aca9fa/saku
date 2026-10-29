@@ -536,13 +536,21 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   };
 }
 
-/** Results of a whole-run check (layer E, no symbol), stored as a full-history pass stores them. */
-export async function storeRunChecks(db: Db, runId: string, rs: CheckResult[]) {
+/**
+ * Results of a whole-run check (layer E, no symbol), stored as a full-history pass stores them:
+ * the non-green ones in full, or every one with `all` (testfol parity: green cases are shown too).
+ */
+export async function storeRunChecks(
+  db: Db,
+  runId: string,
+  rs: CheckResult[],
+  o: { all?: boolean } = {},
+) {
   const stored = rs.map((r) => ({ ...r, symbolId: null }));
   await storeResults(
     db,
     runId,
-    stored.filter((r) => r.status !== 'green'),
+    stored.filter((r) => o.all || r.status !== 'green'),
   );
   await storeSummaries(db, runId, stored);
 }

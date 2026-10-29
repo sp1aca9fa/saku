@@ -6,8 +6,10 @@
 //
 // A case is a folder `<dir>/<case>/` (the private `plugins/test/testfol/`) holding `case.json`:
 //   { "strategy": <strategy JSON, execution same_close>, "from": "YYYY-MM-DD", "to": "YYYY-MM-DD",
-//     "stats": { "cagr": <fraction>, "maxDrawdown": <negative fraction>, "switches"?: <integer> } }
-// `from` is the first day of testfol's results, `to` the last (a trading day with stored bars).
+//     "stats": { "cagr": <fraction>, "maxDrawdown": <negative fraction>, "switches": <integer> } }
+// `from` is the first day of testfol's results and must be Saku's first decision day (the warm-up
+// covered); `to` is the last (a trading day with stored bars). All three stats are required:
+// requirements 13 sets a tolerance for each, so a case without one would overstate parity.
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -21,7 +23,7 @@ import {
   parseTicker,
   summary,
 } from '@saku/core';
-import type { CheckResult } from '@saku/data';
+import type { CheckResult, Sessions } from '@saku/data';
 import type { Db } from '@saku/db';
 import { cashRateReader } from './cash';
 import { reader } from './forward';
@@ -49,8 +51,8 @@ const SIMULATED = /SIM$/i;
 export interface ParityStats {
   cagr: number;
   maxDrawdown: number;
-  /** Absent in an export without it: then "not compared", never counted as passed. */
-  switches?: number;
+  /** Trades after the first entry (Saku: any change of the held holdings). */
+  switches: number;
 }
 
 export interface ParityCase {
@@ -125,13 +127,15 @@ export function parseCase(raw: unknown): { case: ParityCase } | { errors: string
     if (!finite(s.maxDrawdown) || s.maxDrawdown > 0 || s.maxDrawdown < -1) {
       errors.push('stats.maxDrawdown: must be a negative fraction (-0.35 for a 35% drawdown)');
     }
-    if (s.switches !== undefined && !(Number.isInteger(s.switches) && Number(s.switches) >= 0)) {
-      errors.push('stats.switches: must be a whole number of switches, or left out');
+    if (!(Number.isInteger(s.switches) && Number(s.switches) >= 0)) {
+      errors.push(
+        "stats.switches: required, a whole number (testfol's switch count; requirements 13 compares it)",
+      );
     }
     stats = {
       cagr: s.cagr as number,
       maxDrawdown: s.maxDrawdown as number,
-      ...(s.switches !== undefined && { switches: s.switches as number }),
+      switches: s.switches as number,
     };
   }
   if (errors.length > 0 || !strategy || !from || !to || !stats) return { errors };
@@ -141,14 +145,13 @@ export function parseCase(raw: unknown): { case: ParityCase } | { errors: string
 export interface StatComparison {
   stat: 'cagr' | 'maxDrawdown' | 'switches';
   ours: number;
-  /** Undefined: testfol's value is not in the case; the stat is not compared. */
-  theirs?: number;
-  difference?: number;
-  tolerance?: number;
-  within?: boolean;
+  theirs: number;
+  difference: number;
+  tolerance: number;
+  within: boolean;
 }
 
-/** Each stat against the tolerances; a NaN or missing value of ours is never within. */
+/** Each stat against the tolerances; a NaN value of ours is never within. */
 export function compareStats(
   ours: { cagr: number; maxDrawdown: number; switches: number },
   theirs: ParityStats,
@@ -156,10 +159,9 @@ export function compareStats(
   const one = (
     stat: StatComparison['stat'],
     a: number,
-    b: number | undefined,
+    b: number,
     tolerance: (b: number) => number,
   ): StatComparison => {
-    if (b === undefined) return { stat, ours: a };
     const difference = a - b;
     const tol = tolerance(b);
     return {
@@ -185,15 +187,12 @@ const pp = (x: number) => `${x >= 0 ? '+' : ''}${(100 * x).toFixed(2)}pp`;
 
 function statLine(c: StatComparison): string {
   const label = { cagr: 'CAGR', maxDrawdown: 'max drawdown', switches: 'switches' }[c.stat];
-  if (c.theirs === undefined) {
-    return `${label} ${c.ours} not compared (not in case.json)`;
-  }
   const verdict = c.within ? 'ok' : 'OUTSIDE';
   if (c.stat === 'switches') {
-    const d = c.difference!;
-    return `${label} ours ${c.ours}, testfol ${c.theirs}, ${d >= 0 ? '+' : ''}${d} (+/-${c.tolerance!.toFixed(1)}): ${verdict}`;
+    const d = c.difference;
+    return `${label} ours ${c.ours}, testfol ${c.theirs}, ${d >= 0 ? '+' : ''}${d} (+/-${c.tolerance.toFixed(1)}): ${verdict}`;
   }
-  return `${label} ours ${pct(c.ours)}, testfol ${pct(c.theirs)}, ${pp(c.difference!)} (+/-${(100 * c.tolerance!).toFixed(1)}pp): ${verdict}`;
+  return `${label} ours ${pct(c.ours)}, testfol ${pct(c.theirs)}, ${pp(c.difference)} (+/-${(100 * c.tolerance).toFixed(1)}pp): ${verdict}`;
 }
 
 /** The case folders under `dir`, by name; none when the folder does not exist. */
@@ -205,14 +204,27 @@ export function caseFolders(dir: string | undefined): string[] {
     .sort();
 }
 
+/** A dependency's days in the window that are not green, by their latest grade. */
+interface WindowHealth {
+  ticker: string;
+  /** Red, never graded, or a session without a stored bar: the case is refused. */
+  bad: TradingDate[];
+  yellow: TradingDate[];
+}
+
 /**
  * Every case in `dir` on the stored data, one result each (none without cases). Decisions come
  * from the whole stored history up to `to` (indicators and bands warm up on earlier data); the
- * equity curve runs from the first decision day on or after `from` to `to`.
+ * equity curve runs from `from`, which must be the first decision day, to `to`.
+ *
+ * Data health in the window (requirements 04: never a confident number on doubtful data): each
+ * dependency's canonical bar carries its latest grade (set by every verify run). A red or
+ * ungraded bar, or a session of `sessions` without a stored bar, refuses the case; yellow days
+ * are computed and counted in the message, the status still follows the tolerances.
  */
 export async function parity(
   db: Db,
-  o: { dir: string | undefined; to: TradingDate },
+  o: { dir: string | undefined; to: TradingDate; sessions: Sessions },
 ): Promise<ParityResult[]> {
   const names = caseFolders(o.dir);
   if (names.length === 0) return [];
@@ -221,7 +233,7 @@ export async function parity(
   const out: ParityResult[] = [];
 
   for (const name of names) {
-    // Deviation: the worst |difference| / tolerance over the compared stats (1 = at the edge).
+    // Deviation: the worst |difference| / tolerance over the stats (1 = at the edge).
     const result = (
       status: 'green' | 'red',
       message: string,
@@ -271,12 +283,41 @@ export async function parity(
         refuse(gaps.join('; '));
         continue;
       }
+
+      const sessions = o.sessions.between(c.from, c.to);
+      const health: WindowHealth[] = deps.map((t) => {
+        const byDate = new Map(rows[t]!.map((r) => [r.date, r.status]));
+        const h: WindowHealth = { ticker: t, bad: [], yellow: [] };
+        for (const d of sessions) {
+          const status = byDate.get(d);
+          if (status === 'yellow') h.yellow.push(d);
+          else if (status !== 'green') h.bad.push(d);
+        }
+        return h;
+      });
+      const bad = health.filter((h) => h.bad.length > 0);
+      if (bad.length > 0) {
+        refuse(
+          bad
+            .map(
+              (h) =>
+                `${h.ticker} has ${h.bad.length} red, ungraded or missing days from ${c.from} to ${c.to} (first ${h.bad[0]})`,
+            )
+            .join('; '),
+        );
+        continue;
+      }
+
       const bars = barsOf(rows);
       const days: StrategyDay[] = evaluate(c.strategy, bars).filter((d) => d.date >= c.from);
       const start = days[0]?.date;
       const end = days.at(-1)?.date;
       if (!start || days.length < 2) {
         refuse(`fewer than two decision days from ${c.from} to ${c.to}`);
+        continue;
+      }
+      if (start !== c.from) {
+        refuse(`first decision ${start} is after from ${c.from}; warm-up not covered`);
         continue;
       }
       if (end !== c.to) {
@@ -286,15 +327,16 @@ export async function parity(
       const run = backtest({ strategy: c.strategy, days, bars, cashRate });
       const s = summary(run.points);
       const stats = compareStats({ ...s, switches: run.switches }, c.stats);
-      const compared = stats.filter((x) => x.theirs !== undefined);
-      const red = compared.some((x) => !x.within);
-      const deviation = Math.max(...compared.map((x) => Math.abs(x.difference!) / x.tolerance!));
-      const span =
-        start === c.from ? `${start} to ${end}` : `${start} (case from ${c.from}) to ${end}`;
+      const red = stats.some((x) => !x.within);
+      const deviation = Math.max(...stats.map((x) => Math.abs(x.difference) / x.tolerance));
+      const yellow = health.filter((h) => h.yellow.length > 0);
+      const notes = yellow.length
+        ? `; yellow days: ${yellow.map((h) => `${h.ticker} ${h.yellow.length} (first ${h.yellow[0]})`).join(', ')}`
+        : '';
       out.push(
         result(
           red ? 'red' : 'green',
-          `same_close (not achievable), ${span}: ${stats.map(statLine).join('; ')}`,
+          `${start} to ${end}: ${stats.map(statLine).join('; ')}${notes}`,
           // NaN (an unknown value of ours) is stored as unknown, never as a small deviation.
           Number.isFinite(deviation) ? deviation : undefined,
         ),

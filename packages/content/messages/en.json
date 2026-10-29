@@ -88,7 +88,7 @@
     },
     "parity": {
       "title": "Saku: a testfol parity case failed ({name})",
-      "body": "{detail}. Saku's backtest must match testfol's within the documented tolerances; find the cause and record it in docs/parity.md before trusting backtests. Tolerances are never widened to pass."
+      "body": "{detail}. The case is backtested with same_close execution, which is not achievable: it trades at a close that is not yet known (used only for this comparison). Saku's backtest must match testfol's within the documented tolerances; find the cause and record it in docs/parity.md before trusting backtests. Tolerances are never widened to pass."
     },
     "healthDate": "(As of the last check, {date}.)"
   }

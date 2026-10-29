@@ -52,20 +52,24 @@ Rules, each checked; a case that breaks one is refused (red, "cannot run", with 
 - Real tickers only: SPY, not SPYSIM (any ticker ending in `SIM` is refused). Synthetic leverage
   (`SPY?L=3&E=0.9`) is allowed.
 - `from`: the first day of testfol's results, on or after 1993-02-01. Every ticker the case reads
-  must have stored bars on or before `from`.
+  must have stored bars on or before `from`, and `from` must be Saku's first decision day (the
+  warm-up covered by stored data); a later first decision refuses the case.
 - `to`: the last day of testfol's results; a trading day with stored bars (Saku must decide on it).
 - `stats.cagr`: a fraction (0.1532 for 15.32%). `stats.maxDrawdown`: a negative fraction (-0.4211
-  for a 42.11% drawdown). `stats.switches`: a whole number, or left out when testfol does not show
-  it; then switches are reported "not compared" and never counted as passed.
+  for a 42.11% drawdown). `stats.switches`: required, a whole number (requirements 13 sets a
+  tolerance for it, so a case without it would overstate parity).
 - No other keys (a misspelled key is refused, not ignored).
 
 ## Exporting a case from testfol
 
+Unverified until the first real case: these steps and where testfol shows each number.
+
 1. Build the strategy in testfol's tactical allocation backtest with SPY (not SPYSIM), a start date
    on or after 1993-02-01, and testfol's default (same-close) timing.
 2. Run it and save the page (or a screenshot) in `plugins/ops/` (private).
-3. Note from the results: the first and last date of the results, CAGR, max drawdown and, when
-   shown, the number of switches (trades after the first entry).
+3. Note from the results: the first and last date of the results, CAGR, max drawdown, and the
+   number of switches from the Trading Stats tab. testfol's definition of a switch is unverified
+   until the first real case (Saku's is below).
 4. Write the same strategy as Saku strategy JSON (check it with `pnpm strategy check <file>`),
    add `"execution": "same_close"`, and save `plugins/test/testfol/<case>/case.json` as above.
 5. Run `pnpm verify` on the server. The log shows one `Layer E testfol_parity` line per case.
@@ -74,14 +78,19 @@ Rules, each checked; a case that breaks one is refused (red, "cannot run", with 
 
 - Decisions from the whole stored history up to `to`: indicators and tolerance bands warm up on
   data before `from`.
-- The equity curve from the first decision day on or after `from` to `to`, trading at each
-  decision's close (`same_close`), starting at 1. If Saku's first decision falls after `from`
-  (a longer warm-up than testfol's), the result names both dates.
+- The equity curve from `from` (which must be the first decision day) to `to`, trading at each
+  decision's close (`same_close`), starting at 1.
 - CAGR over calendar time (365.25-day years) from the first to the last day of the curve; max
-  drawdown on daily closes; switches are trades after the first entry. Synthetic leverage uses the
+  drawdown on daily closes; a switch is any change of the holdings list after the first entry (a
+  ticker, a weight, or their order: two allocations listing the same holdings in another order
+  count as a switch even though nothing is traded).
+  Synthetic leverage uses the
   requirements 05 formula (daily return = L * r - (L - 1) * cash rate / 252 - E / 100 / 252, the
   cash rate as known before each session).
-- Data health is not applied here: the comparison runs on the stored canonical bars as they are.
+- Data health in the window, by each stored bar's latest grade: a red or ungraded day, or a
+  session without a stored bar, for any ticker the case reads refuses the case (the message names
+  the ticker, the count and the first date). Yellow days are computed and counted in the message;
+  the status still follows the tolerances. The cash rate's own health is not checked here.
 
 ## Tolerances (requirements 13, never widened)
 
@@ -91,10 +100,11 @@ Rules, each checked; a case that breaks one is refused (red, "cannot run", with 
 | Max drawdown | +/- 1.0 percentage points (absolute) |
 | Switches | +/- 5% of testfol's count, at least 1 switch |
 
-A case is green when every compared stat is within its tolerance, red otherwise or when it cannot
-run. A red case fails the run and alerts the admins; it stays red until the cause is found and
-recorded below. The stored deviation is the worst |difference| / tolerance over the compared stats
-(above 1 is outside).
+A case is green when every stat is within its tolerance, red otherwise or when it cannot run.
+Every case is stored in full each run (green included: ours, testfol's, the difference and the
+window). A red case fails the run and alerts the admins; it stays red until the cause is found and
+recorded below. The stored deviation is the worst |difference| / tolerance over the stats (above 1
+is outside).
 
 ## Results
 

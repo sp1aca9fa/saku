@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
-import { type Db, schema, upsertSymbols } from '@saku/db';
+import { type Db, addChannel, createUser, schema, setSetting, upsertSymbols } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { eq } from 'drizzle-orm';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -24,14 +24,17 @@ const sessions = new Sessions({
 const TARGET = '2026-01-16';
 const DATES = sessions.between('2024-06-03', TARGET);
 const FROM = '2024-07-01';
+/** The warm-up that makes FROM the first decision day: an SMA over the bars up to it. */
+const WARM_UP = DATES.indexOf(FROM) + 1;
 
 /** Growth with waves (so there are drawdowns); no dividends or splits. */
 const closes = DATES.map((_, i) => 100 * 1.0005 ** i * (1 + 0.05 * Math.sin(i / 10)));
-const source = (key: string): BarSource => ({
+/** Both sources send every date, or none for `skip` (a session without a stored bar). */
+const source = (key: string, skip?: string): BarSource => ({
   info: testInfo(key, 'bar'),
   async fetchBars(_ticker, from, to) {
     return DATES.flatMap((date, i): RawBar[] =>
-      date >= from && date <= to
+      date >= from && date <= to && date !== skip
         ? [
             {
               date,
@@ -54,7 +57,7 @@ const source = (key: string): BarSource => ({
  * Held in AAA from the first decision (both allocations hold it): the same-close curve is AAA's
  * close relative to the start, so the expected stats follow from the closes alone.
  */
-const alwaysIn = (o: { execution?: string; holding?: string } = {}) => ({
+const alwaysIn = (o: { execution?: string; holding?: string; length?: number } = {}) => ({
   name: 'Always in',
   account: 'taxable',
   execution: 'same_close',
@@ -67,7 +70,7 @@ const alwaysIn = (o: { execution?: string; holding?: string } = {}) => ({
       type: 'compare',
       left: { indicator: 'price', ticker: 'AAA' },
       op: '>',
-      right: { indicator: 'sma', ticker: 'AAA', length: 5 },
+      right: { indicator: 'sma', ticker: 'AAA', length: o.length ?? WARM_UP },
     },
   ],
   allocations: [
@@ -75,6 +78,42 @@ const alwaysIn = (o: { execution?: string; holding?: string } = {}) => ({
     { name: 'Down', holdings: [{ ticker: o.holding ?? 'AAA', weight: 100 }] },
   ],
 });
+
+/** In AAA while its SMA is above a level, else in cash: switches at each crossing. */
+const LEVEL = 108;
+const switcher = {
+  name: 'Switcher',
+  account: 'taxable',
+  execution: 'same_close',
+  safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+  evaluation: { frequency: 'daily' },
+  signals: [
+    {
+      id: 'A',
+      type: 'compare',
+      left: { indicator: 'sma', ticker: 'AAA', length: WARM_UP },
+      op: '>',
+      right: { threshold: LEVEL },
+    },
+  ],
+  allocations: [
+    { name: 'In', when: { all: ['A'] }, holdings: [{ ticker: 'AAA', weight: 100 }] },
+    { name: 'Out', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+  ],
+};
+
+/** The switcher's switches from the closes: changes of (SMA > LEVEL) after the first day. */
+function expectedSwitches(): number {
+  let prev: boolean | undefined;
+  let switches = 0;
+  for (let i = DATES.indexOf(FROM); i <= DATES.indexOf(TARGET); i++) {
+    const window = closes.slice(i - WARM_UP + 1, i + 1);
+    const inAaa = window.reduce((a, b) => a + b, 0) / WARM_UP > LEVEL;
+    if (prev !== undefined && inAaa !== prev) switches++;
+    prev = inAaa;
+  }
+  return switches;
+}
 
 /** Expected stats from the closes, independent of the engine: from FROM to TARGET. */
 function expected() {
@@ -87,11 +126,20 @@ function expected() {
     peak = Math.max(peak, closes[i]!);
     maxDrawdown = Math.min(maxDrawdown, closes[i]! / peak - 1);
   }
-  return { cagr: (closes[end]! / closes[start]!) ** (1 / years) - 1, maxDrawdown };
+  return {
+    cagr: (closes[end]! / closes[start]!) ** (1 / years) - 1,
+    maxDrawdown,
+    switches: 0,
+  };
 }
 
+const SECRET = 'x'.repeat(32);
 const ctx = () => ({ http: null as never, now: new Date('2026-01-17T01:30:00Z'), log: quiet });
-const options = (job: RunOptions['job'], parityDir?: string): RunOptions => ({
+const options = (
+  job: RunOptions['job'],
+  parityDir?: string,
+  notifier = fakeNotifier().notifier,
+): RunOptions => ({
   job,
   target: TARGET,
   sessions,
@@ -99,29 +147,31 @@ const options = (job: RunOptions['job'], parityDir?: string): RunOptions => ({
   now: new Date('2026-01-17T01:30:00Z'),
   log: quiet,
   context: ctx,
-  alerting: {
-    date: TARGET,
-    notifiers: [fakeNotifier().notifier],
-    authSecret: 'x'.repeat(32),
-    context: ctx,
-    log: quiet,
-  },
+  alerting: { date: TARGET, notifiers: [notifier], authSecret: SECRET, context: ctx, log: quiet },
   tsa: { authorities: [] },
   code: 'test',
   ...(parityDir && { parityDir }),
 });
-const plugins = () => ({
+const plugins = (skip?: string) => ({
   ...emptyPlugins(),
-  bars: [source('p'), source('s')],
+  bars: [source('p', skip), source('s', skip)],
   series: [cashRates(sessions, DATES, TARGET)],
 });
 
+/** A database with AAA's bars (two agreeing sources) and the cash rate, graded by a bootstrap. */
+async function seeded(skip?: string): Promise<Db> {
+  const db = await testDb();
+  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  await runJob(db, plugins(skip), options('bootstrap'));
+  return db;
+}
+
 let db: Db;
 beforeAll(async () => {
-  db = await testDb();
-  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
-  const r = await runJob(db, plugins(), options('bootstrap'));
-  expect(r.ok).toBe(true);
+  db = await seeded();
+  // Every stored bar is graded green: the cases below are not refused for data health.
+  const statuses = await db.select({ status: schema.bars.status }).from(schema.bars);
+  expect(new Set(statuses.map((r) => r.status))).toEqual(new Set(['green']));
 });
 
 const dirs: string[] = [];
@@ -150,16 +200,13 @@ const validCase = (stats: Record<string, number>, extra: Record<string, unknown>
   stats,
   ...extra,
 });
+const run = (dir: string | undefined, on: Db = db) => parity(on, { dir, to: TARGET, sessions });
+const STATS = { cagr: 0.1, maxDrawdown: -0.2, switches: 4 };
 
 describe('parseCase', () => {
-  it('accepts a same_close case with synthetic leverage and no switches', () => {
-    const r = parseCase(
-      validCase(
-        { cagr: 0.1, maxDrawdown: -0.2 },
-        { strategy: alwaysIn({ holding: 'SPY?L=3&E=0.9' }) },
-      ),
-    );
-    expect('case' in r && r.case.stats).toEqual({ cagr: 0.1, maxDrawdown: -0.2 });
+  it('accepts a same_close case with synthetic leverage', () => {
+    const r = parseCase(validCase(STATS, { strategy: alwaysIn({ holding: 'SPY?L=3&E=0.9' }) }));
+    expect('case' in r && r.case.stats).toEqual(STATS);
   });
 
   it.each([
@@ -175,19 +222,20 @@ describe('parseCase', () => {
     ['to before from', { to: '2024-06-01' }, /must be after from/],
     ['an unknown key', { stat: {} }, /unknown key "stat"/],
   ])('refuses %s', (_, extra, message) => {
-    const r = parseCase(validCase({ cagr: 0.1, maxDrawdown: -0.2 }, extra));
+    const r = parseCase(validCase(STATS, extra));
     expect('errors' in r && r.errors.join('; ')).toMatch(message);
   });
 
-  it('refuses stats that are not fractions as described', () => {
+  it('refuses stats that are missing or not as described', () => {
     for (const [stats, message] of [
-      [{ cagr: 0.1, maxDrawdown: 0.35 }, /negative fraction/],
-      [{ cagr: 0.1, maxDrawdown: -35 }, /negative fraction/],
-      [{ cagr: 'x', maxDrawdown: -0.2 }, /stats.cagr/],
-      [{ maxDrawdown: -0.2 }, /stats.cagr/],
+      [{ cagr: 0.1, maxDrawdown: 0.35, switches: 4 }, /negative fraction/],
+      [{ cagr: 0.1, maxDrawdown: -35, switches: 4 }, /negative fraction/],
+      [{ cagr: 'x', maxDrawdown: -0.2, switches: 4 }, /stats.cagr/],
+      [{ maxDrawdown: -0.2, switches: 4 }, /stats.cagr/],
+      [{ cagr: 0.1, maxDrawdown: -0.2 }, /stats.switches: required/],
       [{ cagr: 0.1, maxDrawdown: -0.2, switches: 2.5 }, /stats.switches/],
       [{ cagr: 0.1, maxDrawdown: -0.2, switches: -1 }, /stats.switches/],
-      [{ cagr: 0.1, maxDrawdown: -0.2, switch: 3 }, /unknown key "switch"/],
+      [{ cagr: 0.1, maxDrawdown: -0.2, switches: 4, switch: 3 }, /unknown key "switch"/],
     ] as const) {
       const r = parseCase(validCase(stats as never));
       expect('errors' in r && r.errors.join('; ')).toMatch(message);
@@ -209,55 +257,43 @@ describe('compareStats', () => {
     const out = compareStats(ours, { cagr: 0.1035, maxDrawdown: -0.311, switches: 43 });
     expect(out.map((s) => s.within)).toEqual([false, false, false]);
     // 5% of 10 is half a switch: one switch off is still within, two is not.
-    expect(compareStats({ ...ours, switches: 11 }, { ...ours, switches: 10 })[2]!.within).toBe(
-      true,
-    );
-    expect(compareStats({ ...ours, switches: 12 }, { ...ours, switches: 10 })[2]!.tolerance).toBe(
-      PARITY_TOLERANCE.switchesMin,
-    );
-    expect(compareStats({ ...ours, switches: 12 }, { ...ours, switches: 10 })[2]!.within).toBe(
-      false,
-    );
+    const ten = (n: number) =>
+      compareStats({ ...ours, switches: n }, { ...ours, switches: 10 })[2]!;
+    expect(ten(11).within).toBe(true);
+    expect(ten(12).tolerance).toBe(PARITY_TOLERANCE.switchesMin);
+    expect(ten(12).within).toBe(false);
   });
 
-  it('an unknown value of ours is never within; absent switches are not compared', () => {
-    const r = compareStats({ ...ours, cagr: NaN }, { cagr: 0.1, maxDrawdown: -0.3 });
+  it('an unknown value of ours is never within', () => {
+    const r = compareStats({ ...ours, cagr: NaN }, { cagr: 0.1, maxDrawdown: -0.3, switches: 40 });
     expect(r[0]!.within).toBe(false);
-    expect(r[2]).toEqual({ stat: 'switches', ours: 40 });
   });
 });
 
 describe('parity on stored bars', () => {
   it('no folder, or an empty one: no results', async () => {
-    expect(await parity(db, { dir: undefined, to: TARGET })).toEqual([]);
-    expect(await parity(db, { dir: join(tmpdir(), 'saku-parity-none'), to: TARGET })).toEqual([]);
-    expect(await parity(db, { dir: casesDir({}), to: TARGET })).toEqual([]);
+    expect(await run(undefined)).toEqual([]);
+    expect(await run(join(tmpdir(), 'saku-parity-none'))).toEqual([]);
+    expect(await run(casesDir({}))).toEqual([]);
   });
 
-  it('within tolerance is green; switches left out are reported as not compared', async () => {
+  it('within tolerance is green, with the window and each stat', async () => {
     const e = expected();
     const dir = casesDir({
-      close: validCase({ cagr: e.cagr + 0.002, maxDrawdown: e.maxDrawdown - 0.009, switches: 0 }),
-      'no-switches': validCase({ cagr: e.cagr, maxDrawdown: e.maxDrawdown }),
+      close: validCase({ ...e, cagr: e.cagr + 0.002, maxDrawdown: e.maxDrawdown - 0.009 }),
     });
-    const [close, noSwitches] = await parity(db, { dir, to: TARGET });
+    const [close] = await run(dir);
     expect(close).toMatchObject({ caseName: 'close', layer: 'E', check: 'testfol_parity' });
     expect(close!.status).toBe('green');
-    expect(close!.message).toMatch(
-      /^close: same_close \(not achievable\), 2024-07-01 to 2026-01-16:/,
-    );
+    expect(close!.message).toMatch(/^close: 2024-07-01 to 2026-01-16: CAGR ours /);
+    expect(close!.message).toMatch(/switches ours 0, testfol 0, \+0 \(\+\/-1\.0\): ok$/);
     expect(close!.deviation).toBeCloseTo(0.9, 6);
-    expect(noSwitches!.status).toBe('green');
-    expect(noSwitches!.message).toMatch(/switches 0 not compared \(not in case.json\)/);
-    expect(noSwitches!.deviation).toBeLessThan(1e-9);
   });
 
   it('a stat outside its tolerance is red and the message names each stat', async () => {
     const e = expected();
-    const dir = casesDir({
-      off: validCase({ cagr: e.cagr - 0.004, maxDrawdown: e.maxDrawdown, switches: 3 }),
-    });
-    const [off] = await parity(db, { dir, to: TARGET });
+    const dir = casesDir({ off: validCase({ ...e, cagr: e.cagr - 0.004, switches: 3 }) });
+    const [off] = await run(dir);
     expect(off!.status).toBe('red');
     expect(off!.message).toMatch(/^off: /);
     expect(off!.message).toMatch(
@@ -268,19 +304,49 @@ describe('parity on stored bars', () => {
     expect(off!.deviation).toBeCloseTo(3, 6);
   });
 
+  it('counts the switches of a strategy that moves between AAA and cash', async () => {
+    const n = expectedSwitches();
+    expect(n).toBeGreaterThanOrEqual(5);
+    const tolerance = Math.max(1, 0.05 * n);
+    const stats = (switches: number) => ({ cagr: 0, maxDrawdown: -0.5, switches });
+    const at = (switches: number) => ({
+      strategy: switcher,
+      from: FROM,
+      to: TARGET,
+      stats: stats(switches),
+    });
+    const dir = casesDir({
+      a_exact: at(n),
+      b_edge: at(n + Math.floor(tolerance)),
+      c_over: at(n + Math.floor(tolerance) + 1),
+      d_under: at(n - Math.floor(tolerance) - 1),
+    });
+    const switchesOf = (r: { message?: string }) =>
+      /switches ours (\d+), testfol (\d+), [^(]+\([^)]+\): (ok|OUTSIDE)/.exec(r.message!)!.slice(1);
+    const results = await run(dir);
+    expect(results.map(switchesOf)).toEqual([
+      [`${n}`, `${n}`, 'ok'],
+      [`${n}`, `${n + Math.floor(tolerance)}`, 'ok'],
+      [`${n}`, `${n + Math.floor(tolerance) + 1}`, 'OUTSIDE'],
+      [`${n}`, `${n - Math.floor(tolerance) - 1}`, 'OUTSIDE'],
+    ]);
+    // The CAGR and drawdown given here are made up: every case is red for those as well.
+    expect(results.every((r) => r.status === 'red')).toBe(true);
+  });
+
   it('a case that cannot run is red and says why; the other cases still run', async () => {
     const e = expected();
-    const ok = { cagr: e.cagr, maxDrawdown: e.maxDrawdown };
     const dir = casesDir({
-      a_invalid: validCase(ok, { strategy: alwaysIn({ execution: 'next_open' }) }),
+      a_invalid: validCase(e, { strategy: alwaysIn({ execution: 'next_open' }) }),
       b_empty: undefined,
       c_garbled: '{ "strategy": ',
-      d_early: validCase(ok, { from: '2024-05-01' }),
-      e_unstored: validCase(ok, { strategy: alwaysIn({ holding: 'BBB' }) }),
-      f_weekend: validCase(ok, { to: '2026-01-17' }),
-      g_fine: validCase(ok),
+      d_early: validCase(e, { from: '2024-05-01' }),
+      e_unstored: validCase(e, { strategy: alwaysIn({ holding: 'BBB' }) }),
+      f_weekend: validCase(e, { to: '2026-01-17' }),
+      g_warm_up: validCase(e, { from: DATES[10] }),
+      h_fine: validCase(e),
     });
-    const results = await parity(db, { dir, to: TARGET });
+    const results = await run(dir);
     expect(results.map((r) => [r.caseName, r.status])).toEqual([
       ['a_invalid', 'red'],
       ['b_empty', 'red'],
@@ -288,7 +354,8 @@ describe('parity on stored bars', () => {
       ['d_early', 'red'],
       ['e_unstored', 'red'],
       ['f_weekend', 'red'],
-      ['g_fine', 'green'],
+      ['g_warm_up', 'red'],
+      ['h_fine', 'green'],
     ]);
     const message = (name: string) => results.find((r) => r.caseName === name)!.message;
     expect(message('a_invalid')).toMatch(/cannot run: invalid case: .*same_close/);
@@ -297,11 +364,54 @@ describe('parity on stored bars', () => {
     expect(message('d_early')).toMatch(/stored AAA starts 2024-06-03, after from \(2024-05-01\)/);
     expect(message('e_unstored')).toMatch(/no stored bars for BBB/);
     expect(message('f_weekend')).toMatch(/no decision on 2026-01-17 \(the last is 2026-01-16\)/);
+    expect(message('g_warm_up')).toMatch(
+      new RegExp(`first decision ${FROM} is after from ${DATES[10]}; warm-up not covered`),
+    );
   });
 
-  it('runJob stores each case and fails the checks run on a red one', async () => {
+  it('a red, ungraded or missing day in the window refuses the case; yellow days are counted', async () => {
     const e = expected();
-    const good = validCase({ cagr: e.cagr, maxDrawdown: e.maxDrawdown, switches: 0 });
+    const dir = casesDir({ c: validCase(e) });
+    const setStatus = (date: string, status: 'green' | 'yellow' | 'red' | null) =>
+      db.update(schema.bars).set({ status }).where(eq(schema.bars.date, date));
+    try {
+      await setStatus(DATES[100]!, 'yellow');
+      await setStatus(DATES[120]!, 'yellow');
+      const [yellow] = await run(dir);
+      expect(yellow!.status).toBe('green');
+      expect(yellow!.message).toMatch(new RegExp(`yellow days: AAA 2 \\(first ${DATES[100]}\\)$`));
+
+      await setStatus(DATES[130]!, 'red');
+      await setStatus(DATES[140]!, null);
+      const [red] = await run(dir);
+      expect(red!.status).toBe('red');
+      expect(red!.message).toMatch(
+        new RegExp(
+          `cannot run: AAA has 2 red, ungraded or missing days from ${FROM} to ${TARGET} \\(first ${DATES[130]}\\)`,
+        ),
+      );
+      // Before the window it does not matter (warm-up data only).
+      for (const d of [DATES[100], DATES[120], DATES[130], DATES[140]])
+        await setStatus(d!, 'green');
+      await setStatus(DATES[3]!, 'red');
+      expect((await run(dir))[0]!.status).toBe('green');
+    } finally {
+      for (const d of [DATES[3], DATES[100], DATES[120], DATES[130], DATES[140]]) {
+        await setStatus(d!, 'green');
+      }
+    }
+
+    // A session the sources did not send: no bar in the window.
+    const gap = await seeded(DATES[150]);
+    const [missing] = await run(dir, gap);
+    expect(missing!.message).toMatch(
+      new RegExp(`AAA has 1 red, ungraded or missing days .* \\(first ${DATES[150]}\\)`),
+    );
+  });
+
+  it('runJob stores every case in full and fails the checks run on a red one', async () => {
+    const e = expected();
+    const good = validCase(e);
     const green = await runJob(db, plugins(), options('checks', casesDir({ good })));
     expect(green.ok).toBe(true);
     const summaries = await db
@@ -313,7 +423,7 @@ describe('parity on stored bars', () => {
       passed: 1,
     });
 
-    const bad = validCase({ cagr: e.cagr + 0.01, maxDrawdown: e.maxDrawdown, switches: 0 });
+    const bad = validCase({ ...e, cagr: e.cagr + 0.01 });
     const red = await runJob(db, plugins(), options('checks', casesDir({ good, bad })));
     expect(red.ok).toBe(false);
     expect(red.error).toMatch(/testfol_parity failed: bad: /);
@@ -321,12 +431,48 @@ describe('parity on stored bars', () => {
       .select()
       .from(schema.checkResults)
       .where(eq(schema.checkResults.runId, red.runId));
-    expect(stored.filter((r) => r.checkName === 'testfol_parity').map((r) => r.status)).toEqual([
-      'red',
+    expect(
+      stored
+        .filter((r) => r.checkName === 'testfol_parity')
+        .map((r) => [r.status, r.message!.split(':')[0]]),
+    ).toEqual([
+      ['red', 'bad'],
+      ['green', 'good'],
     ]);
+    expect(stored.find((r) => r.status === 'green')!.message).toMatch(
+      /good: 2024-07-01 to 2026-01-16: CAGR ours .* testfol .*; max drawdown .*; switches/,
+    );
 
     // No cases folder: no parity results, and the run is not failed for it.
     const none = await runJob(db, plugins(), options('checks'));
     expect(none.ok).toBe(true);
+  });
+
+  it('a red case sends one admin alert with subject parity:<case>, labeled not achievable', async () => {
+    const own = await seeded();
+    const admin = await createUser(own, {
+      username: 'alex',
+      passwordHash: 'x',
+      totpSecretEnc: 'x',
+      totpLastStep: 1,
+      backupCodeHashes: ['a'],
+      isAdmin: true,
+    });
+    await setSetting(own, 'forward_records_from', '2026-01-02');
+    await addChannel(own, admin, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const { notifier, sent } = fakeNotifier();
+    const e = expected();
+    const dir = casesDir({ bad: validCase({ ...e, switches: 9 }) });
+    const r = await runJob(own, plugins(), options('checks', dir, notifier));
+    expect(r.ok).toBe(false);
+    const alerts = await own
+      .select()
+      .from(schema.alertsSent)
+      .where(eq(schema.alertsSent.subject, 'parity:bad'));
+    expect(alerts).toHaveLength(1);
+    const told = sent.filter((m) => m.text.includes('testfol parity case failed (bad)'));
+    expect(told).toHaveLength(1);
+    expect(told[0]!.text).toContain('bad: 2024-07-01 to 2026-01-16:');
+    expect(told[0]!.text).toContain('not achievable: it trades at a close that is not yet known');
   });
 });

@@ -243,9 +243,10 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         if (sent.failed.length > 0) markIncomplete('alerts');
       }
       // External golden values: the testfol cases the owner exported (requirements 13).
-      const cases = await parity(db, { dir: o.parityDir, to: target });
+      const cases = await parity(db, { dir: o.parityDir, to: target, sessions });
       if (cases.length === 0) log.info('testfol parity: no cases (none exported yet)');
-      await storeRunChecks(db, runId, cases);
+      // Every case in full, green included (ours, testfol's, difference, window).
+      await storeRunChecks(db, runId, cases, { all: true });
       for (const r of cases) {
         log.info(`Layer E ${r.check}: ${r.status}`, { message: r.message });
         if (r.status === 'green') continue;
