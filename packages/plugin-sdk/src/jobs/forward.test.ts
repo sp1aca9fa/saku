@@ -18,7 +18,7 @@ import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
 import { sendRecomputeDiffers, sendStrategyAlerts } from './alerts';
-import { type Rows, forward, recompute, signalsDiffer, upTo } from './forward';
+import { type Rows, forward, reader, recompute, signalsDiffer, upTo } from './forward';
 import { verify } from './verify';
 
 const sessions = new Sessions({
@@ -215,7 +215,7 @@ describe('forward', () => {
       return list.map((e) => {
         let text = e.payload.split(v.id).join('V');
         for (const [h, n] of names) text = text.split(h).join(n);
-        return { text, hash: names.get(e.hash), prevHash: names.get(e.prevHash) };
+        return { text, prevHash: names.get(e.prevHash) };
       });
     };
     const once = await setup();
@@ -229,6 +229,14 @@ describe('forward', () => {
     expect(a).toEqual(await record(daily.db, daily.version));
     expect(await verifyChain(once.db, once.version)).toEqual([]);
     expect(await verifyChain(daily.db, daily.version)).toEqual([]);
+  });
+
+  it('a prefix of one read holds the same rows as a read up to that date', async () => {
+    const { db } = await setup();
+    const { loadRows } = await reader(db);
+    const deps = ['AAA', 'AAA2'];
+    const all = await loadRows(deps, D[4]!);
+    for (const d of D) expect(upTo(all, d)).toEqual(await loadRows(deps, d));
   });
 
   it('a date never sees a later bar', () => {

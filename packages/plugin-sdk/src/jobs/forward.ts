@@ -19,7 +19,7 @@ import {
 import type { Sessions } from '@saku/data';
 import {
   type Db,
-  type Version,
+  type ForwardEntry,
   activeSymbols,
   allVersions,
   annotate,
@@ -113,18 +113,21 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     // its prefix (dated <= that date), the same rows a read up to that date returns. The jobs lock
     // holds the bars still while this runs.
     const all = dates.length > 0 ? await loadRows(deps, o.to) : {};
+    // The record so far, read once; each appended entry joins it as stored (the inserted row).
+    const prior: StrategyDay[] =
+      dates.length > 0 ? (await forwardRecord(db, version.id)).map(asDay) : [];
     for (const date of dates) {
       const rows = upTo(all, date);
       const bars = barsOf(rows);
       const decision = forwardDecision(strategy, date, bars, await healthOn(rows, date));
-      const equity = await forwardEquity(db, version, strategy, bars, cashRate, {
+      const equity = forwardEquity(strategy, prior, bars, cashRate, {
         date,
         signals: decision.signals ?? {},
         allocation: decision.allocation,
         holdings: decision.holdings,
         ties: decision.ties,
       });
-      await appendForward(
+      const entry = await appendForward(
         db,
         version,
         {
@@ -143,6 +146,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
         },
         o.runId,
       );
+      prior.push(asDay(entry));
       summary.appended++;
       if (decision.safeStateApplied) summary.safeStateDays++;
       if (date === o.to) {
@@ -324,23 +328,27 @@ export function signalsDiffer(
   });
 }
 
-/** The record's own equity: its recorded holdings traded as the strategy executes, from 1. */
-async function forwardEquity(
-  db: Db,
-  version: Version,
+/** A recorded entry as a strategy day: what was held, nothing else. */
+const asDay = (e: ForwardEntry): StrategyDay => ({
+  date: e.date,
+  signals: {},
+  allocation: e.allocation,
+  holdings: e.holdings as StrategyDay['holdings'],
+  ties: [],
+});
+
+/**
+ * The record's own equity: its recorded holdings traded as the strategy executes, from 1.
+ * `prior` is the whole record before `today`, in date order.
+ */
+function forwardEquity(
   strategy: Strategy,
+  prior: StrategyDay[],
   bars: Record<string, RawBar[]>,
   cashRate: (date: TradingDate) => number | undefined,
   today: StrategyDay,
-): Promise<number | null> {
-  const days: StrategyDay[] = (await forwardRecord(db, version.id)).map((e) => ({
-    date: e.date,
-    signals: {},
-    allocation: e.allocation,
-    holdings: e.holdings as StrategyDay['holdings'],
-    ties: [],
-  }));
-  days.push(today);
+): number | null {
+  const days = [...prior, today];
   try {
     return backtest({ strategy, days, bars, cashRate }).points.at(-1)!.equity;
   } catch {
