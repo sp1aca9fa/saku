@@ -204,7 +204,7 @@ export function caseFolders(dir: string | undefined): string[] {
     .sort();
 }
 
-/** A dependency's days in the window that are not green, by their latest grade. */
+/** A dependency's days from its first stored bar to `to` that are not green (latest grade). */
 interface WindowHealth {
   ticker: string;
   /** Red, never graded, or a session without a stored bar: the case is refused. */
@@ -217,10 +217,12 @@ interface WindowHealth {
  * from the whole stored history up to `to` (indicators and bands warm up on earlier data); the
  * equity curve runs from `from`, which must be the first decision day, to `to`.
  *
- * Data health in the window (requirements 04: never a confident number on doubtful data): each
- * dependency's canonical bar carries its latest grade (set by every verify run). A red or
- * ungraded bar, or a session of `sessions` without a stored bar, refuses the case; yellow days
- * are computed and counted in the message, the status still follows the tolerances.
+ * Data health (requirements 04: never a confident number on doubtful data), from each
+ * dependency's first stored bar through `to`: warm-up bars feed the indicators, and band state
+ * carries from the first decision, so a bad day before `from` can change the curve too. Each
+ * canonical bar carries its latest grade (set by every verify run). A red or ungraded bar, or a
+ * session of `sessions` without a stored bar, refuses the case; yellow days are computed and
+ * counted in the message, the status still follows the tolerances.
  */
 export async function parity(
   db: Db,
@@ -284,11 +286,14 @@ export async function parity(
         continue;
       }
 
-      const sessions = o.sessions.between(c.from, c.to);
       const health: WindowHealth[] = deps.map((t) => {
         const byDate = new Map(rows[t]!.map((r) => [r.date, r.status]));
+        // Every session and every stored bar (rows are up to `to`), from the first stored bar.
+        const dates = [
+          ...new Set([...o.sessions.between(rows[t]![0]!.date, c.to), ...byDate.keys()]),
+        ].sort();
         const h: WindowHealth = { ticker: t, bad: [], yellow: [] };
-        for (const d of sessions) {
+        for (const d of dates) {
           const status = byDate.get(d);
           if (status === 'yellow') h.yellow.push(d);
           else if (status !== 'green') h.bad.push(d);
@@ -301,7 +306,7 @@ export async function parity(
           bad
             .map(
               (h) =>
-                `${h.ticker} has ${h.bad.length} red, ungraded or missing days from ${c.from} to ${c.to} (first ${h.bad[0]})`,
+                `${h.ticker} has ${h.bad.length} red, ungraded or missing days from its first stored bar (warm-up days count) to ${c.to} (first ${h.bad[0]})`,
             )
             .join('; '),
         );
@@ -331,12 +336,12 @@ export async function parity(
       const deviation = Math.max(...stats.map((x) => Math.abs(x.difference) / x.tolerance));
       const yellow = health.filter((h) => h.yellow.length > 0);
       const notes = yellow.length
-        ? `; yellow days: ${yellow.map((h) => `${h.ticker} ${h.yellow.length} (first ${h.yellow[0]})`).join(', ')}`
+        ? `; yellow days (warm-up days count): ${yellow.map((h) => `${h.ticker} ${h.yellow.length} (first ${h.yellow[0]})`).join(', ')}`
         : '';
       out.push(
         result(
           red ? 'red' : 'green',
-          `${start} to ${end}: ${stats.map(statLine).join('; ')}${notes}`,
+          `same_close (not achievable), ${start} to ${end}: ${stats.map(statLine).join('; ')}${notes}`,
           // NaN (an unknown value of ours) is stored as unknown, never as a small deviation.
           Number.isFinite(deviation) ? deviation : undefined,
         ),

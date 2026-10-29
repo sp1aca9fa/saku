@@ -87,10 +87,13 @@ Unverified until the first real case: these steps and where testfol shows each n
   Synthetic leverage uses the
   requirements 05 formula (daily return = L * r - (L - 1) * cash rate / 252 - E / 100 / 252, the
   cash rate as known before each session).
-- Data health in the window, by each stored bar's latest grade: a red or ungraded day, or a
-  session without a stored bar, for any ticker the case reads refuses the case (the message names
-  the ticker, the count and the first date). Yellow days are computed and counted in the message;
-  the status still follows the tolerances. The cash rate's own health is not checked here.
+- Data health from each ticker's first stored bar through `to`, by each stored bar's latest
+  grade. Warm-up days count: they feed the indicators, and band state carries from the first
+  decision, so a bad day before `from` can change the curve. A red or ungraded day, or a session
+  without a stored bar, for any ticker the case reads refuses the case (the message names the
+  ticker, the count and the first date). Yellow days are computed and counted in the message; the
+  status still follows the tolerances. The cash rate's own health is not checked here.
+- Every stored result starts with the label `same_close (not achievable)`.
 
 ## Tolerances (requirements 13, never widened)
 

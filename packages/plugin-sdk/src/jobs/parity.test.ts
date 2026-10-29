@@ -285,7 +285,9 @@ describe('parity on stored bars', () => {
     const [close] = await run(dir);
     expect(close).toMatchObject({ caseName: 'close', layer: 'E', check: 'testfol_parity' });
     expect(close!.status).toBe('green');
-    expect(close!.message).toMatch(/^close: 2024-07-01 to 2026-01-16: CAGR ours /);
+    expect(close!.message).toMatch(
+      /^close: same_close \(not achievable\), 2024-07-01 to 2026-01-16: CAGR ours /,
+    );
     expect(close!.message).toMatch(/switches ours 0, testfol 0, \+0 \(\+\/-1\.0\): ok$/);
     expect(close!.deviation).toBeCloseTo(0.9, 6);
   });
@@ -369,7 +371,7 @@ describe('parity on stored bars', () => {
     );
   });
 
-  it('a red, ungraded or missing day in the window refuses the case; yellow days are counted', async () => {
+  it('a red, ungraded or missing day from the first stored bar refuses the case; yellow days are counted', async () => {
     const e = expected();
     const dir = casesDir({ c: validCase(e) });
     const setStatus = (date: string, status: 'green' | 'yellow' | 'red' | null) =>
@@ -379,7 +381,9 @@ describe('parity on stored bars', () => {
       await setStatus(DATES[120]!, 'yellow');
       const [yellow] = await run(dir);
       expect(yellow!.status).toBe('green');
-      expect(yellow!.message).toMatch(new RegExp(`yellow days: AAA 2 \\(first ${DATES[100]}\\)$`));
+      expect(yellow!.message).toMatch(
+        new RegExp(`yellow days \\(warm-up days count\\): AAA 2 \\(first ${DATES[100]}\\)$`),
+      );
 
       await setStatus(DATES[130]!, 'red');
       await setStatus(DATES[140]!, null);
@@ -387,14 +391,23 @@ describe('parity on stored bars', () => {
       expect(red!.status).toBe('red');
       expect(red!.message).toMatch(
         new RegExp(
-          `cannot run: AAA has 2 red, ungraded or missing days from ${FROM} to ${TARGET} \\(first ${DATES[130]}\\)`,
+          `cannot run: AAA has 2 red, ungraded or missing days from its first stored bar \\(warm-up days count\\) to ${TARGET} \\(first ${DATES[130]}\\)`,
         ),
       );
-      // Before the window it does not matter (warm-up data only).
+      // A warm-up bar (before from) feeds the indicators and band state: it counts too.
       for (const d of [DATES[100], DATES[120], DATES[130], DATES[140]])
         await setStatus(d!, 'green');
       await setStatus(DATES[3]!, 'red');
-      expect((await run(dir))[0]!.status).toBe('green');
+      const [warmUp] = await run(dir);
+      expect(warmUp!.status).toBe('red');
+      expect(warmUp!.message).toMatch(
+        new RegExp(`cannot run: AAA has 1 red, .* \\(first ${DATES[3]}\\)`),
+      );
+      expect(DATES[3]! < FROM).toBe(true);
+      await setStatus(DATES[3]!, 'yellow');
+      const [warmUpYellow] = await run(dir);
+      expect(warmUpYellow!.status).toBe('green');
+      expect(warmUpYellow!.message).toMatch(/AAA 1 \(first 2024-06-06\)$/);
     } finally {
       for (const d of [DATES[3], DATES[100], DATES[120], DATES[130], DATES[140]]) {
         await setStatus(d!, 'green');
@@ -440,7 +453,7 @@ describe('parity on stored bars', () => {
       ['green', 'good'],
     ]);
     expect(stored.find((r) => r.status === 'green')!.message).toMatch(
-      /good: 2024-07-01 to 2026-01-16: CAGR ours .* testfol .*; max drawdown .*; switches/,
+      /good: same_close \(not achievable\), 2024-07-01 to 2026-01-16: CAGR ours .* testfol .*; max drawdown .*; switches/,
     );
 
     // No cases folder: no parity results, and the run is not failed for it.
@@ -472,7 +485,7 @@ describe('parity on stored bars', () => {
     expect(alerts).toHaveLength(1);
     const told = sent.filter((m) => m.text.includes('testfol parity case failed (bad)'));
     expect(told).toHaveLength(1);
-    expect(told[0]!.text).toContain('bad: 2024-07-01 to 2026-01-16:');
+    expect(told[0]!.text).toContain('bad: same_close (not achievable), 2024-07-01 to 2026-01-16:');
     expect(told[0]!.text).toContain('not achievable: it trades at a close that is not yet known');
   });
 });
