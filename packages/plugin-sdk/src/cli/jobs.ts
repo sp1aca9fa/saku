@@ -20,7 +20,12 @@ import { jobLogger } from '../jobs/log';
 import { dailyTarget } from '../jobs/target';
 import { probe } from '../jobs/probe';
 import { GATE, type SpikeReport, spikeReport } from '../jobs/spike';
-import { type AlertOptions, sendJobFailure, sendStrategyAlerts } from '../jobs/alerts';
+import {
+  type AlertOptions,
+  sendDataHealthAdmin,
+  sendJobFailure,
+  sendStrategyAlerts,
+} from '../jobs/alerts';
 import { anchor } from '../jobs/anchor';
 import { forward } from '../jobs/forward';
 import { verify } from '../jobs/verify';
@@ -189,6 +194,14 @@ try {
       // Undelivered alerts are retried at the next check (sent ones are not repeated).
       const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
       log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
+      if (sent.failed.length > 0) incomplete.push('alerts');
+    }
+    if (checked.health !== 'green') {
+      const sent = await sendDataHealthAdmin(db, {
+        ...alerting,
+        health: checked.health,
+        reasons: checked.reasons,
+      });
       if (sent.failed.length > 0) incomplete.push('alerts');
     }
   }

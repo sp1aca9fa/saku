@@ -20,10 +20,11 @@ import {
   recordAlertSent,
   schema,
 } from '@saku/db';
-import { eq } from 'drizzle-orm';
+import { desc, eq, isNull } from 'drizzle-orm';
 import type { Logger, Notifier, PluginContext } from '../types';
 
-export type AlertType = 'state_change' | 'data_yellow' | 'data_red' | 'job_failure';
+export type AlertType =
+  'state_change' | 'data_yellow' | 'data_red' | 'job_failure' | 'data_health' | 'update_failed';
 const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red'];
 
 export interface Alert {
@@ -163,27 +164,93 @@ export async function sendStrategyAlerts(
   return summary;
 }
 
-/** A job that did not finish, to every admin channel, once per job and day. */
-export async function sendJobFailure(
+/**
+ * An operational alert to every admin channel, once per (subject, date, type). Nothing is sent
+ * before forward records start (the A1 gate): stage A allows no production alerts before it.
+ */
+export async function sendAdminAlert(
   db: Db,
-  o: AlertOptions & { job: string; error: string; health?: string },
+  o: AlertOptions & {
+    subject: string;
+    type: AlertType;
+    lines: (t: Translate) => string[];
+    /** The data health it states; default: the latest overall grade on record. */
+    health?: string;
+  },
 ): Promise<AlertSummary> {
   const summary: AlertSummary = { sent: 0, failed: [] };
+  if (!(await getSetting(db, 'forward_records_from'))) return summary;
+  const health = o.health ?? (await latestOverallHealth(db)) ?? 'unknown';
   const admins = await db.select().from(schema.users).where(eq(schema.users.isAdmin, true));
   for (const admin of admins) {
     const t = translator(await languageOf(db, admin.id));
-    const text = [
-      t('alerts.jobFailure.title', { job: o.job, date: o.date }),
-      t('alerts.jobFailure.body', { error: o.error.split('\n')[0]!.slice(0, 300) }),
-      t(`alerts.health.${o.health ?? 'unknown'}`),
-    ].join('\n');
+    const text = [...o.lines(t), t(`alerts.health.${health}`)].join('\n');
     for (const channel of await deliveryTargets(db, admin.id, o.authSecret)) {
       if (!channel.admin) continue;
-      const key = { subject: o.job, date: o.date, type: 'job_failure' as const };
+      const key = { subject: o.subject, date: o.date, type: o.type };
       await deliver(db, o, channel, { key, text }, summary);
     }
   }
   return summary;
+}
+
+/** A job that did not finish, once per job and day. */
+export function sendJobFailure(
+  db: Db,
+  o: AlertOptions & { job: string; error: string; health?: string },
+): Promise<AlertSummary> {
+  return sendAdminAlert(db, {
+    ...o,
+    subject: o.job,
+    type: 'job_failure',
+    health: o.health ?? 'unknown',
+    lines: (t) => [
+      t('alerts.jobFailure.title', { job: o.job, date: o.date }),
+      t('alerts.jobFailure.body', { error: o.error.split('\n')[0]!.slice(0, 300) }),
+    ],
+  });
+}
+
+/** The day's data is not green overall: what is not, for the admins. */
+export function sendDataHealthAdmin(
+  db: Db,
+  o: AlertOptions & { health: string; reasons: string[] },
+): Promise<AlertSummary> {
+  return sendAdminAlert(db, {
+    ...o,
+    subject: 'data',
+    type: 'data_health',
+    lines: (t) => [
+      t('alerts.dataAdmin.title', { date: o.date }),
+      t('alerts.dataAdmin.body', { reasons: o.reasons.join(', ') }),
+    ],
+  });
+}
+
+/** A self-update that failed, once per target version. */
+export function sendUpdateFailed(
+  db: Db,
+  o: AlertOptions & { from: string; to: string; step: string; stuck: boolean },
+): Promise<AlertSummary> {
+  return sendAdminAlert(db, {
+    ...o,
+    subject: `update:${o.to}`,
+    type: 'update_failed',
+    lines: (t) => [
+      t('alerts.update.title', { to: o.to, step: o.step }),
+      t(o.stuck ? 'alerts.update.stuck' : 'alerts.update.back', { from: o.from }),
+    ],
+  });
+}
+
+async function latestOverallHealth(db: Db): Promise<string | undefined> {
+  const [row] = await db
+    .select({ status: schema.dataHealth.status })
+    .from(schema.dataHealth)
+    .where(isNull(schema.dataHealth.symbolId))
+    .orderBy(desc(schema.dataHealth.date), desc(schema.dataHealth.id))
+    .limit(1);
+  return row?.status;
 }
 
 async function deliver(

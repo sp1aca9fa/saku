@@ -6,11 +6,17 @@ import {
   createUser,
   registerVersion,
   setChannelEnabled,
+  setSetting,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
-import { sendJobFailure, sendStrategyAlerts } from './alerts';
+import {
+  sendDataHealthAdmin,
+  sendJobFailure,
+  sendStrategyAlerts,
+  sendUpdateFailed,
+} from './alerts';
 
 const sessions = new Sessions({
   id: 't',
@@ -206,9 +212,48 @@ describe('channels', () => {
   });
 });
 
-describe('job failure alerts', () => {
+describe('admin alerts', () => {
+  it('waits for the A1 gate', async () => {
+    const { db, owner } = await setup();
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const { notifier, sent } = fakeNotifier();
+    const o = { ...options(notifier, '2026-01-05'), job: 'daily', error: 'x' };
+    expect((await sendJobFailure(db, o)).sent).toBe(0);
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    expect((await sendJobFailure(db, o)).sent).toBe(1);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('reports a failed update and a non-green day with the latest data health', async () => {
+    const { db, owner } = await setup('ja');
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const { notifier, sent } = fakeNotifier();
+    const base = options(notifier, '2026-01-05');
+    const update = { ...base, from: 'abc1234', to: 'def5678', step: 'check', stuck: false };
+    expect((await sendUpdateFailed(db, update)).sent).toBe(1);
+    expect((await sendUpdateFailed(db, update)).sent).toBe(0);
+    expect(sent[0]!.text).toBe(
+      [
+        'Saku: def5678 への更新が check の段階で失敗しました',
+        'サーバーは abc1234 に戻り、そのまま動作しています。新しいバージョンがプッシュされると再試行します。詳細はサーバーの更新ログにあります。',
+        'データ状態: 不明(処理が完了していません)。',
+      ].join('\n'),
+    );
+    await sendDataHealthAdmin(db, {
+      ...base,
+      health: 'yellow',
+      reasons: ['AAA', 'DTB3:stale(3)@fred'],
+    });
+    expect(sent[1]!.text).toContain('緑でない項目: AAA, DTB3:stale(3)@fred。');
+    expect(sent[1]!.text).toContain('データ状態: 黄');
+    // Only admin channels: the owner's ordinary channel got none of these.
+    expect(sent.every((m) => m.target === 'ops')).toBe(true);
+  });
+
   it('goes to admin channels once per job and day', async () => {
     const { db, owner } = await setup();
+    await setSetting(db, 'forward_records_from', '2026-01-05');
     await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
     const { notifier, sent } = fakeNotifier();
     const o = {

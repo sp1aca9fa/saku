@@ -131,12 +131,16 @@ main() {
   git rev-parse '@{u}' >"$failed_file"
   git reset -q --hard "$before"
   git submodule update --init
+  local stuck=""
   if ensure_node && pnpm install --frozen-lockfile; then
     echo "Back on $before."
   else
     echo "Going back failed too: the jobs may not run. Run ops/update-server.sh by hand."
+    stuck="--stuck"
   fi
   pnpm --silent update:log --from "$before" --to "$target" --failed "$step" || true
+  # shellcheck disable=SC2086
+  pnpm --silent alert update-failed --from "$before" --to "$target" --step "$step" $stuck || true
   return 1
 }
 

@@ -12,7 +12,9 @@
 //   pnpm channel add discord|telegram --user <username> [--admin]   asks for the webhook address
 //                    or chat id (kept out of the shell history), stored encrypted
 //   pnpm channel list|disable|enable|test [<channel id>] --user <username>
-import { Strategy, dependencies, isTradingDate } from '@saku/core';
+//   pnpm alert update-failed --from <commit> --to <commit> --step <step> [--stuck]
+//                    (the update script, after going back)
+import { Strategy, dependencies, isTradingDate, tradingDateOf } from '@saku/core';
 import { translator } from '@saku/content';
 import {
   activeSymbols,
@@ -37,6 +39,7 @@ import { exitIfUnmigrated } from '@saku/db/migrate';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA, verifyToken } from '../jobs/anchor';
 import { loadPlugins, pluginContext } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -203,6 +206,23 @@ if (tool === 'strategy' && command === 'check') {
     await notifier.send(channel.target, t('alerts.test'), pluginContext(notifier.info, log));
     console.log('Sent.');
   } else fail('pnpm channel add|list|disable|enable|test');
+} else if (tool === 'alert' && command === 'update-failed') {
+  const { notifiers } = await loadPlugins();
+  const log = { info: () => {}, warn: (m: string, d?: object) => console.error(m, d ?? '') };
+  const sent = await sendUpdateFailed(db, {
+    date: tradingDateOf(new Date()),
+    notifiers,
+    authSecret: process.env.AUTH_SECRET?.trim() ?? '',
+    context: (n) => pluginContext(n.info, log),
+    log,
+    from: flag('from') ?? fail('--from <commit>'),
+    to: flag('to') ?? fail('--to <commit>'),
+    step: flag('step') ?? 'unknown',
+    stuck: rest.includes('--stuck'),
+  });
+  console.log(
+    `Admin alert: ${sent.sent} sent${sent.failed.length ? `, ${sent.failed.length} failed` : ''}.`,
+  );
 } else {
   fail(
     'Usage: pnpm strategy check|register|list|show|verify ... | pnpm journal add|list ... | pnpm channel ... ' +

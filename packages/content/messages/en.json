@@ -32,6 +32,15 @@
       "title": "Saku: the {job} run for {date} did not finish",
       "body": "Reason: {error}. It runs again at the next hourly check. The job log on the server has the details."
     },
-    "test": "Saku: this channel works. Alerts will arrive here."
+    "test": "Saku: this channel works. Alerts will arrive here.",
+    "dataAdmin": {
+      "title": "Saku: data for {date} is not green",
+      "body": "Not green: {reasons}. Each strategy states its own status; a red one applies its safe state."
+    },
+    "update": {
+      "title": "Saku: the update to {to} failed at the {step} step",
+      "back": "The server went back to {from} and keeps running it. It tries again when a newer version is pushed; the update log on the server has the details.",
+      "stuck": "Going back to {from} failed too, so the jobs may not run. Run ops/update-server.sh on the server by hand."
+    }
   }
 }

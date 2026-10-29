@@ -48,6 +48,8 @@ export interface VerifySummary {
   byStatus: Record<string, number>;
   /** Overall data health on `to`. */
   health: HealthStatus;
+  /** What was not green overall on `to` (symbols, FX and series checks). */
+  reasons: string[];
   standIns: number;
   /** Stand-ins the primary has now replaced, off by more than the layer B close tolerance. */
   standInsOff: { ticker: string; date: TradingDate; deviation: number }[];
@@ -389,6 +391,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     stored: keep.length,
     byStatus,
     health: overall.get(o.to)?.status ?? 'red',
+    reasons: overall.has(o.to) ? overall.get(o.to)!.reasons : ['no data'],
     standIns: standInCount,
     standInsOff,
   };
