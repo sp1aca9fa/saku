@@ -1,6 +1,6 @@
 # Data pipeline
 
-How data gets from the sources into Saku and how it is checked. Requirements: `docs/requirements/04-data-pipeline.md`. Status: Stage A1 (ingestion, adjusted series, layers A-C) and the first A2 parts (health status, the stand-in rule; the decision-margin test comes with the strategy engine); issuer data (layer D), the quota guard, the weekly refetch and the fault-injection suite with A3.
+How data gets from the sources into Saku and how it is checked. Requirements: `docs/requirements/04-data-pipeline.md`. Status: Stage A1 (ingestion, adjusted series, layers A-C) and the first A2 parts (health status, the stand-in rule; the decision-margin test comes with the strategy engine); the fault-injection suite (A3); issuer data (layer D), the weekly refetch and the CSV fallback follow in A3.
 
 ## Flow
 
@@ -85,6 +85,22 @@ For a session the primary has no bar (from its first bar to the target date), a 
 A stand-in day is yellow (`stand_in@<source>`); a refused one red (`stand_in_refused:<reason>`). Each stand-in records its **band** for the decision-margin test (A2, with the strategy engine): the close tolerance when two secondaries agreed, else the index tolerance (0.1pp) when the index check passed, else the layer C tolerance of that day; with no independent check at all (a 1x fund without an index, one secondary, or the day after a gap), the layer C base tolerance (0.5pp), recorded with basis `unchecked`. Assumption: that last case is not named in the requirements.
 
 Stand-ins are kept in `stand_ins`. When the primary's bar arrives, the canonical bar is rebuilt from it and the stand-in row gets the primary's close and the difference; a difference above the close tolerance is logged (the alert and the forward-record annotation come with A2's alerts and records).
+
+## Fault injection (layer F)
+
+`packages/plugin-sdk/src/jobs/faults.test.ts` runs in CI on synthetic data: a clean bootstrap, then a whole daily run (ingest, checks, forward record, alerts) with one material fault in one source's response, all sources available. A clean run is green (the control). Each fault and its grade:
+
+| Fault | Grade | Caught by |
+|---|---|---|
+| Decimal shift (close x10), in the primary or a secondary | red, safe state | B close |
+| Missed split; split applied to prices but not declared | red, safe state | B split, C leverage |
+| Missed dividend; dividend x10 | red, safe state | B dividend, B adjusted return |
+| Stale close (previous close repeated) | red, safe state | B close, A unchanged close |
+| Swapped tickers | red, safe state | B close, C leverage |
+| Timezone shift (each bar a session late or early) | red, safe state | B close |
+| Missing day; the same day sent twice (the response is refused) | yellow (`stand_in`) | A missing day, the stand-in rule |
+
+A day only one source had is never green (`single_source`). New data paths add their cases here.
 
 ## Attribution
 
