@@ -31,6 +31,8 @@
     "probe": "pnpm --silent --filter @saku/plugin-sdk jobs probe",
     "spike": "pnpm --silent --filter @saku/plugin-sdk jobs spike",
     "plugins": "pnpm --silent --filter @saku/plugin-sdk plugins",
+    "sources": "pnpm --silent --filter @saku/plugin-sdk sources sources",
+    "csv": "pnpm --silent --filter @saku/plugin-sdk sources csv",
     "strategy": "pnpm --silent --filter @saku/plugin-sdk cli strategy",
     "journal": "pnpm --silent --filter @saku/plugin-sdk cli journal",
     "channel": "pnpm --silent --filter @saku/plugin-sdk cli channel",

@@ -1,5 +1,5 @@
-import type { JobType } from '@saku/core';
-import { eq, sql } from 'drizzle-orm';
+import type { JobType, SourceRole } from '@saku/core';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import type { Db } from './client';
 import { activityLog, jobRuns, sourceRoles } from './schema';
 
@@ -66,4 +66,70 @@ export async function seedSourceRoles(db: Db, suggestions: SourceSuggestion[]): 
     added += values.length;
   }
   return added;
+}
+
+/** Every assigned source, by data kind and position. */
+export function sourceRolesOf(db: Db) {
+  return db
+    .select()
+    .from(sourceRoles)
+    .orderBy(asc(sourceRoles.dataKind), asc(sourceRoles.position));
+}
+
+/**
+ * The admin assigns a source's role for a data kind (an unassigned source is not used). A new
+ * primary turns the previous one into a secondary: there is exactly one. A new source goes last.
+ */
+export async function setSourceRole(
+  db: Db,
+  o: { dataKind: string; key: string; role: SourceRole; actor: string },
+): Promise<{ demoted?: string }> {
+  return db.transaction(async (tx) => {
+    const rows = await tx.select().from(sourceRoles).where(eq(sourceRoles.dataKind, o.dataKind));
+    const old = rows.find((r) => r.role === 'primary' && r.pluginKey !== o.key);
+    if (o.role === 'primary' && old) {
+      await tx
+        .update(sourceRoles)
+        .set({ role: 'secondary' })
+        .where(and(eq(sourceRoles.dataKind, o.dataKind), eq(sourceRoles.pluginKey, old.pluginKey)));
+    }
+    const position =
+      rows.find((r) => r.pluginKey === o.key)?.position ??
+      Math.max(-1, ...rows.map((r) => r.position)) + 1;
+    await tx
+      .insert(sourceRoles)
+      .values({ dataKind: o.dataKind, pluginKey: o.key, role: o.role, position })
+      .onConflictDoUpdate({
+        target: [sourceRoles.dataKind, sourceRoles.pluginKey],
+        set: { role: o.role },
+      });
+    const demoted = o.role === 'primary' ? old?.pluginKey : undefined;
+    await tx.insert(activityLog).values({
+      actor: o.actor,
+      action: 'source_roles.set',
+      detail: { dataKind: o.dataKind, key: o.key, role: o.role, ...(demoted && { demoted }) },
+    });
+    return demoted ? { demoted } : {};
+  });
+}
+
+/** Stops using a source for a data kind (its stored data stays). */
+export async function removeSourceRole(
+  db: Db,
+  o: { dataKind: string; key: string; actor: string },
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const gone = await tx
+      .delete(sourceRoles)
+      .where(and(eq(sourceRoles.dataKind, o.dataKind), eq(sourceRoles.pluginKey, o.key)))
+      .returning();
+    if (gone.length) {
+      await tx.insert(activityLog).values({
+        actor: o.actor,
+        action: 'source_roles.remove',
+        detail: { dataKind: o.dataKind, key: o.key, role: gone[0]!.role },
+      });
+    }
+    return gone.length > 0;
+  });
 }

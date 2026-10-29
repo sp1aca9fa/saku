@@ -7,7 +7,14 @@
 // heartbeat through the hooks.
 import type { TradingDate } from '@saku/core';
 import type { Sessions } from '@saku/data';
-import { type Db, finishRun, revisionsOfRun, seedSourceRoles, startRun } from '@saku/db';
+import {
+  type Db,
+  finishRun,
+  revisionsOfRun,
+  seedSourceRoles,
+  sourceRolesOf,
+  startRun,
+} from '@saku/db';
 import { type LoadedPlugins, allInfos, savePluginInfos } from '../registry';
 import type { Logger, PluginContext, PluginInfo } from '../types';
 import {
@@ -81,6 +88,20 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       ),
     );
     if (plugins.missing.length > 0) log.info(`Not present: ${plugins.missing.join(', ')}`);
+    // Roles are seeded once per data kind; a plug-in added later is unused until the admin
+    // assigns it (pnpm sources set).
+    const roles = await sourceRolesOf(db);
+    const unassigned = infos.filter(
+      (i) =>
+        i.kind in DATA_KIND &&
+        !roles.some(
+          (r) =>
+            r.pluginKey === i.key && r.dataKind === DATA_KIND[i.kind as keyof typeof DATA_KIND],
+        ),
+    );
+    if (unassigned.length > 0) {
+      log.warn(`Loaded but not used (no role): ${unassigned.map((i) => i.key).join(', ')}`);
+    }
     log.info(`${job} for ${target}`, { runId });
 
     // Before any request: the cash series is checked on this calendar.

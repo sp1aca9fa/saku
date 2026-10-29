@@ -11,7 +11,8 @@
     "typecheck": "tsc -p .",
     "jobs": "tsx src/cli/jobs.ts",
     "plugins": "tsx src/cli/plugins.ts",
-    "cli": "tsx src/cli/strategy.ts"
+    "cli": "tsx src/cli/strategy.ts",
+    "sources": "tsx src/cli/sources.ts"
   },
   "dependencies": {
     "@saku/content": "workspace:*",

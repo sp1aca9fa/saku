@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { finishRun, seedSourceRoles, startRun } from './runs';
-import { jobRuns, sourceRoles } from './schema';
+import {
+  finishRun,
+  removeSourceRole,
+  seedSourceRoles,
+  setSourceRole,
+  sourceRolesOf,
+  startRun,
+} from './runs';
+import { activityLog, jobRuns, sourceRoles } from './schema';
 import { testDb } from './testing';
 
 describe('job runs', () => {
@@ -29,6 +36,38 @@ describe('seedSourceRoles', () => {
       'a:primary',
       'b:secondary',
       'c:secondary',
+    ]);
+  });
+});
+
+describe('source roles set by the admin', () => {
+  it('one primary: a new one demotes the old; new sources go last; removal is logged', async () => {
+    const db = await testDb();
+    await seedSourceRoles(db, [
+      { key: 'a', dataKind: 'bars', suggestedRole: 'primary' },
+      { key: 'b', dataKind: 'bars', suggestedRole: 'secondary' },
+    ]);
+    expect(
+      await setSourceRole(db, { dataKind: 'bars', key: 'csv', role: 'primary', actor: 'cli' }),
+    ).toEqual({ demoted: 'a' });
+    const roles = (await sourceRolesOf(db)).map((r) => [r.pluginKey, r.role, r.position]);
+    expect(roles).toEqual([
+      ['a', 'secondary', 0],
+      ['b', 'secondary', 1],
+      ['csv', 'primary', 2],
+    ]);
+    // Setting the same primary again demotes nothing.
+    expect(
+      await setSourceRole(db, { dataKind: 'bars', key: 'csv', role: 'primary', actor: 'cli' }),
+    ).toEqual({});
+    expect(await removeSourceRole(db, { dataKind: 'bars', key: 'csv', actor: 'cli' })).toBe(true);
+    expect(await removeSourceRole(db, { dataKind: 'bars', key: 'csv', actor: 'cli' })).toBe(false);
+    const log = (await db.select().from(activityLog)).map((r) => r.action);
+    expect(log).toEqual([
+      'source_roles.seed',
+      'source_roles.set',
+      'source_roles.set',
+      'source_roles.remove',
     ]);
   });
 });

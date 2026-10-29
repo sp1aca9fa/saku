@@ -1,6 +1,6 @@
 # Data pipeline
 
-How data gets from the sources into Saku and how it is checked. Requirements: `docs/requirements/04-data-pipeline.md`. Status: Stage A1 (ingestion, adjusted series, layers A-C) and the first A2 parts (health status, the stand-in rule; the decision-margin test comes with the strategy engine); the fault-injection suite, the weekly run and layer E on stored data (A3); issuer data (layer D) and the CSV fallback follow in A3.
+How data gets from the sources into Saku and how it is checked. Requirements: `docs/requirements/04-data-pipeline.md`. Status: Stage A1 (ingestion, adjusted series, layers A-C) and the first A2 parts (health status, the stand-in rule; the decision-margin test comes with the strategy engine); the fault-injection suite, the weekly run and layer E on stored data (A3); source roles and the CSV fallback (A3); issuer data (layer D) follows in A3.
 
 ## Flow
 
@@ -85,6 +85,11 @@ For a session the primary has no bar (from its first bar to the target date), a 
 A stand-in day is yellow (`stand_in@<source>`); a refused one red (`stand_in_refused:<reason>`). Each stand-in records its **band** for the decision-margin test (A2, with the strategy engine): the close tolerance when two secondaries agreed, else the index tolerance (0.1pp) when the index check passed, else the layer C tolerance of that day; with no independent check at all (a 1x fund without an index, one secondary, or the day after a gap), the layer C base tolerance (0.5pp), recorded with basis `unchecked`. Assumption: that last case is not named in the requirements.
 
 Stand-ins are kept in `stand_ins`. When the primary's bar arrives, the canonical bar is rebuilt from it and the stand-in row gets the primary's close and the difference; a difference above the close tolerance is logged (the alert and the forward-record annotation come with A2's alerts and records).
+
+## Source roles and the CSV fallback
+
+- **Roles** are seeded from the plug-ins' suggestions on the first run of each data kind (one primary). After that the admin decides: `pnpm sources list` (roles in order, and loaded plug-ins that have none), `pnpm sources set <bars|series|fx> <key> <primary|secondary|check>` (a new primary turns the old one into a secondary), `pnpm sources remove <kind> <key>` (its stored data stays). A loaded plug-in without a role is not used, and every run logs it. Each change is in the activity log. The Settings page replaces this with D1.
+- **CSV fallback** (`pnpm csv import <file> --ticker SPY [--source csv-<name>]`): columns `date,open,high,low,close,volume,dividend,split` (only `date` and `close` required; dividend 0 and split 1 when empty), unadjusted values as traded. Validated before anything is stored: plain decimal numbers, `YYYY-MM-DD` trading days in order, each once, and layer A's structure checks on every bar; unknown columns (an adjusted close, for example) refuse the file, since derived values are never imported. One bad row refuses the whole file. The bars are stored as raw data of their own source (`csv` by default, never a plug-in's key) through the revision log, and are used once that source has a role, like any source: as a secondary to cross-check, or as the primary while the main source is down (then `pnpm sources set bars <main> primary` again). The next run's checks grade them.
 
 ## Fault injection (layer F)
 
