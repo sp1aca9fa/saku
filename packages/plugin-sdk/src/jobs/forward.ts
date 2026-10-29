@@ -83,8 +83,15 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     const out: Record<string, TickerHealth> = {};
     for (const [t, list] of Object.entries(rows)) {
       const bar = list.at(-1);
-      if (!bar || bar.date !== date || !bar.status) continue;
       const id = symbolIds.get(t)!;
+      if (!bar || bar.date !== date || !bar.status) {
+        // No bar that day: the grade says why (a refused stand-in), else it stays `no_data`.
+        const graded = await latestHealth(db, id, date);
+        if (graded && graded.status !== 'green') {
+          out[t] = { status: graded.status, reasons: graded.reasons };
+        }
+        continue;
+      }
       const reasons =
         bar.status === 'green' ? [] : ((await latestHealth(db, id, date))?.reasons ?? []);
       const stood = bar.standIn ? await standInOn(db, id, date) : undefined;

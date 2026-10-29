@@ -2,7 +2,7 @@
 // whole daily run with all sources available, is detected (never green) and never produces a
 // normal signal on red: the forward record and the alert carry the strategy's safe state.
 // Separately, a day with a single source is never green. Synthetic data, no network.
-import { type RawBar, totalReturnIndex, zonedInstant } from '@saku/core';
+import { type RawBar, totalReturnIndex } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   addChannel,
@@ -15,8 +15,9 @@ import {
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import { emptyPlugins } from '../registry';
-import type { BarSource, Notifier, PluginInfo, SeriesSource } from '../types';
+import type { BarSource, SeriesSource } from '../types';
 import { runJob } from './run';
+import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
 
 const sessions = new Sessions({
   id: 't',
@@ -28,7 +29,6 @@ const sessions = new Sessions({
 const TARGET = '2026-01-16';
 const DATES = sessions.between('2025-12-01', TARGET);
 const SECRET = 'f'.repeat(32);
-const quiet = { info() {}, warn() {} };
 
 /** Clean history: SPY rises 0.3-0.7% a day (pays a dividend on the target day); SSO is 2x SPY's
  * price return and splits 2:1 on the target day. Every day moves enough to make a fault material. */
@@ -70,18 +70,13 @@ type Fault = (ticker: Ticker, bars: RawBar[], all: Record<Ticker, RawBar[]>) => 
 const onTarget =
   (ticker: Ticker, f: (b: RawBar, prev: RawBar) => RawBar): Fault =>
   (t, bars) =>
-    t !== ticker ? bars : bars.map((b, i) => (b.date === TARGET ? f(b, bars[i - 1]!) : b));
-
-const info = (key: string, kind: PluginInfo['kind'], extra: Partial<PluginInfo> = {}) =>
-  ({
-    key,
-    kind,
-    name: key,
-    provides: {},
-    suggestedRole: key === 'p' ? 'primary' : 'secondary',
-    termsUrl: 'https://example.test',
-    ...extra,
-  }) as PluginInfo;
+    t !== ticker
+      ? bars
+      : bars.map((b, i) => {
+          if (b.date !== TARGET) return b;
+          if (i === 0) throw new Error('fault needs the day before the target');
+          return f(b, bars[i - 1]!);
+        });
 
 /** A bar source answering from the clean history, corrupted by `fault`; `down` fails every call. */
 function source(key: string, o: { fault?: Fault; down?: boolean; adjusted?: boolean } = {}) {
@@ -90,7 +85,7 @@ function source(key: string, o: { fault?: Fault; down?: boolean; adjusted?: bool
     Object.entries(data).map(([t, bars]) => [t, totalReturnIndex(bars, 100)]),
   );
   const s: BarSource = {
-    info: info(key, 'bar'),
+    info: testInfo(key, 'bar'),
     async fetchBars(ticker, from, to) {
       if (o.down) throw new Error(`${key}: HTTP 503`);
       const t = ticker as Ticker;
@@ -105,25 +100,13 @@ function source(key: string, o: { fault?: Fault; down?: boolean; adjusted?: bool
   return s;
 }
 
-const rates: SeriesSource = {
-  info: info('rates', 'series', {
-    suggestedRole: 'primary',
-    provides: { series: ['CASH'], cashRates: { USD: 'CASH' } },
-  }),
-  async fetchSeries(_id, from, to) {
-    return DATES.filter((d) => d >= from && d <= to && d < TARGET).map((date) => ({
-      date,
-      value: 4,
-      publishedAt: zonedInstant(sessions.after(date), '18:00', 'America/New_York'),
-    }));
-  },
-};
+const rates = cashRates(sessions, DATES, TARGET);
 
 /**
  * A clean bootstrap up to the day before (the history the server holds), then the daily job for
- * the target day with these sources; returns the day's forward entry and the alerts.
+ * the target day with these sources; returns the run, the day's forward entry and the alerts.
  */
-async function run(bars: BarSource[]) {
+async function run(bars: BarSource[], series: SeriesSource = rates) {
   const db = await testDb();
   await upsertSymbols(db, [
     { ticker: 'SPY', tier: 0, assetClass: 'equity', currency: 'USD' },
@@ -170,17 +153,13 @@ async function run(bars: BarSource[]) {
     },
   });
   await addChannel(db, owner, { type: 'fake', target: 'me', authSecret: SECRET });
-  const sent: string[] = [];
-  const notifier: Notifier = {
-    info: { key: 'fake', kind: 'notifier', name: 'Fake', termsUrl: 'x', maxLength: 4000 },
-    validTarget: () => true,
-    send: async (_target, text) => void sent.push(text),
-  };
-  const ctx = () => ({ http: null as never, now: new Date(), log: quiet });
-  const job = (job: 'bootstrap' | 'daily', target: string, now: string, list: BarSource[]) =>
-    runJob(
+  await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+  const { notifier, sent } = fakeNotifier();
+  const job = (job: 'bootstrap' | 'daily', target: string, now: string, list: BarSource[]) => {
+    const ctx = () => ({ http: null as never, now: new Date(now), log: quiet });
+    return runJob(
       db,
-      { ...emptyPlugins(), bars: list, series: [rates] },
+      { ...emptyPlugins(), bars: list, series: [series] },
       {
         job,
         target,
@@ -191,7 +170,7 @@ async function run(bars: BarSource[]) {
         log: quiet,
         context: ctx,
         alerting: {
-          date: TARGET,
+          date: target,
           notifiers: [notifier],
           authSecret: SECRET,
           context: ctx,
@@ -202,6 +181,7 @@ async function run(bars: BarSource[]) {
         onComplete: async () => true,
       },
     );
+  };
   const before = await job(
     'bootstrap',
     sessions.before(TARGET, 1),
@@ -210,33 +190,56 @@ async function run(bars: BarSource[]) {
   );
   expect(before.ok).toBe(true);
   const result = await job('daily', TARGET, '2026-01-17T01:30:00Z', bars);
-  const record = await forwardRecord(db, version.id);
-  return { result, today: record.find((e) => e.date === TARGET)!, sent };
+  const today = (await forwardRecord(db, version.id)).find((e) => e.date === TARGET)!;
+  return {
+    result,
+    today,
+    reasons: (JSON.parse(today.payload) as { reasons: string[] }).reasons,
+    // The owner's alert for the strategy (the admin alerts on the same channel are separate).
+    alert: sent.map((m) => m.text).find((t) => t.startsWith('Trend 2x:')),
+    adminAlerts: sent.map((m) => m.text).filter((t) => t.startsWith('Saku:')),
+  };
 }
 
-const sources = (fault?: Fault, on: 'p' | 's1' = 'p') => [
+type Source = 'p' | 's1' | 's2';
+/** The primary, an adjusted secondary (as Yahoo or Tiingo send adjusted closes) and a plain one. */
+const sources = (fault?: Fault, on: Source = 'p') => [
   source('p', on === 'p' && fault ? { fault } : {}),
   source('s1', { adjusted: true, ...(on === 's1' && fault && { fault }) }),
-  source('s2'),
+  source('s2', on === 's2' && fault ? { fault } : {}),
 ];
 
-/** Each material fault and the status the severity rules give it. */
-const FAULTS: { name: string; fault: Fault; on?: 'p' | 's1'; expect: 'red' | 'yellow' }[] = [
-  {
-    name: 'decimal shift',
-    fault: onTarget('SPY', (b) => ({ ...b, close: b.close * 10, high: b.high * 10 })),
-    expect: 'red',
-  },
+const decimalShift = onTarget('SPY', (b) => ({ ...b, close: b.close * 10, high: b.high! * 10 }));
+const missedSplit = onTarget('SSO', (b) => ({ ...b, splitFactor: 1 }));
+const missedDividend = onTarget('SPY', (b) => ({ ...b, divCash: 0 }));
+const staleClose = onTarget('SPY', (b, prev) => ({
+  ...b,
+  open: prev.close,
+  high: prev.close,
+  low: prev.close,
+  close: prev.close,
+}));
+
+/**
+ * Each material fault, the source it is injected into, the status the severity rules give it
+ * and the check expected to catch it (a reason on the strategy's record).
+ */
+const FAULTS: { name: string; fault: Fault; on?: Source; expect: 'red'; caught: string }[] = [
+  { name: 'decimal shift', fault: decimalShift, expect: 'red', caught: 'SPY:B.close_match@s1' },
   {
     name: 'decimal shift in a secondary',
-    fault: onTarget('SPY', (b) => ({ ...b, close: b.close / 10, low: b.low / 10 })),
+    fault: decimalShift,
+    on: 's2',
+    expect: 'red',
+    caught: 'SPY:B.close_match@s2',
+  },
+  { name: 'missed split', fault: missedSplit, expect: 'red', caught: 'SSO:B.split_match@s1' },
+  {
+    name: 'missed split in a secondary',
+    fault: missedSplit,
     on: 's1',
     expect: 'red',
-  },
-  {
-    name: 'missed split',
-    fault: onTarget('SSO', (b) => ({ ...b, splitFactor: 1 })),
-    expect: 'red',
+    caught: 'SSO:B.split_match@s1',
   },
   {
     name: 'split applied to prices but not declared',
@@ -249,89 +252,138 @@ const FAULTS: { name: string; fault: Fault; on?: 'p' | 's1'; expect: 'red' | 'ye
       splitFactor: 1,
     })),
     expect: 'red',
+    caught: 'SSO:B.split_match@s1',
   },
-  { name: 'missed dividend', fault: onTarget('SPY', (b) => ({ ...b, divCash: 0 })), expect: 'red' },
+  {
+    name: 'missed dividend',
+    fault: missedDividend,
+    expect: 'red',
+    caught: 'SPY:B.dividend_match@s1',
+  },
+  {
+    name: 'missed dividend in a secondary',
+    fault: missedDividend,
+    on: 's2',
+    expect: 'red',
+    caught: 'SPY:B.dividend_match@s2',
+  },
   {
     name: 'dividend ten times too large',
     fault: onTarget('SPY', (b) => ({ ...b, divCash: b.divCash * 10 })),
     expect: 'red',
+    caught: 'SPY:B.dividend_match@s1',
   },
   {
-    name: 'stale close',
-    fault: onTarget('SPY', (b, prev) => ({
-      ...b,
-      open: prev.close,
-      high: prev.close,
-      low: prev.close,
-      close: prev.close,
-    })),
+    name: "a provider's adjusted close off by 1%",
+    fault: onTarget('SPY', (b) => ({ ...b, providerAdjClose: b.providerAdjClose! * 1.01 })),
+    on: 's1',
     expect: 'red',
+    caught: 'SPY:B.adj_return_match@s1',
+  },
+  { name: 'stale close', fault: staleClose, expect: 'red', caught: 'SPY:B.close_match@s1' },
+  {
+    name: 'stale close in a secondary',
+    fault: staleClose,
+    on: 's2',
+    expect: 'red',
+    caught: 'SPY:B.close_match@s2',
   },
   {
     name: 'swapped tickers',
     fault: (t, _bars, all) => all[t === 'SPY' ? 'SSO' : 'SPY'].map((b) => ({ ...b })),
     expect: 'red',
+    caught: 'SPY:B.close_match@s1',
   },
   {
     name: 'timezone shift (each bar a session late)',
     fault: (_t, bars) => bars.slice(0, -1).map((b, i) => ({ ...b, date: bars[i + 1]!.date })),
     expect: 'red',
+    caught: 'SPY:B.close_match@s1',
   },
   {
+    // The primary lacks the target day: SPY's stand-in passes, SSO's fails layer C against the
+    // shifted underlying. The shifted days before are red on their own dates.
     name: 'timezone shift (each bar a session early)',
     fault: (_t, bars) => bars.slice(1).map((b, i) => ({ ...b, date: bars[i]!.date })),
     expect: 'red',
-  },
-  // The primary has no usable bar: the stand-in rule grades it (two agreeing secondaries, and the
-  // signal is far from flipping within the band, so yellow "secondary source only").
-  {
-    name: 'missing day',
-    fault: (t, bars) => (t === 'SPY' ? bars.filter((b) => b.date !== TARGET) : bars),
-    expect: 'yellow',
-  },
-  {
-    name: 'duplicate day',
-    fault: (t, bars) =>
-      t === 'SPY' ? [...bars, { ...bars.at(-1)!, close: bars.at(-1)!.close * 1.01 }] : bars,
-    expect: 'yellow',
+    caught: 'SSO:stand_in_refused:layer_c',
   },
 ];
 
 describe('fault injection (layer F)', () => {
   it('clean data is green (the control: otherwise the cases below prove nothing)', async () => {
-    const { result, today } = await run(sources());
+    const { result, today, alert } = await run(sources());
     expect(result.ok).toBe(true);
     expect(today).toMatchObject({
       dataStatus: 'green',
       safeStateApplied: false,
       allocation: 'Risk on',
     });
+    expect(alert).toMatch(/^Trend 2x: new allocation/);
   });
 
   for (const c of FAULTS) {
-    it(`${c.name}: ${c.expect}${c.expect === 'red' ? ', safe state' : ', with the warning'}`, async () => {
-      const { today, sent } = await run(sources(c.fault, c.on));
+    it(`${c.name} (${c.on ?? 'p'}): red, safe state`, async () => {
+      const { today, reasons, alert } = await run(sources(c.fault, c.on));
       expect(today.dataStatus).toBe(c.expect);
-      const alert = sent.find((t) => t.includes(TARGET))!;
-      if (c.expect === 'red') {
-        // Never a normal signal: the record and the alert carry the safe state.
-        expect(today).toMatchObject({ safeStateApplied: true, allocation: 'Safe state' });
-        expect(alert).toContain('safe state');
-      } else {
-        expect(today.safeStateApplied).toBe(false);
-        expect(JSON.parse(today.payload).reasons).toContain('SPY:stand_in@s1');
-        expect(alert).toMatch(/not green|warning|secondary/i);
-      }
+      expect(reasons).toContain(c.caught);
+      // Never a normal signal: the record and the alert carry the safe state.
+      expect(today).toMatchObject({ safeStateApplied: true, allocation: 'Safe state' });
+      expect(alert).toMatch(new RegExp(`^Trend 2x: safe state for ${TARGET}`));
     });
   }
 
-  it('a day with a single source is never green', async () => {
-    const { result, today } = await run([
+  // The primary has no usable bar: the stand-in rule grades it (two agreeing secondaries, and the
+  // signal is far from flipping within the band, so yellow "secondary source only").
+  for (const c of [
+    {
+      name: 'missing day',
+      fault: ((t, bars) => (t === 'SPY' ? bars.filter((b) => b.date !== TARGET) : bars)) as Fault,
+    },
+    {
+      name: 'the same day sent twice (the response is refused)',
+      fault: ((t, bars) =>
+        t === 'SPY'
+          ? [...bars, { ...bars.at(-1)!, close: bars.at(-1)!.close * 1.01 }]
+          : bars) as Fault,
+    },
+  ]) {
+    it(`${c.name}: yellow by the stand-in rule, with the warning`, async () => {
+      const { result, today, reasons, alert } = await run(sources(c.fault));
+      expect(today).toMatchObject({
+        dataStatus: 'yellow',
+        safeStateApplied: false,
+        allocation: 'Risk on',
+      });
+      expect(reasons).toContain('SPY:stand_in@s1');
+      // The record's first entry: the allocation alert, with the warning.
+      expect(alert).toContain('Data health: yellow (computed with a warning).');
+      // A refused response leaves the source incomplete for the run (nothing of it is stored).
+      if (c.name.startsWith('the same day')) expect(result.error).toBe('incomplete: p');
+    });
+  }
+
+  it('a day with a single source is never green: yellow, with the warning', async () => {
+    const { result, today, reasons, alert } = await run([
       source('p'),
       source('s1', { down: true }),
       source('s2', { down: true }),
     ]);
     expect(result.ok).toBe(false);
-    expect(today.dataStatus).not.toBe('green');
+    expect(today).toMatchObject({ dataStatus: 'yellow', safeStateApplied: false });
+    expect(reasons).toContain('SPY:single_source');
+    expect(alert).toContain('Data health: yellow (computed with a warning).');
+  });
+
+  it('a stale cash rate is red for the day overall and tells the admins', async () => {
+    // The rate stops a week before (more than 5 business days behind). By design it grades the day,
+    // not the strategy: it moves cash and financing equity, never the signal (docs/data-pipeline.md).
+    const stale = cashRates(sessions, DATES, sessions.before(TARGET, 7));
+    const { today, adminAlerts } = await run(sources(), stale);
+    expect(today.dataStatus).toBe('green');
+    expect(adminAlerts.some((t) => t.startsWith(`Saku: data for ${TARGET} is not green`))).toBe(
+      true,
+    );
+    expect(adminAlerts.join('\n')).toMatch(/CASH/);
   });
 });

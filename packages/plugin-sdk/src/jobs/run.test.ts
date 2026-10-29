@@ -1,6 +1,6 @@
 // A whole daily run with in-memory plug-ins (no network): ingest, checks, forward record,
 // alerts, and how an incomplete run is reported.
-import { type RawBar, zonedInstant } from '@saku/core';
+import type { RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   addChannel,
@@ -14,8 +14,9 @@ import {
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import { emptyPlugins } from '../registry';
-import type { BarSource, Notifier, PluginInfo, SeriesSource } from '../types';
+import type { BarSource, Notifier } from '../types';
 import { type RunOptions, runJob } from './run';
+import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
 
 const sessions = new Sessions({
   id: 't',
@@ -27,22 +28,10 @@ const sessions = new Sessions({
 const TARGET = '2026-01-16';
 const DATES = sessions.between('2025-12-29', TARGET);
 const SECRET = 'r'.repeat(32);
-const quiet = { info() {}, warn() {} };
-const info = (key: string, kind: PluginInfo['kind'], extra: Partial<PluginInfo> = {}) =>
-  ({
-    key,
-    kind,
-    name: key,
-    provides: {},
-    suggestedRole: key === 'p' ? 'primary' : 'secondary',
-    termsUrl: 'https://example.test',
-    ...extra,
-  }) as PluginInfo;
-
 const closes = DATES.map((_, i) => 100 * 1.002 ** i);
 const barSource = (key: string, broken = false): BarSource & { calls: number } => {
   const s = {
-    info: info(key, 'bar'),
+    info: testInfo(key, 'bar'),
     calls: 0,
     async fetchBars(_ticker: string, from: string, to: string): Promise<RawBar[]> {
       s.calls++;
@@ -68,33 +57,7 @@ const barSource = (key: string, broken = false): BarSource & { calls: number } =
   };
   return s;
 };
-// The cash rate: each value published at 18:00 New York the next session.
-const rates: SeriesSource = {
-  info: info('rates', 'series', {
-    suggestedRole: 'primary',
-    provides: { series: ['CASH'], cashRates: { USD: 'CASH' } },
-  }),
-  async fetchSeries(_id, from, to) {
-    return DATES.filter((d) => d >= from && d <= to && d < TARGET).map((date) => ({
-      date,
-      value: 4,
-      publishedAt: zonedInstant(sessions.after(date), '18:00', 'America/New_York'),
-    }));
-  },
-};
-
-function fakeNotifier(down: string[] = []) {
-  const sent: { target: string; text: string }[] = [];
-  const notifier: Notifier = {
-    info: { key: 'fake', kind: 'notifier', name: 'Fake', termsUrl: 'x', maxLength: 2000 },
-    validTarget: () => true,
-    send: async (target, text) => {
-      if (down.includes(target)) throw new Error('Fake: HTTP 500');
-      sent.push({ target, text });
-    },
-  };
-  return { notifier, sent };
-}
+const rates = cashRates(sessions, DATES, TARGET);
 
 async function setup() {
   const db = await testDb();

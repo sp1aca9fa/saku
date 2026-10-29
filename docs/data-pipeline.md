@@ -88,19 +88,26 @@ Stand-ins are kept in `stand_ins`. When the primary's bar arrives, the canonical
 
 ## Fault injection (layer F)
 
-`packages/plugin-sdk/src/jobs/faults.test.ts` runs in CI on synthetic data: a clean bootstrap, then a whole daily run (ingest, checks, forward record, alerts) with one material fault in one source's response, all sources available. A clean run is green (the control). Each fault and its grade:
+`packages/plugin-sdk/src/jobs/faults.test.ts` runs in CI on synthetic data: a clean bootstrap, then a whole daily run (ingest, checks, forward record, alerts) with one material fault in one source's response, all sources available (a primary and two secondaries, one sending adjusted closes). A clean run is green (the control). Each case asserts the grade, the check that caught it (a reason on the strategy's record) and, on red, the safe state in the record and the alert:
 
-| Fault | Grade | Caught by |
-|---|---|---|
-| Decimal shift (close x10), in the primary or a secondary | red, safe state | B close |
-| Missed split; split applied to prices but not declared | red, safe state | B split, C leverage |
-| Missed dividend; dividend x10 | red, safe state | B dividend, B adjusted return |
-| Stale close (previous close repeated) | red, safe state | B close, A unchanged close |
-| Swapped tickers | red, safe state | B close, C leverage |
-| Timezone shift (each bar a session late or early) | red, safe state | B close |
-| Missing day; the same day sent twice (the response is refused) | yellow (`stand_in`) | A missing day, the stand-in rule |
+| Fault | Injected into | Grade | Caught by |
+|---|---|---|---|
+| Decimal shift (close x10) | primary; a secondary | red, safe state | B close |
+| Missed split | primary; a secondary | red, safe state | B split |
+| Split applied to prices but not declared | primary | red, safe state | B split |
+| Missed dividend | primary; a secondary | red, safe state | B dividend |
+| Dividend x10 | primary | red, safe state | B dividend |
+| A provider's adjusted close off by 1% | the adjusted secondary | red, safe state | B adjusted return |
+| Stale close (previous close repeated) | primary; a secondary | red, safe state | B close |
+| Swapped tickers | primary | red, safe state | B close |
+| Timezone shift, each bar a session late | primary | red, safe state | B close |
+| Timezone shift, each bar a session early (the target day is missing) | primary | red, safe state | the 2x fund's stand-in refused (layer C) |
+| Missing day; the same day sent twice (the response is refused, the run incomplete) | primary | yellow (`stand_in`) | A missing day, the stand-in rule |
+| Cash rate a week stale | the cash series | red for the day overall, admin alert; the strategy's own grade stays green (by design, above) | series freshness |
 
-A day only one source had is never green (`single_source`). New data paths add their cases here.
+A day only one source had is never green (`single_source`, yellow). New data paths add their cases here.
+
+Open (owner decision): a strategy's grade reads only the target day's bars. When a source corrupts recent days (as the early timezone shift does), those days are red on their own dates, but a signal whose lookback reads them is graded on the target day alone; in that case the 2x fund's refused stand-in made it red, a 1x-only strategy would have been yellow.
 
 ## Attribution
 
