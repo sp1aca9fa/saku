@@ -11,7 +11,7 @@
 |---|---|---|
 | A1 | Data spike (gate) | in progress (server run) |
 | A2 | Thin slice (forward records start) | in development (allowed during A1's observation window, see stage-a) |
-| A3 | Hardened pipeline | not started |
+| A3 | Hardened pipeline | in development (synthetic and stored data only, nothing live before the A1 gate) |
 | B-F | See `stages/` | not started |
 
 ## Global constraints (apply to every task)
