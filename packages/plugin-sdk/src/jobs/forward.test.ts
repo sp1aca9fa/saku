@@ -142,7 +142,11 @@ describe('forward', () => {
     const { db, version, runId, store } = await setup();
     await setSetting(db, 'forward_records_from', '2026-01-05');
     await forward(db, { runId, sessions, to: D[3]! });
-    expect(await recompute(db, { runId, code: 'c1' })).toEqual({ checked: 2, differences: [] });
+    expect(await recompute(db, { runId, code: 'c1' })).toEqual({
+      checked: 2,
+      differences: [],
+      errors: [],
+    });
     // A corrected close on 01-08 (below its 2-day average) turns that day's signal off.
     const revised = bars([100, 101, 102, 100]);
     await store('AAA', 'p', revised);

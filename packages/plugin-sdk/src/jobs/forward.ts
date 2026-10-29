@@ -201,6 +201,8 @@ export interface RecomputeSummary {
   checked: number;
   /** New differences, each annotated (recorded entries are never edited). */
   differences: { version: string; date: TradingDate; recorded: string; now: string }[];
+  /** Versions the current engine could not evaluate at all (nothing annotated for them). */
+  errors: { version: string; error: string }[];
 }
 
 /**
@@ -215,7 +217,7 @@ export async function recompute(
   db: Db,
   o: { runId: string | null; code: string },
 ): Promise<RecomputeSummary> {
-  const summary: RecomputeSummary = { checked: 0, differences: [] };
+  const summary: RecomputeSummary = { checked: 0, differences: [], errors: [] };
   const { loadRows, barsOf } = await reader(db);
   for (const version of await allVersions(db)) {
     const record = await forwardRecord(db, version.id);
@@ -226,8 +228,13 @@ export async function recompute(
     try {
       const bars = barsOf(await loadRows(deps, record.at(-1)!.date));
       days = new Map(evaluate(strategy, bars).map((d) => [d.date, d]));
-    } catch {
-      days = new Map();
+    } catch (e) {
+      // Not an engine difference to annotate day by day: a failure to report.
+      summary.errors.push({
+        version: version.name,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      continue;
     }
     const seen = new Set(
       (await annotationsOf(db, version.id, 'recomputed')).map((a) => `${a.date} ${a.fingerprint}`),

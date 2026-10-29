@@ -202,6 +202,10 @@ try {
       if (r.differences.length > 0) {
         log.warn('The engine decides recorded days differently', { differences: r.differences });
       }
+      if (r.errors.length > 0) {
+        log.warn('Recompute could not evaluate', { errors: r.errors });
+        markIncomplete('recompute');
+      }
       // Every annotated difference not yet told (also those found by `pnpm strategy recompute`).
       const told = await sendRecomputeDiffers(db, alerting);
       if (told.failed.length > 0) markIncomplete('alerts');

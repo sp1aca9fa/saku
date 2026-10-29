@@ -9,6 +9,7 @@ import {
   type RawBarField,
   type SeriesPoint,
   type TradingDate,
+  zonedInstant,
 } from '@saku/core';
 import { and, asc, between, desc, eq, lte } from 'drizzle-orm';
 import type { Db } from './client';
@@ -283,11 +284,23 @@ function newVintages<T extends { date: string; publishedAt: string | null; fetch
  */
 function instant(text: string): string {
   const ms = Date.parse(text);
-  if (!/T\d{2}:\d{2}/.test(text) || Number.isNaN(ms)) {
-    throw new Error(`publishedAt must be an instant with a time of day, not "${text}"`);
+  // A time without Z or an offset would be read in the server's own time zone.
+  if (!/T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/.test(text) || Number.isNaN(ms)) {
+    throw new Error(`publishedAt must be an instant with a time of day and a zone, not "${text}"`);
   }
   return new Date(ms).toISOString();
 }
+
+/**
+ * `known_at` as read: rows stored before publication times needed a time of day carry only a
+ * date, known at the end of that day in New York at the earliest (never its midnight).
+ */
+const readKnownAt = <T extends { knownAt: string }>(rows: T[]): T[] =>
+  rows.map((r) =>
+    /^\d{4}-\d{2}-\d{2}$/.test(r.knownAt)
+      ? { ...r, knownAt: zonedInstant(r.knownAt, '23:59', 'America/New_York') }
+      : r,
+  );
 
 export async function storeSeries(
   db: Db,
@@ -367,7 +380,7 @@ export async function seriesPointInTime(db: Db, id: string, source: string): Pro
     .select({ date: series.date, value: series.value, knownAt: series.knownAt })
     .from(series)
     .where(and(eq(series.series, id), eq(series.source, source)));
-  return new PointInTime(rows);
+  return new PointInTime(readKnownAt(rows));
 }
 
 /** Every vintage of an FX pair of one kind from one source, for point-in-time reads. */
@@ -381,7 +394,7 @@ export async function fxPointInTime(
     .select({ date: fxRates.date, value: fxRates.rate, knownAt: fxRates.knownAt })
     .from(fxRates)
     .where(and(eq(fxRates.pair, pair), eq(fxRates.source, source), eq(fxRates.kind, kind)));
-  return new PointInTime(rows);
+  return new PointInTime(readKnownAt(rows));
 }
 
 export type CanonicalRow = typeof bars.$inferSelect;

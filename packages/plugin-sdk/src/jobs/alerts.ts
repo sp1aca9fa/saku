@@ -21,7 +21,7 @@ import {
   recordAlertSent,
   schema,
 } from '@saku/db';
-import { desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { Logger, Notifier, PluginContext } from '../types';
 
 export type AlertType =
@@ -298,8 +298,8 @@ export async function sendRecomputeDiffers(db: Db, o: AlertOptions): Promise<Ale
   }
   if (notes.length === 0) return summary;
   await eachAdminChannel(db, o, undefined, async (t, channel, healthLine) => {
-    const pending = [];
-    for (const n of notes) if (!(await alertSent(db, channel, n.key))) pending.push(n);
+    const told = await sentSubjects(db, channel, 'recompute_differs');
+    const pending = notes.filter((n) => !told.has(n.key.subject));
     const first = pending[0];
     if (!first) return;
     const text = [
@@ -328,6 +328,20 @@ interface RecomputeDetail {
   recordedAllocation: string;
   recomputedAllocation: string;
   signalsDiffer: string[];
+}
+
+async function sentSubjects(db: Db, channel: Channel, type: AlertType): Promise<Set<string>> {
+  const rows = await db
+    .select({ subject: schema.alertsSent.subject })
+    .from(schema.alertsSent)
+    .where(
+      and(
+        eq(schema.alertsSent.ownerId, channel.ownerId),
+        eq(schema.alertsSent.channelId, channel.id),
+        eq(schema.alertsSent.type, type),
+      ),
+    );
+  return new Set(rows.map((r) => r.subject));
 }
 
 async function latestOverallHealth(db: Db) {
@@ -409,7 +423,8 @@ export function describeReason(t: Translate, code: string): string {
   } else if ((m = /^missing@(.+)$/.exec(rest))) {
     text = t('alerts.reason.seriesMissing', { source: m[1]! });
   } else if (SIMPLE_REASONS.includes(rest)) text = t(`alerts.reason.${rest}`);
-  else if (!subject && /^\^?[A-Z0-9][A-Z0-9.=?&/-]*$/.test(rest)) {
+  // A bare symbol (codes are snake_case, so an underscore means an unknown code).
+  else if (!subject && /^[^:@\s_]+$/.test(rest)) {
     return `${rest}: ${t('alerts.reason.notGreen')}`;
   }
   if (text === undefined) return code;

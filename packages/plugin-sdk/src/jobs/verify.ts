@@ -295,7 +295,9 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
         );
     }
     if (s.underlyingSymbolId !== null) {
-      const u = raw.get(s.underlyingSymbolId)?.get(bars.primary) ?? [];
+      const u = unsplit(
+        (raw.get(s.underlyingSymbolId)?.get(bars.primary) ?? []).filter((b) => b.date <= o.to),
+      );
       add(leverageCheck(primary, u, s.leverageFactor));
     }
     if (index) add(indexCheck(primary, index));

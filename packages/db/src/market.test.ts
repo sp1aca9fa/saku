@@ -173,6 +173,27 @@ describe('vintages', () => {
     ).rejects.toThrow(/time of day/);
   });
 
+  it('refuses a time without a zone, and reads old date-only rows as known at the day end', async () => {
+    const db = await testDb();
+    const zoneless = [{ date: '2026-01-02', value: 3.61, publishedAt: '2026-01-05T18:00' }];
+    await expect(
+      storeSeries(db, { series: 'S', source: 'x', points: zoneless, fetchedAt: 't1' }),
+    ).rejects.toThrow(/zone/);
+    // A row stored before times were required (date only).
+    await db.insert(series).values({
+      series: 'S',
+      source: 'x',
+      date: '2026-01-02',
+      value: 3.61,
+      publishedAt: '2026-01-05',
+      fetchedAt: 't0',
+      knownAt: '2026-01-05',
+    });
+    const pit = await seriesPointInTime(db, 'S', 'x');
+    expect(pit.asOf('2026-01-05', '2026-01-05T14:30:00.000Z')).toBeUndefined();
+    expect(pit.asOf('2026-01-05', '2026-01-06T05:00:00.000Z')!.value).toBe(3.61);
+  });
+
   it('without a publication time, a changed value is a new row known from its fetch', async () => {
     const db = await testDb();
     const rate = (r: number) => [{ pair: 'USDXXX', date: '2026-01-02', rate: r }];
