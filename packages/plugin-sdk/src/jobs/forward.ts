@@ -185,8 +185,8 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
 
 type Rows = Record<string, Awaited<ReturnType<typeof canonicalBars>>>;
 
-/** Reads the canonical bars of the active universe as of a date. */
-async function reader(db: Db) {
+/** Reads the canonical bars of the active universe up to a date. */
+export async function reader(db: Db) {
   const symbolIds = new Map((await activeSymbols(db)).map((s) => [s.ticker, s.id]));
   const loadRows = async (tickers: string[], to: TradingDate): Promise<Rows> => {
     const out: Rows = {};

@@ -88,6 +88,21 @@ The service runs at lower priority (`Nice=10`) with a CPU cap, so other apps on 
 responsive. Logs: `journalctl -u saku-daily` and JSON lines in `~/.local/state/saku/logs/`; the
 probe's measurements in `~/.local/state/saku/probe.jsonl`.
 
+### The weekly run (after the A1 gate)
+
+`ops/systemd/saku-weekly.service` and `.timer` run on Sundays at 10:37: a full-history refetch
+from every source (changed values go to the revision log and the admins get a summary), the
+checks over the full history, the recompute of every recorded day, and layer E on the stored data
+(core vs reference, incremental vs full; the same as `pnpm verify`). A failure alerts the admins.
+
+```bash
+sudo cp ops/systemd/saku-weekly.* /etc/systemd/system/
+sudo sed -i "s/<user>/$USER/g" /etc/systemd/system/saku-weekly.service
+sudo systemctl daemon-reload && sudo systemctl enable --now saku-weekly.timer
+```
+
+`pnpm verify` runs the checks and layer E without fetching, any time.
+
 ## 5. Outside watch
 
 Create a check on healthchecks.io (free): period 1 day, grace 6 hours, and put its URL in `.env`

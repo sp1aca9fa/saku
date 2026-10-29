@@ -1,6 +1,6 @@
 # Data pipeline
 
-How data gets from the sources into Saku and how it is checked. Requirements: `docs/requirements/04-data-pipeline.md`. Status: Stage A1 (ingestion, adjusted series, layers A-C) and the first A2 parts (health status, the stand-in rule; the decision-margin test comes with the strategy engine); the fault-injection suite (A3); issuer data (layer D), the weekly refetch and the CSV fallback follow in A3.
+How data gets from the sources into Saku and how it is checked. Requirements: `docs/requirements/04-data-pipeline.md`. Status: Stage A1 (ingestion, adjusted series, layers A-C) and the first A2 parts (health status, the stand-in rule; the decision-margin test comes with the strategy engine); the fault-injection suite, the weekly run and layer E on stored data (A3); issuer data (layer D) and the CSV fallback follow in A3.
 
 ## Flow
 
@@ -108,6 +108,13 @@ Stand-ins are kept in `stand_ins`. When the primary's bar arrives, the canonical
 A day only one source had is never green (`single_source`, yellow). New data paths add their cases here.
 
 Open (owner decision): a strategy's grade reads only the target day's bars. When a source corrupts recent days (as the early timezone shift does), those days are red on their own dates, but a signal whose lookback reads them is graded on the target day alone; in that case the 2x fund's refused stand-in made it red, a 1x-only strategy would have been yellow.
+
+## Weekly run and `pnpm verify` (layers E and G)
+
+- **`pnpm weekly`** (Sundays, `saku-weekly.timer`): refetches the full history from every source. Changed raw values go to the revision log (`bar_revisions`, old and new value) and the admins get one summary per run (ticker, field, source, count). Then the checks over the full history, the recompute of every recorded day (differences annotated and told, as in the daily run) and layer E.
+- **`pnpm verify`** (any time, no fetching; `pnpm checks` is the same): layers A-C over the full history and layer E.
+- **Layer E** (`jobs/integrity.ts`), for each registered version over today's canonical bars of what it reads: core vs the reference implementation (same days, signals and allocations; equity within 1e-9 relative), and incremental vs full (the latest 20 decision days and one every 250 back, each decided and valued from the bars up to that day only, against the full pass: no look-ahead and no state that depends on later data). Stored as layer E check results (summary per check, red ones in full); a red one fails the run and alerts the admins.
+- testfol parity joins `pnpm verify` when its cases exist (`plugins/test/testfol/`).
 
 ## Attribution
 

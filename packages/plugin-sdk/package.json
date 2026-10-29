@@ -18,6 +18,7 @@
     "@saku/core": "workspace:*",
     "@saku/data": "workspace:*",
     "@saku/db": "workspace:*",
+    "@saku/reference": "workspace:*",
     "drizzle-orm": "^0.45.4"
   }
 }

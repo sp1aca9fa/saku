@@ -25,6 +25,8 @@
     "restore": "pnpm --silent --filter @saku/db restore",
     "bootstrap": "pnpm --silent --filter @saku/plugin-sdk jobs bootstrap",
     "daily": "pnpm --silent --filter @saku/plugin-sdk jobs daily",
+    "weekly": "pnpm --silent --filter @saku/plugin-sdk jobs weekly",
+    "verify": "pnpm --silent --filter @saku/plugin-sdk jobs verify",
     "checks": "pnpm --silent --filter @saku/plugin-sdk jobs checks",
     "probe": "pnpm --silent --filter @saku/plugin-sdk jobs probe",
     "spike": "pnpm --silent --filter @saku/plugin-sdk jobs spike",

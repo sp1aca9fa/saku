@@ -31,7 +31,9 @@ export type AlertType =
   | 'job_failure'
   | 'data_health'
   | 'update_failed'
-  | 'recompute_differs';
+  | 'recompute_differs'
+  | 'revisions'
+  | 'integrity';
 const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red'];
 
 export interface Alert {
@@ -275,6 +277,48 @@ export function sendUpdateFailed(
     lines: (t) => [
       t('alerts.update.title', { to: o.to, step: o.step }),
       t(o.stuck ? 'alerts.update.stuck' : 'alerts.update.back', { from: o.from }),
+    ],
+  });
+}
+
+/** What a weekly refetch revised, once per run. */
+export function sendRevisions(
+  db: Db,
+  o: AlertOptions & {
+    runId: string;
+    revisions: { ticker: string; source: string; field: string; count: number }[];
+  },
+): Promise<AlertSummary> {
+  const count = o.revisions.reduce((n, r) => n + r.count, 0);
+  const items = o.revisions
+    .slice(0, 8)
+    .map((r) => `${r.ticker} ${r.field}@${r.source} ${r.count}`)
+    .join(', ');
+  return sendAdminAlert(db, {
+    ...o,
+    subject: `revisions:${o.runId}`,
+    type: 'revisions',
+    lines: (t) => [
+      t('alerts.revisions.title', { count }),
+      t('alerts.revisions.body', {
+        items: o.revisions.length > 8 ? `${items}, ...` : items,
+      }),
+    ],
+  });
+}
+
+/** A failed layer E check (core vs reference, incremental vs full), once per check and day. */
+export function sendIntegrityFailed(
+  db: Db,
+  o: AlertOptions & { check: string; detail: string },
+): Promise<AlertSummary> {
+  return sendAdminAlert(db, {
+    ...o,
+    subject: `integrity:${o.check}`,
+    type: 'integrity',
+    lines: (t) => [
+      t('alerts.integrity.title', { check: o.check }),
+      t('alerts.integrity.body', { detail: o.detail.slice(0, 500) }),
     ],
   });
 }

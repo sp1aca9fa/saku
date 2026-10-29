@@ -1,29 +1,34 @@
-// A job that records a run (requirements 04, 05, 11, 12): bootstrap, daily or checks. Ingest,
-// checks, then for the daily run the forward records, alerts, recompute and timestamp. The run
+// A job that records a run (requirements 04, 05, 11, 12): bootstrap, daily, weekly or checks.
+// Ingest, checks, then for the daily run the forward records, alerts, recompute and timestamp;
+// the weekly run refetches the full history (revisions reported), recomputes and runs layer E,
+// as `pnpm verify` (the checks job) does over the stored data. The run
 // is complete only when every step finished for every item; an incomplete or failed run alerts
 // the admins and sends no heartbeat. The CLI (`cli/jobs.ts`) adds the lock, backups and the
 // heartbeat through the hooks.
 import type { TradingDate } from '@saku/core';
 import type { Sessions } from '@saku/data';
-import { type Db, finishRun, seedSourceRoles, startRun } from '@saku/db';
+import { type Db, finishRun, revisionsOfRun, seedSourceRoles, startRun } from '@saku/db';
 import { type LoadedPlugins, allInfos, savePluginInfos } from '../registry';
 import type { Logger, PluginContext, PluginInfo } from '../types';
 import {
   type AlertOptions,
   sendDataHealthAdmin,
+  sendIntegrityFailed,
   sendJobFailure,
   sendRecomputeDiffers,
+  sendRevisions,
   sendStrategyAlerts,
 } from './alerts';
 import { anchor } from './anchor';
 import { forward, recompute } from './forward';
 import { DAILY_OVERLAP, ingest, type SourceReport } from './ingest';
-import { verify } from './verify';
+import { integrity } from './integrity';
+import { storeRunChecks, verify } from './verify';
 
 const DATA_KIND = { bar: 'bars', series: 'series', fx: 'fx' } as const;
 
 export interface RunOptions {
-  job: 'bootstrap' | 'daily' | 'checks';
+  job: 'bootstrap' | 'daily' | 'weekly' | 'checks';
   target: TradingDate;
   sessions: Sessions;
   /** The cash series' business days; a run without it fails before any request. */
@@ -84,9 +89,26 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     const markIncomplete = (what: string) => {
       if (!incomplete.includes(what)) incomplete.push(what);
     };
+    const failures: string[] = [];
+    /** The current engine must reproduce the record, or each difference is annotated and told. */
+    const recomputeAndTell = async () => {
+      const r = await recompute(db, { runId, code: o.code });
+      log.info(`Recomputed ${r.checked} recorded days: ${r.differences.length} new differences`);
+      if (r.differences.length > 0) {
+        log.warn('The engine decides recorded days differently', { differences: r.differences });
+      }
+      if (r.errors.length > 0) {
+        log.warn('Recompute could not evaluate', { errors: r.errors });
+        markIncomplete('recompute');
+      }
+      // Every annotated difference not yet told (also those found by `pnpm strategy recompute`).
+      const told = await sendRecomputeDiffers(db, alerting);
+      if (told.failed.length > 0) markIncomplete('alerts');
+    };
     if (job !== 'checks') {
       const reports = await ingest(db, plugins, {
-        mode: job,
+        // The weekly run refetches the full history; changes go to the revision log.
+        mode: job === 'daily' ? 'daily' : 'bootstrap',
         to: target,
         sessions,
         runId,
@@ -143,19 +165,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
         log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
         if (sent.failed.length > 0) markIncomplete('alerts');
-        // The current engine must reproduce the record, or each difference is annotated.
-        const r = await recompute(db, { runId, code: o.code });
-        log.info(`Recomputed ${r.checked} recorded days: ${r.differences.length} new differences`);
-        if (r.differences.length > 0) {
-          log.warn('The engine decides recorded days differently', { differences: r.differences });
-        }
-        if (r.errors.length > 0) {
-          log.warn('Recompute could not evaluate', { errors: r.errors });
-          markIncomplete('recompute');
-        }
-        // Every annotated difference not yet told (also those found by `pnpm strategy recompute`).
-        const told = await sendRecomputeDiffers(db, alerting);
-        if (told.failed.length > 0) markIncomplete('alerts');
+        await recomputeAndTell();
         const a = await anchor(db, { date: target, ...o.tsa });
         if (a.status === 'anchored') log.info(`Chain heads timestamped by ${a.authority}`);
         else if (a.status === 'skipped') log.warn(`Chain heads not timestamped: ${a.reason}`);
@@ -174,10 +184,42 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       }
     }
 
+    if (job === 'weekly') {
+      // Layer G: what the full refetch changed, then the record against the corrected data.
+      const revisions = await revisionsOfRun(db, runId);
+      log.info(`Revisions: ${revisions.reduce((n, r) => n + r.count, 0)}`, { revisions });
+      if (revisions.length > 0) {
+        const sent = await sendRevisions(db, { ...alerting, runId, revisions });
+        if (sent.failed.length > 0) markIncomplete('alerts');
+      }
+      await recomputeAndTell();
+    }
+    if (job === 'weekly' || job === 'checks') {
+      // Layer E on the stored data: core vs reference, incremental vs full.
+      const results = await integrity(db, { to: target });
+      await storeRunChecks(db, runId, results);
+      for (const r of results) {
+        log.info(`Layer E ${r.check}: ${r.status}`, { message: r.message });
+        if (r.status === 'green') continue;
+        failures.push(`${r.check} failed: ${r.message ?? ''}`);
+        const sent = await sendIntegrityFailed(db, {
+          ...alerting,
+          check: r.check,
+          detail: r.message ?? '',
+        });
+        if (sent.failed.length > 0) markIncomplete('alerts');
+      }
+    }
+
     // The run is done when every source answered for every item and the backup was made.
     if (job === 'daily') await o.afterDaily?.();
-    ok = incomplete.length === 0;
-    if (!ok) error = `incomplete: ${incomplete.join(', ')}`;
+    ok = incomplete.length === 0 && failures.length === 0;
+    if (!ok) {
+      error = [
+        ...(incomplete.length ? [`incomplete: ${incomplete.join(', ')}`] : []),
+        ...failures,
+      ].join('; ');
+    }
     if (ok && job === 'daily') heartbeatSent = (await o.onComplete?.()) ?? false;
   } catch (e) {
     ok = false;

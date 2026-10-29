@@ -72,6 +72,14 @@
       "title": "Saku: the engine now decides {count} recorded days differently",
       "body": "First: {version} on {date}, recorded {recorded}, now {now}; signals that differ: {signals}. Recorded entries stay as they are; each difference is annotated. Find the cause before trusting new signals."
     },
+    "revisions": {
+      "title": "Saku: the weekly refetch changed {count} stored values",
+      "body": "Changed: {items}. The old values are kept in the revision log; checks and recorded days were recomputed with the new ones (any recorded day now decided differently is sent separately)."
+    },
+    "integrity": {
+      "title": "Saku: a calculation check failed ({check})",
+      "body": "{detail}. The two calculations must agree; find the cause before trusting new signals."
+    },
     "healthDate": "(As of the last check, {date}.)"
   }
 }

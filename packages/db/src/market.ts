@@ -11,7 +11,7 @@ import {
   type TradingDate,
   zonedInstant,
 } from '@saku/core';
-import { and, asc, between, desc, eq, lte } from 'drizzle-orm';
+import { and, asc, between, desc, eq, lte, sql } from 'drizzle-orm';
 import type { Db } from './client';
 import {
   barRevisions,
@@ -430,4 +430,22 @@ export async function standInOn(db: Db, symbolId: number, date: TradingDate) {
     .from(standIns)
     .where(and(eq(standIns.symbolId, symbolId), eq(standIns.date, date)));
   return row;
+}
+
+/** What a run revised in stored raw bars: counts per ticker and field, with the date range. */
+export async function revisionsOfRun(db: Db, runId: string) {
+  return db
+    .select({
+      ticker: symbols.ticker,
+      source: barRevisions.source,
+      field: barRevisions.field,
+      count: sql<number>`count(*)`,
+      from: sql<string>`min(${barRevisions.date})`,
+      to: sql<string>`max(${barRevisions.date})`,
+    })
+    .from(barRevisions)
+    .innerJoin(symbols, eq(symbols.id, barRevisions.symbolId))
+    .where(eq(barRevisions.runId, runId))
+    .groupBy(symbols.ticker, barRevisions.source, barRevisions.field)
+    .orderBy(symbols.ticker, barRevisions.source, barRevisions.field);
 }

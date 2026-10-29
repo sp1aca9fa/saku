@@ -262,6 +262,9 @@ importers:
       '@saku/db':
         specifier: workspace:*
         version: link:../db
+      '@saku/reference':
+        specifier: workspace:*
+        version: link:../reference
       drizzle-orm:
         specifier: ^0.45.4
         version: 0.45.4(@libsql/client@0.18.0)

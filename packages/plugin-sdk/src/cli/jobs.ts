@@ -4,7 +4,10 @@
 //   pnpm daily             once per trading day, at the first check after the day's data is
 //                          final; exits at once when the day is done (the hourly timer calls it)
 //   pnpm daily --force     run again for the latest final day
-//   pnpm checks            layers A-C over the full history (summaries and non-green results)
+//   pnpm weekly            full-history refetch (revisions reported), checks, recompute, layer E
+//   pnpm verify            layers A-C over the full history and layer E (core vs reference,
+//                          incremental vs full) on the stored data, no fetching
+//   pnpm checks            the same as pnpm verify (its A1 name)
 //   pnpm probe             A1: the last sessions of one ticker from every bar source, to a log
 //   pnpm spike             A1: the gate, day by day, from the daily runs
 import { Sessions } from '@saku/data';
@@ -26,11 +29,11 @@ import { assertServerOnly } from '../server-only';
 
 assertServerOnly();
 loadRootEnv();
-const JOBS = ['bootstrap', 'daily', 'checks', 'probe', 'spike'] as const;
+const JOBS = ['bootstrap', 'daily', 'weekly', 'verify', 'checks', 'probe', 'spike'] as const;
 const job = process.argv[2] as (typeof JOBS)[number];
 if (!JOBS.includes(job)) {
   console.error(
-    'Usage: pnpm bootstrap | pnpm daily [--force] | pnpm checks | pnpm probe | pnpm spike',
+    'Usage: pnpm bootstrap | pnpm daily [--force] | pnpm weekly | pnpm verify | pnpm probe | pnpm spike',
   );
   process.exit(1);
 }
@@ -88,7 +91,7 @@ if (job === 'daily' && !force && (readStamp('daily') ?? '') >= target) {
 let result: Awaited<ReturnType<typeof runJob>> | undefined;
 try {
   result = await runJob(db, plugins, {
-    job: job as 'bootstrap' | 'daily' | 'checks',
+    job: job === 'verify' ? 'checks' : (job as 'bootstrap' | 'daily' | 'weekly' | 'checks'),
     target,
     sessions,
     seriesSessions,

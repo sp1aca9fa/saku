@@ -29,22 +29,28 @@ const TARGET = '2026-01-16';
 const DATES = sessions.between('2025-12-29', TARGET);
 const SECRET = 'r'.repeat(32);
 const closes = DATES.map((_, i) => 100 * 1.002 ** i);
-const barSource = (key: string, broken = false): BarSource & { calls: number } => {
+const barSource = (
+  key: string,
+  broken = false,
+  /** A close the source now reports differently (a late correction). */
+  revise?: { date: string; factor: number },
+): BarSource & { calls: number } => {
   const s = {
     info: testInfo(key, 'bar'),
     calls: 0,
     async fetchBars(_ticker: string, from: string, to: string): Promise<RawBar[]> {
       s.calls++;
       if (broken) throw new Error(`${key}: HTTP 500`);
+      const at = (i: number) => closes[i]! * (DATES[i] === revise?.date ? revise!.factor : 1);
       return DATES.flatMap((date, i) =>
         date >= from && date <= to
           ? [
               {
                 date,
-                open: closes[i]!,
-                high: closes[i]!,
-                low: closes[i]!,
-                close: closes[i]!,
+                open: at(i),
+                high: at(i),
+                low: at(i),
+                close: at(i),
                 closeIsSplitAdjusted: false,
                 volume: 1000,
                 divCash: 0,
@@ -217,5 +223,33 @@ describe('a daily run', () => {
     expect(r.ok).toBe(false);
     expect(r.error).toContain('No us-fed calendar');
     expect(primary.calls).toBe(0);
+  });
+
+  it('weekly: the full refetch reports what changed, recomputes, and runs layer E', async () => {
+    const { db } = await setup();
+    const { notifier, sent } = fakeNotifier();
+    expect(
+      (await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier))).ok,
+    ).toBe(true);
+    // Both sources now report a corrected bar for an early day (open, high, low and close).
+    const fix = { date: '2026-01-05', factor: 1.0001 };
+    const o = options(notifier, { job: 'weekly' });
+    const r = await runJob(
+      db,
+      plugins([barSource('p', false, fix), barSource('s', false, fix)]),
+      o,
+    );
+    expect(r).toMatchObject({ ok: true });
+    // No backup or heartbeat (the daily run's).
+    expect(o.hooks).toEqual([]);
+    const ops = sent.filter((m) => m.target === 'ops').map((m) => m.text);
+    expect(
+      ops.find((t) => t.startsWith('Saku: the weekly refetch changed 8 stored values')),
+    ).toContain('AAA close@p 1, AAA high@p 1');
+    const e = await db.select().from(schema.checkSummaries);
+    expect(e.filter((x) => x.layer === 'E').map((x) => [x.checkName, x.passed])).toEqual([
+      ['core_vs_reference', 1],
+      ['incremental_vs_full', 1],
+    ]);
   });
 });
