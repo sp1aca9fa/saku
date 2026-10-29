@@ -93,7 +93,7 @@ Unverified until the first real case: these steps and where testfol shows each n
   without a stored bar, for any ticker the case reads refuses the case (the message names the
   ticker, the count and the first date). Yellow days are computed and counted in the message; the
   status still follows the tolerances. The cash rate's own health is not checked here.
-- Every stored result starts with the label `same_close (not achievable)`.
+- Every result with backtest numbers starts with the label `same_close (not achievable)`; a refused case ("cannot run: ...") shows no numbers.
 
 ## Tolerances (requirements 13, never widened)
 
