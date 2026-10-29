@@ -144,10 +144,14 @@ main() {
   # Stuck, the alert above probably could not run either: report a failure to healthchecks.io.
   if [ -n "$stuck" ]; then
     local hc
-    # The value as written, without the line's CR or one pair of surrounding quotes.
+    # As dotenv reads it: a quoted value up to its closing quote; else up to a " #" comment.
     hc="$(sed -n 's/^HEALTHCHECK_URL=//p' .env 2>/dev/null | tail -n 1 | tr -d '\r')"
-    hc="${hc#[\"\']}"
-    hc="${hc%[\"\']}"
+    case "$hc" in
+      \"*) hc="${hc#\"}" && hc="${hc%%\"*}" ;;
+      \'*) hc="${hc#\'}" && hc="${hc%%\'*}" ;;
+      *) hc="${hc%%[[:space:]]#*}" ;;
+    esac
+    while [[ "$hc" == *[[:space:]] ]]; do hc="${hc%[[:space:]]}"; done
     [ -n "$hc" ] && curl -fsS -m 10 --retry 2 "$hc/fail" >/dev/null || true
   fi
   return 1
