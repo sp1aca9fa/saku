@@ -41,6 +41,32 @@
       "title": "Saku: {to} への更新が {step} の段階で失敗しました",
       "back": "サーバーは {from} に戻り、そのまま動作しています。新しいバージョンがプッシュされると再試行します。詳細はサーバーの更新ログにあります。",
       "stuck": "{from} に戻すことにも失敗したため、ジョブが動かない可能性があります。サーバーで ops/update-server.sh を手動で実行してください。"
+    },
+    "reason": {
+      "check": {
+        "bar_valid": "基本チェックに失敗した値があります({source})",
+        "missing_day": "取引日が欠けています({source})",
+        "unchanged_close": "終値が変化しておらず、古い可能性があります({source})",
+        "large_move": "確認が必要な大きな値動きがあります({source})",
+        "close_match": "ソース間で終値が異なります({source})",
+        "adj_return_match": "調整後リターンが提供元と異なります({source})",
+        "dividend_match": "ソース間で分配金が異なります({source})",
+        "split_match": "ソース間で分割が異なります({source})",
+        "leverage_track": "ファンドが原資産のレバレッジに連動していません({source})",
+        "index_match": "ファンドが指数に連動していません({source})",
+        "fx_match": "ソース間で為替レートが異なります({source})"
+      },
+      "single_source": "データがあるのは1つのソースだけです",
+      "primary_missing": "主ソースにデータがなく、代替値も検証を通りませんでした",
+      "no_data": "その日のデータがありません",
+      "no_decision": "判断を計算できませんでした",
+      "decision_margin": "代替価格がシグナルの閾値に近すぎます",
+      "standIn": "主ソースが欠けたため {source} の値で代替しています",
+      "standInRefused": "主ソースが欠け、代替値も検証を通りませんでした",
+      "stale": "{days} 営業日遅れています({source})",
+      "seriesMissing": "まだ値がありません({source})",
+      "notGreen": "緑ではありません",
+      "evaluation": "戦略を評価できませんでした"
     }
   }
 }

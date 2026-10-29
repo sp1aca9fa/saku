@@ -8,7 +8,14 @@ import { HttpError, type Notifier, type PluginContext } from '@saku/plugin-sdk';
 
 const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 
-async function post(ctx: PluginContext, url: string, body: unknown, service: string) {
+async function post(
+  ctx: PluginContext,
+  url: string,
+  body: unknown,
+  service: string,
+  secret: string,
+) {
+  ctx.http.addSecret(secret);
   try {
     await ctx.http.post(url, json(body), { 'Content-Type': 'application/json' });
   } catch (e) {
@@ -30,7 +37,7 @@ export const discord: Notifier = {
   validTarget: (target) =>
     /^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+$/.test(target),
   send: (target, text, ctx) =>
-    post(ctx, target, { content: text, allowed_mentions: { parse: [] } }, 'Discord'),
+    post(ctx, target, { content: text, allowed_mentions: { parse: [] } }, 'Discord', target),
 };
 
 export const telegram: Notifier = {
@@ -51,5 +58,6 @@ export const telegram: Notifier = {
       `https://api.telegram.org/bot${ctx.apiKey}/sendMessage`,
       { chat_id: target, text, link_preview_options: { is_disabled: true } },
       'Telegram',
+      ctx.apiKey ?? '',
     ),
 };

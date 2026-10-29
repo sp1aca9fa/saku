@@ -4,7 +4,14 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PoliteHttp, type PoliteHttpOptions } from './http';
-import type { Logger, NotifierInfo, PluginContext, PluginInfo, PluginModule } from './types';
+import type {
+  Logger,
+  Notifier,
+  NotifierInfo,
+  PluginContext,
+  PluginInfo,
+  PluginModule,
+} from './types';
 
 /**
  * Plug-in packages, loaded by path so the public repo works without the private `plugins/`
@@ -96,9 +103,26 @@ export function pluginContext(
     keys[name] = value;
   }
   return {
-    http: new PoliteHttp({ limits: info.limits, ...options.http }),
+    http: new PoliteHttp({ limits: info.limits, secrets: Object.values(keys), ...options.http }),
     now: options.now ?? new Date(),
     log,
     ...(names.length > 0 && { apiKey: keys[names[0]!], keys }),
+  };
+}
+
+/**
+ * Contexts for notifiers in one run: one client per service, so its pace and limits apply across
+ * messages, and no automatic retry, since a resent POST could deliver an alert twice (what failed
+ * is tried again at the next check).
+ */
+export function notifierContexts(log: Logger): (notifier: Notifier) => PluginContext {
+  const made = new Map<string, PluginContext>();
+  return (notifier) => {
+    let ctx = made.get(notifier.info.key);
+    if (!ctx) {
+      ctx = pluginContext(notifier.info, log, { http: { retries: 0 } });
+      made.set(notifier.info.key, ctx);
+    }
+    return ctx;
   };
 }

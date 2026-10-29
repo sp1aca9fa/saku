@@ -58,6 +58,8 @@ export interface PoliteHttpOptions {
   retries?: number;
   timeoutMs?: number;
   userAgent?: string;
+  /** Values (keys, tokens, webhook addresses) masked wherever a URL appears in an error. */
+  secrets?: string[];
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   clock?: () => number;
@@ -68,9 +70,11 @@ export class PoliteHttp {
   readonly sent: number[];
   private blocked: string | null = null;
   private readonly o: Required<Omit<PoliteHttpOptions, 'history'>>;
+  private readonly secrets: string[];
 
   constructor(options: PoliteHttpOptions = {}) {
     this.sent = [...(options.history ?? [])].sort((a, b) => a - b);
+    this.secrets = (options.secrets ?? []).filter((s) => s.length >= 4);
     this.o = {
       limits: {},
       minDelayMs: 500,
@@ -78,6 +82,7 @@ export class PoliteHttp {
       retries: 3,
       timeoutMs: 30_000,
       userAgent: 'Saku (self-hosted, personal use)',
+      secrets: [],
       fetchImpl: fetch,
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       clock: Date.now,
@@ -91,7 +96,7 @@ export class PoliteHttp {
       return JSON.parse(body) as T;
     } catch {
       this.checkChallenge(body, url);
-      throw new Error(`invalid JSON from ${redactUrl(url)}`);
+      throw new Error(`invalid JSON from ${this.shown(url)}`);
     }
   }
 
@@ -117,9 +122,20 @@ export class PoliteHttp {
 
   private checkChallenge(body: string, url: string): void {
     if (body.length < 50_000 && CHALLENGE_MARKERS.some((m) => m.test(body))) {
-      this.blocked = `challenge page at ${redactUrl(url)}`;
+      this.blocked = `challenge page at ${this.shown(url)}`;
       throw new BlockedError(this.blocked);
     }
+  }
+
+  /** Masks a value in every later error (for a secret that is part of a URL's path). */
+  addSecret(value: string): void {
+    if (value.length >= 4 && !this.secrets.includes(value)) this.secrets.push(value);
+  }
+
+  private shown(url: string): string {
+    let out = redactUrl(url);
+    for (const s of this.secrets) out = out.replaceAll(s, '***');
+    return out;
   }
 
   /** POSTs a body (e.g. a timestamp query) and returns the answer as bytes. */
@@ -140,7 +156,7 @@ export class PoliteHttp {
     headers: Record<string, string>,
     body?: Uint8Array,
   ): Promise<Response> {
-    const shown = redactUrl(url);
+    const shown = this.shown(url);
     for (let attempt = 0; ; attempt++) {
       if (this.blocked) throw new BlockedError(`stopped for this run: ${this.blocked}`);
       await this.pace();

@@ -72,12 +72,15 @@ export async function setChannelEnabled(db: Db, ownerId: string, id: string, ena
   });
 }
 
-/** The owner's enabled channels with their decrypted targets (jobs only, never shown). */
+/**
+ * The owner's enabled channels with their decrypted targets (jobs only, never shown). A target
+ * that does not decrypt (AUTH_SECRET missing or changed) is null, so the other channels still go.
+ */
 export async function deliveryTargets(
   db: Db,
   ownerId: string,
   authSecret: string,
-): Promise<(Channel & { target: string })[]> {
+): Promise<(Channel & { target: string | null })[]> {
   const rows = await db
     .select()
     .from(notificationChannels)
@@ -88,8 +91,16 @@ export async function deliveryTargets(
     type: r.type,
     admin: r.admin,
     enabled: r.enabled,
-    target: decryptSecret(r.targetEnc, authSecret, PURPOSE),
+    target: decrypt(r.targetEnc, authSecret),
   }));
+}
+
+function decrypt(payload: string, authSecret: string): string | null {
+  try {
+    return authSecret ? decryptSecret(payload, authSecret, PURPOSE) : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface AlertKey {

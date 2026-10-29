@@ -5,7 +5,7 @@
 // run that caught up several days still reports the change, and a new channel gets the current
 // state first.
 import { CASH_USD, SAFE_STATE, Strategy, type TradingDate } from '@saku/core';
-import { type Translate, translator } from '@saku/content';
+import { type Translate, hasText, translator } from '@saku/content';
 import type { Sessions } from '@saku/data';
 import {
   type AlertKey,
@@ -70,7 +70,9 @@ export function strategyAlert(
     date: o.execution === 'same_close' ? e.date : o.nextSession,
   });
   const health = t(`alerts.health.${e.dataStatus}`);
-  const reasons = e.reasons.length ? [t('alerts.reasons', { reasons: e.reasons.join(', ') })] : [];
+  const reasons = e.reasons.length
+    ? [t('alerts.reasons', { reasons: describeReasons(t, e.reasons) })]
+    : [];
   const values = { strategy: o.name, date: e.date };
   const alert = (type: AlertType, lines: string[]): Alert => ({
     key: { subject: o.versionId, date: e.date, type },
@@ -134,13 +136,23 @@ export async function sendStrategyAlerts(
   o: AlertOptions & { sessions: Sessions },
 ): Promise<AlertSummary> {
   const summary: AlertSummary = { sent: 0, failed: [] };
+  const owners = new Map<
+    string,
+    { language: string; t: Translate; targets: Awaited<ReturnType<typeof deliveryTargets>> }
+  >();
   for (const version of await allVersions(db)) {
     if (!version.ownerId) continue;
     const entry = await lastEntry(db, version.id);
     if (!entry || entry.date !== o.date) continue;
     const strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
-    const language = await languageOf(db, version.ownerId);
-    const t = translator(language);
+    let owner = owners.get(version.ownerId);
+    if (!owner) {
+      const language = await languageOf(db, version.ownerId);
+      const targets = await deliveryTargets(db, version.ownerId, o.authSecret);
+      owner = { language, t: translator(language), targets };
+      owners.set(version.ownerId, owner);
+    }
+    const { language, t } = owner;
     const day: DayEntry = {
       date: entry.date,
       allocation: entry.allocation,
@@ -149,7 +161,7 @@ export async function sendStrategyAlerts(
       safeStateApplied: entry.safeStateApplied,
       reasons: (JSON.parse(entry.payload) as { reasons?: string[] }).reasons ?? [],
     };
-    for (const channel of await deliveryTargets(db, version.ownerId, o.authSecret)) {
+    for (const channel of owner.targets) {
       const alert = strategyAlert(t, language, {
         versionId: version.id,
         name: version.name,
@@ -222,7 +234,7 @@ export function sendDataHealthAdmin(
     type: 'data_health',
     lines: (t) => [
       t('alerts.dataAdmin.title', { date: o.date }),
-      t('alerts.dataAdmin.body', { reasons: o.reasons.join(', ') }),
+      t('alerts.dataAdmin.body', { reasons: describeReasons(t, o.reasons) }),
     ],
   });
 }
@@ -256,13 +268,17 @@ async function latestOverallHealth(db: Db): Promise<string | undefined> {
 async function deliver(
   db: Db,
   o: AlertOptions,
-  channel: Channel & { target: string },
+  channel: Channel & { target: string | null },
   alert: Alert,
   summary: AlertSummary,
 ) {
   if (await alertSent(db, channel, alert.key)) return;
   const notifier = o.notifiers.find((n) => n.info.key === channel.type);
   const label = `${channel.type} channel ${channel.id}`;
+  if (channel.target === null) {
+    summary.failed.push(`${label}: target does not decrypt (AUTH_SECRET missing or changed)`);
+    return;
+  }
   if (!notifier) {
     summary.failed.push(`${label}: no ${channel.type} plug-in`);
     return;
@@ -278,6 +294,47 @@ async function deliver(
     o.log.warn(`Alert not delivered (${label})`, { key: alert.key, reason });
     summary.failed.push(`${label}: ${reason}`);
   }
+}
+
+const SIMPLE_REASONS = [
+  'single_source',
+  'primary_missing',
+  'no_data',
+  'no_decision',
+  'decision_margin',
+];
+
+/**
+ * Reason codes in words, e.g. `AAA2:B.close_match@alpaca` as "AAA2: closes differ between sources
+ * (alpaca)". A code without a text stays as it is (it is still exact, only less readable).
+ */
+export function describeReasons(t: Translate, codes: string[]): string {
+  return codes.map((code) => describeReason(t, code)).join('; ');
+}
+
+export function describeReason(t: Translate, code: string): string {
+  const i = code.indexOf(':');
+  const hasSubject = i > 0 && !code.startsWith('stand_in_refused:');
+  const subject = hasSubject ? code.slice(0, i) : undefined;
+  const rest = hasSubject ? code.slice(i + 1) : code;
+  let m: RegExpExecArray | null;
+  let text: string | undefined;
+  if (subject === 'evaluation') text = `${t('alerts.reason.evaluation')} (${rest})`;
+  else if ((m = /^[A-E]\.(\w+)@(.+)$/.exec(rest)) && hasText(`alerts.reason.check.${m[1]}`)) {
+    text = t(`alerts.reason.check.${m[1]}`, { source: m[2]! });
+  } else if ((m = /^stand_in@(.+)$/.exec(rest))) {
+    text = t('alerts.reason.standIn', { source: m[1]! });
+  } else if (rest.startsWith('stand_in_refused:')) text = t('alerts.reason.standInRefused');
+  else if ((m = /^stale\((\d+)\)@(.+)$/.exec(rest))) {
+    text = t('alerts.reason.stale', { days: m[1]!, source: m[2]! });
+  } else if ((m = /^missing@(.+)$/.exec(rest))) {
+    text = t('alerts.reason.seriesMissing', { source: m[1]! });
+  } else if (SIMPLE_REASONS.includes(rest)) text = t(`alerts.reason.${rest}`);
+  else if (!subject && /^[A-Z0-9][A-Z0-9.^=?&-]*$/.test(rest)) {
+    return `${rest}: ${t('alerts.reason.notGreen')}`;
+  }
+  if (text === undefined) return code;
+  return subject && subject !== 'evaluation' ? `${subject}: ${text}` : text;
 }
 
 async function languageOf(db: Db, userId: string): Promise<string> {

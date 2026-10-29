@@ -41,7 +41,7 @@ import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA, verifyToken } from '../jobs/anchor';
-import { loadPlugins, pluginContext } from '../registry';
+import { loadPlugins, notifierContexts } from '../registry';
 import { assertServerOnly } from '../server-only';
 
 assertServerOnly();
@@ -198,12 +198,14 @@ if (tool === 'strategy' && command === 'check') {
     const channel =
       (await deliveryTargets(db, owner, authSecret)).find((c) => c.id === rest[0]) ??
       fail('No enabled channel with that id.');
+    if (channel.target === null)
+      fail('The target does not decrypt: is AUTH_SECRET the one used to add it?');
     const notifier =
       notifiers.find((n) => n.info.key === channel.type) ?? fail(`No ${channel.type} plug-in.`);
     const user = await getUserByUsername(db, flag('user')!);
     const t = translator(user?.language ?? (await getSetting(db, 'primary_language')) ?? 'en');
     const log = { info: () => {}, warn: () => {} };
-    await notifier.send(channel.target, t('alerts.test'), pluginContext(notifier.info, log));
+    await notifier.send(channel.target!, t('alerts.test'), notifierContexts(log)(notifier));
     console.log('Sent.');
   } else fail('pnpm channel add|list|disable|enable|test');
 } else if (tool === 'alert' && command === 'update-failed') {
@@ -213,7 +215,7 @@ if (tool === 'strategy' && command === 'check') {
     date: tradingDateOf(new Date()),
     notifiers,
     authSecret: process.env.AUTH_SECRET?.trim() ?? '',
-    context: (n) => pluginContext(n.info, log),
+    context: notifierContexts(log),
     log,
     from: flag('from') ?? fail('--from <commit>'),
     to: flag('to') ?? fail('--to <commit>'),

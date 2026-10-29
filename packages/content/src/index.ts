@@ -20,12 +20,19 @@ function messages(language: string): Tree {
   return tree;
 }
 
+let installed: string[] | undefined;
 /** Installed languages, found from the message files. */
 export function languages(): string[] {
-  return readdirSync(DIR)
+  installed ??= readdirSync(DIR)
     .filter((f) => f.endsWith('.json'))
     .map((f) => f.slice(0, -5))
     .sort();
+  return installed;
+}
+
+/** Whether the base language has a text for the key. */
+export function hasText(key: string): boolean {
+  return lookup(messages(BASE_LANGUAGE), key) !== undefined;
 }
 
 function lookup(tree: Tree, key: string): string | undefined {

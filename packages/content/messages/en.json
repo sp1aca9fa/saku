@@ -41,6 +41,32 @@
       "title": "Saku: the update to {to} failed at the {step} step",
       "back": "The server went back to {from} and keeps running it. It tries again when a newer version is pushed; the update log on the server has the details.",
       "stuck": "Going back to {from} failed too, so the jobs may not run. Run ops/update-server.sh on the server by hand."
+    },
+    "reason": {
+      "check": {
+        "bar_valid": "a bar failed the basic checks ({source})",
+        "missing_day": "a trading day is missing ({source})",
+        "unchanged_close": "the close did not change, possibly stale ({source})",
+        "large_move": "an unusually large move to confirm ({source})",
+        "close_match": "closes differ between sources ({source})",
+        "adj_return_match": "adjusted returns differ from the provider ({source})",
+        "dividend_match": "dividends differ between sources ({source})",
+        "split_match": "splits differ between sources ({source})",
+        "leverage_track": "the fund does not track its leverage of the underlying ({source})",
+        "index_match": "the fund does not track its index ({source})",
+        "fx_match": "exchange rates differ between sources ({source})"
+      },
+      "single_source": "only one source had data",
+      "primary_missing": "the main source has no data and no stand-in passed",
+      "no_data": "no data for the day",
+      "no_decision": "no decision could be computed",
+      "decision_margin": "a stand-in price is too close to a signal threshold",
+      "standIn": "the main source was missing; {source} stands in",
+      "standInRefused": "the main source was missing and no stand-in passed the checks",
+      "stale": "{days} business days behind ({source})",
+      "seriesMissing": "no value yet ({source})",
+      "notGreen": "not green",
+      "evaluation": "the strategy could not be evaluated"
     }
   }
 }

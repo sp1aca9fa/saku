@@ -112,3 +112,21 @@ describe('PoliteHttp', () => {
     expect(redactUrl('https://x.test/?apiKey=abc')).toBe('https://x.test/?apiKey=***');
   });
 });
+
+describe('secrets in errors', () => {
+  it('masks registered values in URLs, including path parts', async () => {
+    const http = new PoliteHttp({
+      fetchImpl: (async () => new Response('', { status: 404 })) as typeof fetch,
+      minDelayMs: 0,
+      retries: 0,
+      secrets: ['TOKEN123'],
+    });
+    http.addSecret('hook-secret');
+    await expect(http.text('https://api.example.test/botTOKEN123/x')).rejects.toThrow(
+      'HTTP 404 for https://api.example.test/bot***/x',
+    );
+    await expect(http.text('https://hooks.example.test/1/hook-secret')).rejects.toThrow(
+      'HTTP 404 for https://hooks.example.test/1/***',
+    );
+  });
+});

@@ -362,13 +362,13 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     }
   }
   // The cash series' freshness on the run's date (rates are read only through asOf).
-  const seriesRole = (await roles(db, 'series')).primary;
-  if (o.seriesSessions && seriesRole && overall.has(o.to)) {
-    const cash = await seriesPointInTime(db, CASH_SERIES, seriesRole);
-    const last = cash.asOf(o.to, (o.now ?? new Date()).toISOString())?.date;
+  const seriesRole = seriesRoles.primary;
+  if (o.seriesSessions && overall.has(o.to)) {
+    const cash = seriesRole ? await seriesPointInTime(db, CASH_SERIES, seriesRole) : undefined;
+    const last = cash?.asOf(o.to, (o.now ?? new Date()).toISOString())?.date;
     const s = seriesHealth(o.seriesSessions, o.to, last);
     const what = last === undefined ? 'missing' : `stale(${s.behind})`;
-    grade(o.to, s.status, `${CASH_SERIES}:${what}@${seriesRole}`);
+    grade(o.to, s.status, `${CASH_SERIES}:${what}@${seriesRole ?? 'none'}`);
   }
   for (const [date, h] of overall) healthRows.push({ symbolId: null, date, health: h });
 

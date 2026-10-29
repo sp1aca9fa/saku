@@ -11,12 +11,28 @@ import {
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
+import { translator } from '@saku/content';
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
+  describeReason,
   sendDataHealthAdmin,
   sendJobFailure,
   sendStrategyAlerts,
   sendUpdateFailed,
 } from './alerts';
+
+// Every check id in packages/data, read from its source so a new check needs a text.
+const dataSrc = join(dirname(fileURLToPath(import.meta.url)), '../../../data/src');
+const CHECKS = [
+  ...new Set(
+    readdirSync(dataSrc)
+      .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+      .flatMap((f) => [...readFileSync(join(dataSrc, f), 'utf8').matchAll(/check: '(\w+)'/g)])
+      .map((m) => m[1]!),
+  ),
+];
 
 const sessions = new Sessions({
   id: 't',
@@ -146,7 +162,7 @@ describe('strategy alerts', () => {
         'Target: AAA 100%.',
         'Trade at the US open on 2026-01-07.',
         'Data health: red (no normal signal).',
-        'Details: AAA2:B.close_match@s.',
+        'Details: AAA2: closes differ between sources (s).',
       ].join('\n'),
     );
     await day('2026-01-07', 'Risk on');
@@ -159,7 +175,7 @@ describe('strategy alerts', () => {
     const { notifier, sent } = fakeNotifier();
     await day('2026-01-05', 'Calm');
     await sendStrategyAlerts(db, options(notifier, '2026-01-05'));
-    await day('2026-01-06', 'Calm', { status: 'yellow', reasons: ['AAA:C.tracking'] });
+    await day('2026-01-06', 'Calm', { status: 'yellow', reasons: ['AAA:C.index_match@idx'] });
     await sendStrategyAlerts(db, options(notifier, '2026-01-06'));
     expect(sent[0]!.text).toContain('目標: 現金(USD) 100%。');
     expect(sent[1]!.text).toBe(
@@ -167,7 +183,7 @@ describe('strategy alerts', () => {
         'Trend: 2026-01-06 のデータ警告',
         'シグナルは計算されましたが、一部のデータに警告があります。配分: Calm。',
         'データ状態: 黄(警告付きで計算)。',
-        '詳細: AAA:C.tracking。',
+        '詳細: AAA: ファンドが指数に連動していません(idx)。',
       ].join('\n'),
     );
   });
@@ -245,7 +261,9 @@ describe('admin alerts', () => {
       health: 'yellow',
       reasons: ['AAA', 'DTB3:stale(3)@fred'],
     });
-    expect(sent[1]!.text).toContain('緑でない項目: AAA, DTB3:stale(3)@fred。');
+    expect(sent[1]!.text).toContain(
+      '緑でない項目: AAA: 緑ではありません; DTB3: 3 営業日遅れています(fred)。',
+    );
     expect(sent[1]!.text).toContain('データ状態: 黄');
     // Only admin channels: the owner's ordinary channel got none of these.
     expect(sent.every((m) => m.target === 'ops')).toBe(true);
@@ -273,5 +291,35 @@ describe('admin alerts', () => {
         ].join('\n'),
       },
     ]);
+  });
+});
+
+describe('reason codes in words', () => {
+  const t = translator('en');
+  it('covers the codes the checks and the forward record produce', () => {
+    expect(describeReason(t, 'SPY:B.close_match@alpaca')).toBe(
+      'SPY: closes differ between sources (alpaca)',
+    );
+    expect(describeReason(t, 'stand_in@yahoo')).toBe(
+      'the main source was missing; yahoo stands in',
+    );
+    expect(describeReason(t, 'UPRO:stand_in_refused:layer_c')).toBe(
+      'UPRO: the main source was missing and no stand-in passed the checks',
+    );
+    expect(describeReason(t, 'DTB3:missing@none')).toBe('DTB3: no value yet (none)');
+    expect(describeReason(t, 'SSO:decision_margin')).toBe(
+      'SSO: a stand-in price is too close to a signal threshold',
+    );
+    expect(describeReason(t, 'evaluation:no bar for SPY')).toBe(
+      'the strategy could not be evaluated (no bar for SPY)',
+    );
+    expect(describeReason(t, 'SPY')).toBe('SPY: not green');
+    expect(describeReason(t, 'SPY:Z.unknown@x')).toBe('SPY:Z.unknown@x');
+  });
+
+  it('has a text for every check the data package runs', async () => {
+    const { hasText } = await import('@saku/content');
+    expect(CHECKS.length).toBeGreaterThan(5);
+    for (const check of CHECKS) expect(hasText(`alerts.reason.check.${check}`), check).toBe(true);
   });
 });

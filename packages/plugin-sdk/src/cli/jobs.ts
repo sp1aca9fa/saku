@@ -29,7 +29,13 @@ import {
 import { anchor } from '../jobs/anchor';
 import { forward } from '../jobs/forward';
 import { verify } from '../jobs/verify';
-import { allInfos, loadPlugins, pluginContext, savePluginInfos } from '../registry';
+import {
+  allInfos,
+  loadPlugins,
+  notifierContexts,
+  pluginContext,
+  savePluginInfos,
+} from '../registry';
 import { assertServerOnly } from '../server-only';
 
 const DATA_KIND = { bar: 'bars', series: 'series', fx: 'fx' } as const;
@@ -61,7 +67,9 @@ if (!calendar) throw new Error('No xnys calendar plug-in is loaded.');
 const sessions = new Sessions(calendar);
 // Business days of the cash series (FRED's DTB3 follows the Federal Reserve holidays).
 const fed = plugins.calendars.flatMap((c) => c.calendars).find((c) => c.id === 'us-fed');
-const seriesSessions = fed ? new Sessions(fed) : undefined;
+if (!fed)
+  throw new Error('No us-fed calendar plug-in is loaded (the cash series is checked on it).');
+const seriesSessions = new Sessions(fed);
 const now = new Date();
 const target = dailyTarget(sessions, now, process.env.SAKU_DAILY_AFTER || undefined);
 
@@ -102,7 +110,7 @@ const alerting: AlertOptions = {
   date: target,
   notifiers: plugins.notifiers,
   authSecret: process.env.AUTH_SECRET?.trim() ?? '',
-  context: (n) => pluginContext(n.info, log),
+  context: notifierContexts(log),
   log,
 };
 try {
@@ -146,7 +154,7 @@ try {
     runId,
     sessions,
     to: target,
-    ...(seriesSessions && { seriesSessions }),
+    seriesSessions,
     ...(job === 'daily'
       ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
       : { mode: 'full' as const }),
@@ -177,6 +185,10 @@ try {
         annotations: f.annotations,
       });
       for (const t of f.today) log.info(`${t.version}: ${t.allocation} (${t.dataStatus})`, t);
+      // Undelivered alerts are retried at the next check (sent ones are not repeated).
+      const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
+      log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
+      if (sent.failed.length > 0) incomplete.push('alerts');
       const a = await anchor(db, {
         date: target,
         authorities: (process.env.SAKU_TSA_URLS ?? '')
@@ -191,10 +203,6 @@ try {
         log.warn('Timestamping failed', { errors: a.errors });
         incomplete.push('timestamp');
       }
-      // Undelivered alerts are retried at the next check (sent ones are not repeated).
-      const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
-      log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
-      if (sent.failed.length > 0) incomplete.push('alerts');
     }
     if (checked.health !== 'green') {
       const sent = await sendDataHealthAdmin(db, {
