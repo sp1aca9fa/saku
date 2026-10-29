@@ -250,9 +250,14 @@ export async function healthReport(
         g = { status: 'green', reasons: [] };
       } else {
         const first = firstBar.get(id);
+        const beforeInception = !!s.inceptionDate && date < s.inceptionDate;
         // Not yet in its history: not part of the day, unless its inception says data should
-        // exist (then not graded).
-        if (first !== undefined && date < first && (!s.inceptionDate || date < s.inceptionDate)) {
+        // exist (then not graded). With no bar at all, a date before its inception is skipped.
+        const beforeHistory = first !== undefined && date < first;
+        if (
+          (beforeHistory && (!s.inceptionDate || beforeInception)) ||
+          (first === undefined && beforeInception)
+        ) {
           continue;
         }
         g = NOT_GRADED;

@@ -3,6 +3,7 @@ import { Sessions } from '@saku/data';
 import {
   schema,
   seedSourceRoles,
+  setSourceRole,
   startRun,
   storeRawBars,
   storeSeries,
@@ -308,5 +309,39 @@ describe('verify', () => {
       .insert(schema.bars)
       .values({ symbolId: ccc, date: '2026-01-07', close: 1, source: 'old' });
     expect((await graded('full')).dates).toEqual(['2026-01-07', '2026-01-08']);
+  });
+
+  it("marks the stored canonical bars red when the new primary has none of a symbol's bars", async () => {
+    const { db } = await setup();
+    await verify(db, {
+      runId: await startRun(db, 'checks'),
+      sessions,
+      mode: 'full',
+      to: '2026-01-08',
+    });
+    const aaa = (await symbolId(db, 'AAA'))!;
+    const stored = () =>
+      db
+        .select()
+        .from(schema.bars)
+        .where(eq(schema.bars.symbolId, aaa))
+        .orderBy(asc(schema.bars.date));
+    const before = await stored();
+    expect(before.find((b) => b.date === '2026-01-06')!.status).not.toBe('red');
+    // The admin makes a source the primary that has none of the history.
+    await setSourceRole(db, { dataKind: 'bars', key: 'q', role: 'primary', actor: 'test' });
+    await verify(db, {
+      runId: await startRun(db, 'daily'),
+      sessions,
+      mode: 'daily',
+      from: '2026-01-06',
+      to: '2026-01-08',
+    });
+    const after = await stored();
+    // Graded dates: red; the values stay as they were; a date outside the window is untouched.
+    expect(after.map((b) => b.status)).toEqual([before[0]!.status, 'red', 'red', 'red']);
+    expect(after.map(({ status: _, ...values }) => values)).toEqual(
+      before.map(({ status: _, ...values }) => values),
+    );
   });
 });

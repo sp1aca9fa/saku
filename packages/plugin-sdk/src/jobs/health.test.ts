@@ -260,6 +260,20 @@ describe('healthReport', () => {
     expect(day!.green).toBe(false);
   });
 
+  it('an active symbol with no bar yet is left out before its inception date', async () => {
+    const { db, full } = await setup();
+    await upsertSymbols(db, [{ ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await db
+      .update(schema.symbols)
+      .set({ inceptionDate: D[3] })
+      .where(eq(schema.symbols.ticker, 'CCC'));
+    await full('weekly', D[3]);
+    const [before, on] = await healthReport(db, { dates: [D[2], D[3]], sessions });
+    expect(before!.green).toBe(true);
+    // From its inception on, data should exist: not graded.
+    expect(on!.symbols.map((s) => `${s.ticker} ${s.grade.status}`)).toEqual(['CCC not_graded']);
+  });
+
   it('a symbol the full-history run did not grade is not graded (added later, or an old run)', async () => {
     const { db, ids, full } = await setup();
     await full('weekly', D[3], D[3], { [ids.BBB]: null });

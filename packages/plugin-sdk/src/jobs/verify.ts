@@ -27,7 +27,7 @@ import {
 } from '@saku/data';
 import { type Db, activeSymbols, getSetting, schema, seriesPointInTime } from '@saku/db';
 import { cashSeries } from './cash';
-import { and, asc, eq, isNull, min, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, isNull, lte, min, sql } from 'drizzle-orm';
 
 const CHUNK = 500;
 const sqlExcluded = (column: string) => sql.raw(`excluded.${column}`);
@@ -222,6 +222,25 @@ async function writeCanonical(
 }
 
 /**
+ * Sets the health status of a symbol's stored canonical bars on `dates` (a run of sessions),
+ * leaving their values as they are: for a symbol graded without rebuilding its bars (no primary
+ * bar), so a bar's status (what the forward step reads) never stays greener than the grade.
+ */
+async function markCanonical(db: Db, symbolId: number, dates: TradingDate[], status: HealthStatus) {
+  if (dates.length === 0) return;
+  await db
+    .update(schema.bars)
+    .set({ status })
+    .where(
+      and(
+        eq(schema.bars.symbolId, symbolId),
+        gte(schema.bars.date, dates[0]!),
+        lte(schema.bars.date, dates.at(-1)!),
+      ),
+    );
+}
+
+/**
  * Records new stand-ins (a later run may still change an unresolved one) and resolves those the
  * primary has now replaced. Returns the resolved ones off by more than the close tolerance.
  */
@@ -371,6 +390,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
         });
         grade(date, 'red', s.ticker);
       }
+      await markCanonical(db, s.id, missing, 'red');
       covered(s.id, missing);
       continue;
     }
