@@ -113,6 +113,62 @@ describe('PoliteHttp', () => {
   });
 });
 
+describe('why a request was refused', () => {
+  const refused = async (http: PoliteHttp, url: string) =>
+    http.json(url).then(
+      () => '',
+      (e: Error) => e.message,
+    );
+
+  it("adds the provider's own message from a JSON error answer", async () => {
+    const { http } = fakeClient([
+      () =>
+        new Response('{"error_code":400,"error_message":"Bad Request.  Too many vintages."}', {
+          status: 400,
+        }),
+    ]);
+    expect(await refused(http, 'https://example.test/a?x=1')).toBe(
+      'HTTP 400 for https://example.test/a?x=1: Bad Request. Too many vintages.',
+    );
+  });
+
+  it('keeps a short, tag-free excerpt of other answers', async () => {
+    const page = `<html><body><h1>Not found</h1><p>${'x'.repeat(500)}</p></body></html>`;
+    const { http } = fakeClient([() => new Response(page, { status: 404 })]);
+    const message = await refused(http, 'https://example.test/a');
+    expect(message.startsWith('HTTP 404 for https://example.test/a: Not found x')).toBe(true);
+    expect(message).not.toContain('<');
+    expect(message.length).toBeLessThan(300);
+    // An empty answer adds nothing.
+    const empty = fakeClient([() => new Response('', { status: 404 })]);
+    expect(await refused(empty.http, 'https://example.test/a')).toBe(
+      'HTTP 404 for https://example.test/a',
+    );
+  });
+
+  it('masks keys the answer repeats, from the URL and registered secrets', async () => {
+    const body = JSON.stringify({
+      error_message: 'key k3y/v4lue is not valid; token SECRET2; see ?api_key=k3y',
+    });
+    const { http } = fakeClient([() => new Response(body, { status: 400 })], {
+      secrets: ['SECRET2'],
+    });
+    const message = await refused(http, 'https://example.test/a?api_key=k3y%2Fv4lue');
+    expect(message).toBe(
+      'HTTP 400 for https://example.test/a?api_key=***: key *** is not valid; token ***; see ?api_key=***',
+    );
+  });
+
+  it('adds no excerpt to a server error', async () => {
+    const { http } = fakeClient([() => new Response('stack trace', { status: 500 })], {
+      retries: 0,
+    });
+    expect(await refused(http, 'https://example.test/a')).toBe(
+      'HTTP 500 for https://example.test/a',
+    );
+  });
+});
+
 describe('secrets in errors', () => {
   it('masks registered values in URLs, including path parts', async () => {
     const http = new PoliteHttp({

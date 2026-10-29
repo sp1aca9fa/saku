@@ -23,11 +23,16 @@ export class HttpError extends Error {
   constructor(
     readonly status: number,
     url: string,
+    /** For a 4xx: a short, redacted excerpt of the provider's answer (why it refused). */
+    readonly detail?: string,
   ) {
-    super(`HTTP ${status} for ${url}`);
+    super(`HTTP ${status} for ${url}${detail ? `: ${detail}` : ''}`);
     this.name = 'HttpError';
   }
 }
+
+/** Longest excerpt of an error answer kept in a message. */
+const EXCERPT_CHARS = 200;
 
 /** Share of each provider limit the client may use. */
 export const LIMIT_SHARE = 0.8;
@@ -184,9 +189,54 @@ export class PoliteHttp {
         await this.o.sleep(2 ** attempt * 2000);
         continue;
       }
-      if (!res.ok) throw new HttpError(res.status, shown);
+      if (!res.ok) {
+        const detail = res.status < 500 ? await this.excerpt(res, url) : undefined;
+        throw new HttpError(res.status, shown, detail);
+      }
       return res;
     }
+  }
+
+  /**
+   * A short excerpt of a refused request's answer, so the error says why (e.g. FRED's JSON
+   * `error_message`). Keys are masked: the registered secrets, every key-like query value of the
+   * request URL wherever it appears, and key-like query parameters in the text.
+   */
+  private async excerpt(res: Response, url: string): Promise<string | undefined> {
+    let body: string;
+    try {
+      body = (await res.text()).slice(0, 20_000);
+    } catch {
+      return undefined;
+    }
+    let text = body;
+    try {
+      const parsed = JSON.parse(body) as Record<string, unknown>;
+      const said = ['error_message', 'message', 'error', 'detail'].find(
+        (k) => typeof parsed?.[k] === 'string',
+      );
+      if (said) text = parsed[said] as string;
+    } catch {
+      // Not JSON: plain text or a page; tags are dropped below.
+    }
+    text = text
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    for (const m of url.matchAll(SECRET_PARAMS)) {
+      const raw = m[0].slice(m[1]!.length);
+      let decoded = raw;
+      try {
+        decoded = decodeURIComponent(raw);
+      } catch {
+        // A malformed escape: mask the raw text only.
+      }
+      for (const value of [raw, decoded]) {
+        if (value.length >= 4) text = text.replaceAll(value, '***');
+      }
+    }
+    text = this.shown(text).slice(0, EXCERPT_CHARS);
+    return text || undefined;
   }
 
   /** Waits for the minimum gap and for every limit window to have room under 80%. */
