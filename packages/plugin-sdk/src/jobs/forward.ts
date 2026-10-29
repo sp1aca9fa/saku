@@ -11,6 +11,7 @@ import {
   backtest,
   dependencies,
   forwardDecision,
+  NEAR_TIE,
   zonedInstant,
 } from '@saku/core';
 import type { Sessions } from '@saku/data';
@@ -20,6 +21,7 @@ import {
   activeSymbols,
   allVersions,
   annotate,
+  annotationsOf,
   appendForward,
   canonicalBars,
   forwardRecord,
@@ -69,7 +71,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   const from = await getSetting(db, 'forward_records_from');
   if (!from) return { ...summary, skipped: 'forward records not started (forward_records_from)' };
 
-  const symbolIds = new Map((await activeSymbols(db)).map((s) => [s.ticker, s.id]));
+  const { symbolIds, loadRows, barsOf } = await reader(db);
   const [seriesRole] = await db
     .select()
     .from(schema.sourceRoles)
@@ -80,18 +82,8 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   const cashRate = (date: TradingDate) =>
     cash?.asOf(date, zonedInstant(date, '09:30', 'America/New_York'))?.value ?? 0;
 
-  const loadRows = async (tickers: string[], to: TradingDate) => {
-    const out: Record<string, Awaited<ReturnType<typeof canonicalBars>>> = {};
-    for (const t of tickers) {
-      const id = symbolIds.get(t);
-      if (id !== undefined) out[t] = await canonicalBars(db, id, to);
-    }
-    return out;
-  };
-  const barsOf = (rows: Awaited<ReturnType<typeof loadRows>>) =>
-    Object.fromEntries(Object.entries(rows).map(([t, list]) => [t, list.map(toRaw)]));
   /** Each ticker's grade on the date: the canonical bar's status (set by every verify run). */
-  const healthOn = async (rows: Awaited<ReturnType<typeof loadRows>>, date: TradingDate) => {
+  const healthOn = async (rows: Rows, date: TradingDate) => {
     const out: Record<string, TickerHealth> = {};
     for (const [t, list] of Object.entries(rows)) {
       const bar = list.at(-1);
@@ -168,10 +160,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
       const recorded = (await forwardRecord(db, version.id)).find((e) => e.date === off.date);
       if (!recorded) continue;
       const bars = barsOf(await loadRows(deps, off.date));
-      const healthy = Object.fromEntries(
-        deps.map((t) => [t, { status: 'green' as const, reasons: [] }]),
-      );
-      const now = forwardDecision(strategy, off.date, bars, healthy);
+      const now = forwardDecision(strategy, off.date, bars, allGreen(deps));
       await annotate(db, {
         versionId: version.id,
         date: off.date,
@@ -189,6 +178,109 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     }
   }
   return summary;
+}
+
+type Rows = Record<string, Awaited<ReturnType<typeof canonicalBars>>>;
+
+/** Reads the canonical bars of the active universe as of a date. */
+async function reader(db: Db) {
+  const symbolIds = new Map((await activeSymbols(db)).map((s) => [s.ticker, s.id]));
+  const loadRows = async (tickers: string[], to: TradingDate): Promise<Rows> => {
+    const out: Rows = {};
+    for (const t of tickers) {
+      const id = symbolIds.get(t);
+      if (id !== undefined) out[t] = await canonicalBars(db, id, to);
+    }
+    return out;
+  };
+  const barsOf = (rows: Rows) =>
+    Object.fromEntries(Object.entries(rows).map(([t, list]) => [t, list.map(toRaw)]));
+  return { symbolIds, loadRows, barsOf };
+}
+
+const allGreen = (tickers: string[]): Record<string, TickerHealth> =>
+  Object.fromEntries(tickers.map((t) => [t, { status: 'green' as const, reasons: [] }]));
+
+export interface RecomputeSummary {
+  checked: number;
+  /** New differences, each annotated (recorded entries are never edited). */
+  differences: { version: string; date: TradingDate; recorded: string; now: string }[];
+}
+
+/**
+ * Requirements A2: the current engine must reproduce every recorded decision, or the difference
+ * is annotated. Each recorded day is evaluated again on today's canonical bars, with the health
+ * graded then (a difference can come from the engine or from data corrected since; the
+ * annotation names the code version). Signals compare exactly, numbers within the near-tie rule.
+ */
+export async function recompute(
+  db: Db,
+  o: { runId: string | null; code: string },
+): Promise<RecomputeSummary> {
+  const summary: RecomputeSummary = { checked: 0, differences: [] };
+  const { loadRows, barsOf } = await reader(db);
+  for (const version of await allVersions(db)) {
+    const strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
+    const deps = dependencies(strategy);
+    const seen = new Set(
+      (await annotationsOf(db, version.id, 'recomputed')).map((a) => `${a.date} ${a.fingerprint}`),
+    );
+    for (const e of await forwardRecord(db, version.id)) {
+      const recorded = JSON.parse(e.payload) as {
+        signals?: Record<string, boolean | number> | null;
+      };
+      const now = forwardDecision(
+        strategy,
+        e.date,
+        barsOf(await loadRows(deps, e.date)),
+        allGreen(deps),
+      );
+      summary.checked++;
+      const signals = signalsDiffer(recorded.signals ?? null, now.signals);
+      // A safe-state day records the normal allocation's signals but not its name.
+      const allocationDiffers = !e.safeStateApplied && now.allocation !== e.allocation;
+      if (!allocationDiffers && signals.length === 0) continue;
+      const fingerprint = `${now.allocation}|${signals.join(',')}`;
+      if (seen.has(`${e.date} ${fingerprint}`)) continue;
+      await annotate(db, {
+        versionId: version.id,
+        date: e.date,
+        kind: 'recomputed',
+        detail: {
+          code: o.code,
+          fingerprint,
+          recordedAllocation: e.allocation,
+          recomputedAllocation: now.allocation,
+          signalsDiffer: signals,
+        },
+        runId: o.runId,
+      });
+      summary.differences.push({
+        version: version.name,
+        date: e.date,
+        recorded: e.allocation,
+        now: now.allocation,
+      });
+    }
+  }
+  return summary;
+}
+
+/** Signal ids whose value differs (booleans exactly, numbers beyond 1e-9 relative). */
+export function signalsDiffer(
+  a: Record<string, boolean | number> | null,
+  b: Record<string, boolean | number> | null,
+): string[] {
+  if (!a || !b) return a === b ? [] : ['*'];
+  const ids = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
+  return ids.filter((id) => {
+    const x = a[id];
+    const y = b[id];
+    if (typeof x === 'number' && typeof y === 'number') {
+      return Math.abs(x - y) > NEAR_TIE * Math.max(Math.abs(x), Math.abs(y));
+    }
+    return x !== y;
+  });
 }
 
 /** The record's own equity: its recorded holdings traded as the strategy executes, from 1. */

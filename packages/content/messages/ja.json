@@ -67,6 +67,10 @@
       "seriesMissing": "まだ値がありません({source})",
       "notGreen": "緑ではありません",
       "evaluation": "戦略を評価できませんでした"
+    },
+    "recompute": {
+      "title": "Saku: 現在のエンジンは記録済みの {count} 日を異なる判断にします",
+      "body": "最初の例: {version} の {date}、記録は {recorded}、現在は {now}。記録はそのまま残し、各差異に注記を付けます。新しいシグナルを信頼する前に原因を確認してください。"
     }
   }
 }

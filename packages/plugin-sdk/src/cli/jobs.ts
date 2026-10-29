@@ -24,10 +24,12 @@ import {
   type AlertOptions,
   sendDataHealthAdmin,
   sendJobFailure,
+  sendRecomputeDiffers,
   sendStrategyAlerts,
 } from '../jobs/alerts';
 import { anchor } from '../jobs/anchor';
-import { forward } from '../jobs/forward';
+import { forward, recompute } from '../jobs/forward';
+import { execFileSync } from 'node:child_process';
 import { verify } from '../jobs/verify';
 import {
   allInfos,
@@ -189,6 +191,14 @@ try {
       const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
       log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
       if (sent.failed.length > 0) incomplete.push('alerts');
+      // The current engine must reproduce the record, or each difference is annotated.
+      const r = await recompute(db, { runId, code: codeVersion() });
+      log.info(`Recomputed ${r.checked} recorded days: ${r.differences.length} new differences`);
+      if (r.differences.length > 0) {
+        log.warn('The engine decides recorded days differently', { differences: r.differences });
+        const sent = await sendRecomputeDiffers(db, { ...alerting, differences: r.differences });
+        if (sent.failed.length > 0) incomplete.push('alerts');
+      }
       const a = await anchor(db, {
         date: target,
         authorities: (process.env.SAKU_TSA_URLS ?? '')
@@ -255,6 +265,15 @@ function summary(r: SourceReport): string {
   if (r.stopped) parts.push(`stopped (${r.stopped})`);
   parts.push(`${r.inserted} new, ${r.revised} revised, ${r.readjustments} re-adjustments`);
   return parts.join(', ');
+}
+
+/** The checked-out commit, named in recompute annotations. */
+function codeVersion(): string {
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+  } catch {
+    return 'unknown';
+  }
 }
 
 /** Pings healthchecks.io after a full success; the missing ping is what raises the alarm. */

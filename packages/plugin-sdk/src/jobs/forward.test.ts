@@ -18,7 +18,7 @@ import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
 import { sendStrategyAlerts } from './alerts';
-import { forward } from './forward';
+import { forward, recompute, signalsDiffer } from './forward';
 import { verify } from './verify';
 
 const sessions = new Sessions({
@@ -111,7 +111,7 @@ async function setup() {
   });
   const runId = await startRun(db, 'daily');
   await verify(db, { runId, sessions, mode: 'full', to: D[4]! });
-  return { db, version, runId };
+  return { db, version, runId, store };
 }
 
 describe('forward', () => {
@@ -136,6 +136,37 @@ describe('forward', () => {
     // Bought at 01-08's open (= its close here): no change on 01-08.
     expect(record.map((e) => e.equity)).toEqual([1, 1]);
     expect(await verifyChain(db, version)).toEqual([]);
+  });
+
+  it('recompute: the record reproduces, and a difference is annotated once', async () => {
+    const { db, version, runId, store } = await setup();
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    await forward(db, { runId, sessions, to: D[3]! });
+    expect(await recompute(db, { runId, code: 'c1' })).toEqual({ checked: 2, differences: [] });
+    // A corrected close on 01-08 (below its 2-day average) turns that day's signal off.
+    const revised = bars([100, 101, 102, 100]);
+    await store('AAA', 'p', revised);
+    await store('AAA', 's', revised);
+    await verify(db, { runId: await startRun(db, 'checks'), sessions, mode: 'full', to: D[3]! });
+    const r = await recompute(db, { runId, code: 'c2' });
+    expect(r.differences).toEqual([
+      { version: 'Trend', date: '2026-01-08', recorded: 'Risk on', now: 'Calm' },
+    ]);
+    expect((await recompute(db, { runId, code: 'c2' })).differences).toEqual([]);
+    const { annotationsOf } = await import('@saku/db');
+    const [note] = await annotationsOf(db, version.id, 'recomputed');
+    expect(note!.detail).toMatchObject({ code: 'c2', signalsDiffer: ['A'] });
+    // The record itself is untouched.
+    expect((await forwardRecord(db, version.id)).map((e) => e.allocation)).toEqual([
+      'Risk on',
+      'Risk on',
+    ]);
+  });
+
+  it('compares signals exactly, numbers within the near-tie rule', () => {
+    expect(signalsDiffer({ a: true, v: 1 }, { a: true, v: 1 + 1e-12 })).toEqual([]);
+    expect(signalsDiffer({ a: true, v: 1 }, { a: false, v: 1.1 })).toEqual(['a', 'v']);
+    expect(signalsDiffer(null, { a: true })).toEqual(['*']);
   });
 
   it('applies the safe state on a red day', async () => {

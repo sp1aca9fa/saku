@@ -6,6 +6,9 @@
 //   pnpm strategy list
 //   pnpm strategy show <version id> [--days 10]           the latest forward entries
 //   pnpm strategy verify                                   recompute every hash chain
+//   pnpm strategy recompute                                the current engine against the record
+//                                                          (differences annotated; the daily run
+//                                                          does this too)
 //   pnpm journal add <version id> <signal date> done|skipped|delayed --user <username>
 //                    [--date <action date>] [--note <text>]
 //   pnpm journal list <version id> --user <username>
@@ -41,6 +44,7 @@ import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA, verifyToken } from '../jobs/anchor';
+import { recompute } from '../jobs/forward';
 import { loadPlugins, notifierContexts } from '../registry';
 import { assertServerOnly } from '../server-only';
 
@@ -140,6 +144,13 @@ if (tool === 'strategy' && command === 'check') {
     );
   }
   process.exit(bad ? 1 : 0);
+} else if (tool === 'strategy' && command === 'recompute') {
+  const r = await recompute(db, { runId: null, code: 'cli' });
+  for (const d of r.differences) {
+    console.log(`${d.version} ${d.date}: recorded ${d.recorded}, now ${d.now} (annotated)`);
+  }
+  console.log(`${r.checked} recorded days, ${r.differences.length} new differences.`);
+  process.exit(r.differences.length ? 1 : 0);
 } else if (tool === 'journal' && command === 'add') {
   const [versionId, signalDate, action] = rest;
   if (!versionId || !signalDate || !isTradingDate(signalDate))
@@ -227,7 +238,7 @@ if (tool === 'strategy' && command === 'check') {
   );
 } else {
   fail(
-    'Usage: pnpm strategy check|register|list|show|verify ... | pnpm journal add|list ... | pnpm channel ... ' +
+    'Usage: pnpm strategy check|register|list|show|verify|recompute ... | pnpm journal add|list ... | pnpm channel ... ' +
       '(see packages/plugin-sdk/src/cli/strategy.ts)',
   );
 }

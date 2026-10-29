@@ -181,6 +181,19 @@ export async function annotate(
   await db.insert(forwardAnnotations).values(o);
 }
 
+/** A version's annotations of one kind, oldest first (with the detail's fingerprint, if any). */
+export async function annotationsOf(db: Db, versionId: string, kind: string) {
+  const rows = await db
+    .select()
+    .from(forwardAnnotations)
+    .where(and(eq(forwardAnnotations.versionId, versionId), eq(forwardAnnotations.kind, kind)))
+    .orderBy(asc(forwardAnnotations.id));
+  return rows.map((r) => ({
+    ...r,
+    fingerprint: (r.detail as { fingerprint?: string }).fingerprint ?? '',
+  }));
+}
+
 /** A journal entry (done / skipped / delayed) on a version the user may read. */
 export async function addJournalEntry(
   db: Db,

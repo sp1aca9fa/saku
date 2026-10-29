@@ -22,9 +22,16 @@ import {
 } from '@saku/db';
 import { desc, eq, isNull } from 'drizzle-orm';
 import type { Logger, Notifier, PluginContext } from '../types';
+import type { RecomputeSummary } from './forward';
 
 export type AlertType =
-  'state_change' | 'data_yellow' | 'data_red' | 'job_failure' | 'data_health' | 'update_failed';
+  | 'state_change'
+  | 'data_yellow'
+  | 'data_red'
+  | 'job_failure'
+  | 'data_health'
+  | 'update_failed'
+  | 'recompute_differs';
 const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red'];
 
 export interface Alert {
@@ -251,6 +258,23 @@ export function sendUpdateFailed(
     lines: (t) => [
       t('alerts.update.title', { to: o.to, step: o.step }),
       t(o.stuck ? 'alerts.update.stuck' : 'alerts.update.back', { from: o.from }),
+    ],
+  });
+}
+
+/** The current engine decides recorded days differently (each one is annotated). */
+export function sendRecomputeDiffers(
+  db: Db,
+  o: AlertOptions & { differences: RecomputeSummary['differences'] },
+): Promise<AlertSummary> {
+  const first = o.differences[0]!;
+  return sendAdminAlert(db, {
+    ...o,
+    subject: 'recompute',
+    type: 'recompute_differs',
+    lines: (t) => [
+      t('alerts.recompute.title', { count: o.differences.length }),
+      t('alerts.recompute.body', { ...first }),
     ],
   });
 }

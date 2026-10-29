@@ -67,6 +67,10 @@
       "seriesMissing": "no value yet ({source})",
       "notGreen": "not green",
       "evaluation": "the strategy could not be evaluated"
+    },
+    "recompute": {
+      "title": "Saku: the engine now decides {count} recorded days differently",
+      "body": "First: {version} on {date}, recorded {recorded}, now {now}. Recorded entries stay as they are; each difference is annotated. Find the cause before trusting new signals."
     }
   }
 }
