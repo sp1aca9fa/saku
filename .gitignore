@@ -23,3 +23,11 @@ next-env.d.ts
 # Generic Claude rules are public (overrides a global ignore); the owner's own are private
 !CLAUDE.md
 CLAUDE.local.md
+
+# Shared agent and command definitions are public; local Claude settings stay private
+!.claude/
+.claude/*
+!.claude/agents/
+!.claude/commands/
+# Orchestration run logs, specs and the reviewer ledger (local)
+.agent-runs/

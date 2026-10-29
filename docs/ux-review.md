@@ -34,11 +34,8 @@ Answer as someone who has never seen the app and does not know the math behind i
 7. **States.** Empty, loading, one item, very many items, long names, missing values, a data
    problem: what the screenshots show of them, and what they likely look like.
 8. **Phone.** Tap targets, text that wraps badly, sideways scroll, things cut off.
-9. **Trust.** Where the page shows a result, a forecast or a backtest: is it clear how sure it is
-   (a range, not one number), in money you understand, and whether it is past data or a guess?
-   When the data behind a signal is doubtful, does the page say so next to the signal? Before a
-   risky setting takes effect, are its risks shown? Anything that could make a person trade,
-   or skip a trade, on a wrong reading is a top finding.
+9. **Trust.** How sure a number is, data doubt, money terms and risk settings are the trust
+   review's job (`docs/trust-review.md`); here, only a plain visual contradiction.
 10. **Breaks and bugs.** Anything that looks wrong rather than unclear: numbers that don't add up
     or contradict each other, a total that doesn't match its items, overlapping or clipped parts,
     a layout that breaks at one width but not another, a control that looks dead, the same item
