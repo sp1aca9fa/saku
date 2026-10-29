@@ -166,10 +166,10 @@ function spikeMarkdown(r: SpikeReport): string {
         `| ${d.date} | ${d.reason === 'pending' ? 'pending' : d.primaryOk ? 'ok' : d.reason === 'no_run' ? 'FAILED (no run)' : 'FAILED'} | ${sources.map((s) => (d.available[s] ? 'yes' : 'no')).join(' | ')} | ${d.reason === 'pending' ? 'pending' : d.layerBPass ? 'pass' : 'fail'} | ${d.reason === 'pending' || d.layerCPending ? 'pending' : d.layerCPass ? 'pass' : 'fail'} | ${d.nonGreen.length} |`,
     ),
     '',
-    `Days: ${r.days.length}. Primary ok: ${r.primaryOkDays}. Without a finished daily run: ${r.days.filter((d) => d.reason === 'no_run').length}. Pending (not counted yet): ${r.pending}.`,
+    `Judged: ${r.days.length - r.pending} sessions${r.through ? ` through ${r.through}` : ''}. Primary ok: ${r.primaryOkDays}. Without a finished daily run: ${r.days.filter((d) => d.reason === 'no_run' && (!r.through || d.date <= r.through)).length}. Not judged yet (from the first pending session on): ${r.pending}.`,
     `Secondary availability (gate: one >= ${pct(GATE.secondaryAvailability)}): ${sources.map((s) => `${s} ${pct(r.availability[s] ?? 0)}`).join(', ')}.`,
     `Layer B (gate >= ${pct(GATE.layerB)}): ${r.layerB.passed}/${r.layerB.days}. Layer C (gate >= ${pct(GATE.layerC)}): ${r.layerC.passed}/${r.layerC.days}.`,
-    `Numeric gate: ${r.passed ? 'passed' : 'not passed'} (every failure must still be explained).`,
+    `Numeric gate: ${r.passed && r.through ? `passed through ${r.through}` : 'not passed'} (every failure must still be explained).`,
   ];
   return lines.join('\n');
 }

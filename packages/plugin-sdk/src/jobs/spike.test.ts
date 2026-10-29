@@ -90,7 +90,7 @@ describe('spikeReport', () => {
     ];
     await day(db, '2026-01-05', good);
     // The secondary missed a day: not available, and B is not counted for that day.
-    await day(db, '2026-01-06', [
+    const missed = await day(db, '2026-01-06', [
       ok('A', 'bar_valid', 'p'),
       {
         layer: 'B',
@@ -122,6 +122,7 @@ describe('spikeReport', () => {
         source: 's',
         status: 'yellow',
         message: 'no secondary bar',
+        runId: missed,
       },
     ]);
   });
@@ -222,10 +223,10 @@ describe('spikeReport', () => {
       ['2026-01-05', null],
       ['2026-01-06', 'pending'],
     ]);
+    // The verdict covers the judged sessions; the pending one is listed, never counted.
     expect(report.primaryOkDays).toBe(1);
     expect(report.layerC).toEqual({ days: 1, passed: 1 });
-    expect(report.pending).toBe(1);
-    expect(report.passed).toBe(false); // not judged while a day is pending
+    expect(report).toMatchObject({ pending: 1, through: '2026-01-05', passed: true });
     // Once the window closed (the next target), the same session is a failure.
     const later = await spikeReport(db, { sessions, to: '2026-01-07', open: '2026-01-07' });
     expect(later.days[1]).toMatchObject({ date: '2026-01-06', reason: 'no_run' });
@@ -243,6 +244,7 @@ describe('spikeReport', () => {
     let report = await spikeReport(db, { sessions });
     expect(report.days[0]).toMatchObject({ layerCPass: false, layerCPending: true });
     expect(report).toMatchObject({ pending: 1, passed: false, layerC: { days: 0, passed: 0 } });
+    expect(report.through).toBeUndefined();
 
     // The next run checks 01-05 in its window; 01-06 now waits for the index.
     const next = await runFor(db, '2026-01-06', {
@@ -256,12 +258,56 @@ describe('spikeReport', () => {
     ]);
     expect(report.days[0]!.layerCRunId).toBe(next);
     expect(report.layerC).toEqual({ days: 1, passed: 1 });
+    expect(report).toMatchObject({ through: '2026-01-05', passed: true, pending: 1 });
 
-    // A later run without an index result for 01-06: no longer pending, not passed.
+    // A later run that stored nothing for 01-06 did not check it: still pending.
     await runFor(db, '2026-01-07', { '2026-01-07': [...base, index] });
+    report = await spikeReport(db, { sessions });
+    expect(report.days[1]).toMatchObject({ date: '2026-01-06', layerCPending: true });
+    // Pending from 01-06 on: 01-07 is listed, not judged, though its own layer C is green.
+    expect(report).toMatchObject({ through: '2026-01-05', pending: 2 });
+
+    // A later run that stored 01-06 without an index result: no longer pending, not passed.
+    await runFor(db, '2026-01-08', { '2026-01-06': base, '2026-01-08': [...base, index] });
     report = await spikeReport(db, { sessions });
     expect(report.days[1]).toMatchObject({ date: '2026-01-06', layerCPass: false });
     expect(report.days[1]!.layerCPending).toBeUndefined();
-    expect(report.layerC).toEqual({ days: 3, passed: 2 });
+    // 01-08's own run had its index (the test's simplification): judged through 01-08.
+    expect(report.layerC).toEqual({ days: 4, passed: 3 });
+    expect(report).toMatchObject({ through: '2026-01-08', pending: 0, passed: false });
+  });
+
+  it('a failure at decision time is never dropped by a later index check', async () => {
+    const { db, aaa } = await setup({ indexed: true });
+    const base = [
+      { ...ok('A', 'bar_valid', 'p'), symbolId: aaa },
+      { ...ok('B', 'close_match', 's'), symbolId: aaa },
+    ];
+    const green = { ...ok('C', 'index_match', 'idx'), symbolId: aaa };
+    const stale = { ...green, checkName: 'index_unavailable', status: 'yellow' as const };
+    // The day's own run could not check the index (yellow); the next run's check is green.
+    const own = await day(db, '2026-01-05', [...base, stale]);
+    await runFor(db, '2026-01-06', {
+      '2026-01-05': [...base, green],
+      '2026-01-06': [...base, green],
+    });
+    let report = await spikeReport(db, { sessions });
+    expect(report.days[0]).toMatchObject({ layerCPass: false });
+    expect(report.days[0]!.nonGreen).toEqual([
+      expect.objectContaining({ check: 'index_unavailable', status: 'yellow', runId: own }),
+    ]);
+
+    // Green at decision time, the later index check red: not passed, listed with its run.
+    const db2 = (await setup({ indexed: true })).db;
+    await day(db2, '2026-01-05', [...base, green]);
+    const later = await runFor(db2, '2026-01-06', {
+      '2026-01-05': [...base, { ...green, status: 'red' as const }],
+      '2026-01-06': [...base, green],
+    });
+    report = await spikeReport(db2, { sessions });
+    expect(report.days[0]).toMatchObject({ layerCPass: false, layerCRunId: later });
+    expect(report.days[0]!.nonGreen).toEqual([
+      expect.objectContaining({ check: 'index_match', status: 'red', runId: later }),
+    ]);
   });
 });

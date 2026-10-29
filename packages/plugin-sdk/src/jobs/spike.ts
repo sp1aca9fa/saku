@@ -11,13 +11,16 @@
 //     secondary's outage is measured as secondary availability, not as a primary failure.
 //   - The primary and layer B: from the latest such run targeting the date. A secondary is
 //     available when any such run targeting the date got its bars.
-//   - Layer C: from the latest such run whose window (DAILY_OVERLAP sessions before its target
-//     through the target) covers the date, so the next run's index check for the date counts. A
-//     fund with an index and no index result for the date is pending: not passed, and left out
-//     of the layer C count only while no later run has finished (its window is still open).
+//   - Layer C: the day's own run's layer C results (what was decided on) all green, and the
+//     index results for the date from the latest such run whose window (DAILY_OVERLAP sessions
+//     before its target through the target) covers it all green, so the next run's index check
+//     for the date counts and a failure at decision time is never dropped by a later correction.
+//     A fund with an index and no index result for the date is not passed; it is pending while
+//     no later finished run covering the date has stored results for it.
 //   - A session without a run is failed everywhere (`no_run`), except the `open` session (the
 //     daily target whose run window has not closed): pending while no run for it has finished.
-//   - The gate is not passed while any day is pending. Unknown never reads as passing.
+//   - The verdict covers the sessions before the first pending one ("passed through <date>");
+//     the later ones are listed, never counted as passed. Unknown never reads as passing.
 import type { TradingDate } from '@saku/core';
 import type { Sessions } from '@saku/data';
 import { type Db, activeSymbols, schema } from '@saku/db';
@@ -39,7 +42,7 @@ export interface SpikeDay {
   available: Record<string, boolean>;
   layerBPass: boolean;
   layerCPass: boolean;
-  /** Layer C waits for an index result a later run can still bring (not counted yet). */
+  /** Layer C waits for an index result a later run can still bring (not judged yet). */
   layerCPending?: boolean;
   nonGreen: {
     layer: string;
@@ -47,6 +50,8 @@ export interface SpikeDay {
     source: string | null;
     status: string;
     message: string | null;
+    /** The run that stored it (the day's own run, or the later one that checked the index). */
+    runId: string;
   }[];
 }
 
@@ -56,12 +61,16 @@ export interface SpikeReport {
   availability: Record<string, number>;
   layerB: { days: number; passed: number };
   layerC: { days: number; passed: number };
-  /** Days not judged yet (a pending session or a pending layer C). */
+  /** The last session the verdict covers (the day before the first pending one). */
+  through?: TradingDate;
+  /** Sessions after `through`, listed but not judged yet (from the first pending one on). */
   pending: number;
+  /** The numeric gate over the sessions through `through`. */
   passed: boolean;
 }
 
 type Result = typeof schema.checkResults.$inferSelect;
+const isIndexResult = (r: Result) => r.layer === 'C' && r.checkName.startsWith('index_');
 
 export async function spikeReport(
   db: Db,
@@ -154,23 +163,27 @@ export async function spikeReport(
       });
     }
 
-    // Layer C from the latest finished run covering the date that stored results for it.
+    // The index check for the date from the latest finished run covering it that stored results
+    // for it (the next run checks the date once the index is published).
     let cRun: { id: string; rs: Result[] } = { id: runId, rs };
+    let laterCovering = false;
     for (const r of finished) {
       const covers =
         r.target === date || (r.target > date && r.from !== undefined && r.from <= date);
       if (!covers) continue;
       const x =
         r.target === date ? own.find((y) => y.id === r.id)?.rs : await resultsOf(r.id, date);
-      if (x && x.length > 0) cRun = { id: r.id, rs: x };
+      if (!x || x.length === 0) continue;
+      cRun = { id: r.id, rs: x };
+      if (r.target > date) laterCovering = true;
     }
-    const layerC = cRun.rs.filter((r) => r.layer === 'C');
+    const ownC = rs.filter((r) => r.layer === 'C');
+    const index = cRun.id === runId ? [] : cRun.rs.filter(isIndexResult);
+    const indexNow = cRun.rs.filter(isIndexResult);
     // A fund with an index needs an index result for the date (index_match, or index_unavailable).
-    const indexed = live.filter((s) => s.indexSeries);
-    const missingIndex = indexed.some(
-      (s) => !layerC.some((r) => r.symbolId === s.id && r.checkName.startsWith('index_')),
-    );
-    const laterFinished = finished.some((r) => r.target > date);
+    const missingIndex = live
+      .filter((s) => s.indexSeries)
+      .some((s) => !indexNow.some((r) => r.symbolId === s.id));
     days.push({
       date,
       runId,
@@ -178,9 +191,14 @@ export async function spikeReport(
       primaryOk: primaryBars.length >= live.length,
       available,
       layerBPass: rs.filter((r) => r.layer === 'B').every((r) => r.status === 'green'),
-      layerCPass: !missingIndex && layerC.every((r) => r.status === 'green'),
-      ...(missingIndex && !laterFinished && { layerCPending: true }),
-      nonGreen: [...rs.filter((r) => r.layer !== 'C'), ...layerC]
+      // The day's own run (what was decided on) and the later index check must both be green: a
+      // failure at decision time is never dropped by a later correction.
+      layerCPass:
+        !missingIndex &&
+        ownC.every((r) => r.status === 'green') &&
+        indexNow.every((r) => r.status === 'green'),
+      ...(missingIndex && !laterCovering && { layerCPending: true }),
+      nonGreen: [...rs, ...index]
         .filter((r) => r.status !== 'green')
         .map((r) => ({
           layer: r.layer,
@@ -188,12 +206,16 @@ export async function spikeReport(
           source: r.source,
           status: r.status,
           message: r.message,
+          runId: r.runId,
         })),
     });
   }
 
-  // Pending sessions are listed, not counted; a pending layer C leaves only layer C uncounted.
-  const counted = days.filter((d) => d.reason !== 'pending');
+  // The verdict covers the sessions before the first pending one (judged through the day before);
+  // later sessions are listed, never counted as passed.
+  const firstPending = days.findIndex((d) => d.reason === 'pending' || d.layerCPending);
+  const counted = firstPending < 0 ? days : days.slice(0, firstPending);
+  const through = counted.at(-1)?.date;
   const n = counted.length;
   const availability: Record<string, number> = {};
   for (const s of secondaries)
@@ -204,18 +226,24 @@ export async function spikeReport(
     days: withSecondary.length,
     passed: withSecondary.filter((d) => d.layerBPass).length,
   };
-  const cDays = counted.filter((d) => !d.layerCPending);
-  const layerC = { days: cDays.length, passed: cDays.filter((d) => d.layerCPass).length };
+  const layerC = { days: n, passed: counted.filter((d) => d.layerCPass).length };
   const primaryOkDays = counted.filter((d) => d.primaryOk).length;
-  const pending = days.filter((d) => d.reason === 'pending' || d.layerCPending).length;
+  const pending = days.length - n;
   const passed =
     n > 0 &&
-    pending === 0 &&
     primaryOkDays === n &&
     Object.values(availability).some((a) => a >= GATE.secondaryAvailability) &&
     layerB.days > 0 &&
     layerB.passed / layerB.days >= GATE.layerB &&
-    layerC.days > 0 &&
     layerC.passed / layerC.days >= GATE.layerC;
-  return { days, primaryOkDays, availability, layerB, layerC, pending, passed };
+  return {
+    days,
+    ...(through !== undefined && { through }),
+    primaryOkDays,
+    availability,
+    layerB,
+    layerC,
+    pending,
+    passed,
+  };
 }
