@@ -155,7 +155,8 @@ const TOLERANCES = '{"SPY":0.01,"SSO":0.01}';
 async function run(
   bars: BarSource[],
   series: SeriesSource = rates,
-  issuer?: { source: IssuerSource; tolerances?: string },
+  // `dailyMissing`: the plug-in is loaded for the bootstrap (its role is seeded), not the daily run.
+  issuer?: { source: IssuerSource; tolerances?: string; dailyMissing?: boolean },
 ) {
   const db = await testDb();
   await upsertSymbols(db, [
@@ -210,7 +211,12 @@ async function run(
     const ctx = () => ({ http: null as never, now: new Date(now), log: quiet });
     return runJob(
       db,
-      { ...emptyPlugins(), bars: list, series: [series], issuers: issuer ? [issuer.source] : [] },
+      {
+        ...emptyPlugins(),
+        bars: list,
+        series: [series],
+        issuers: issuer && !(job === 'daily' && issuer.dailyMissing) ? [issuer.source] : [],
+      },
       {
         job,
         target,
@@ -487,11 +493,20 @@ describe('fault injection (layer F)', () => {
         caught: 'SPY:D.issuer_stale@iss',
         told: true,
       },
+      {
+        // The role stays in source_roles; without the plug-in nothing is fetched or said.
+        name: 'the issuer plug-in no longer loaded (role still set)',
+        source: () => issuerSource(),
+        dailyMissing: true,
+        caught: 'SPY:D.issuer_stale@iss',
+        told: true,
+      },
     ]) {
       it(`${c.name}: yellow with the reason, never red, the normal signal kept`, async () => {
         const { db, result, today, reasons, alert, adminAlerts } = await run(sources(), rates, {
           source: c.source(),
           tolerances: TOLERANCES,
+          ...('dailyMissing' in c && { dailyMissing: true }),
         });
         // Best effort: an issuer failure never makes the run incomplete.
         expect(result.ok).toBe(true);

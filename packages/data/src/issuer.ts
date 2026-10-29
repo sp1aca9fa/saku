@@ -61,6 +61,11 @@ export interface LayerDOptions {
   supported?: boolean;
   /** This run's fetch from the source failed or stopped for this fund. */
   unavailable?: boolean;
+  /**
+   * The source has a role but its plug-in is not loaded (the private package absent or failed to
+   * load): nothing was fetched, so a fund with records from it is never fresh (yellow).
+   */
+  notLoaded?: boolean;
   sessions: Sessions;
   /** The run's date: records after it are ignored; freshness is judged on it. */
   to: TradingDate;
@@ -81,7 +86,8 @@ export interface LayerDOptions {
  * - `issuer_stale`: on the run's date, the latest NAV more than ISSUER_MAX_BEHIND sessions
  *   behind. With no NAV stored at all, yellow when this run's fetch failed for the fund, or when
  *   the source supports it and has no record of it (a NAV-less source that delivered records is
- *   events-only and has no freshness).
+ *   events-only and has no freshness). A source whose plug-in is not loaded is yellow for every fund
+ *   it has records for, whatever their age.
  */
 export function layerD(
   primary: RawBar[],
@@ -180,7 +186,19 @@ export function layerD(
 
   // Freshness on the run's date.
   const lastNav = recs.filter((r) => r.nav !== undefined).at(-1)?.date;
-  if (lastNav !== undefined) {
+  if (o.notLoaded) {
+    // Which funds it would support is unknown: those it has records for are graded.
+    if (recs.length > 0) {
+      out.push({
+        ...base,
+        check: 'issuer_stale',
+        date: o.to,
+        status: cap('yellow'),
+        tolerance: ISSUER_MAX_BEHIND,
+        message: `plug-in not loaded${lastNav ? `, latest NAV ${lastNav}` : ''}`,
+      });
+    }
+  } else if (lastNav !== undefined) {
     // A NAV older than the calendar counts the calendar's sessions (still far behind).
     const start = later(lastNav, o.sessions.calendar.validFrom);
     const behind = o.sessions.between(start, o.to).filter((d) => d > lastNav).length;

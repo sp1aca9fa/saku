@@ -191,6 +191,23 @@ describe('layer D (issuer reconciliation)', () => {
     ).toBe('green');
   });
 
+  it('a source whose plug-in is not loaded is never fresh for a fund it has records of', () => {
+    const stale = (records: IssuerRecord[]) =>
+      layerD(primary, records, { ...opts, notLoaded: true }).filter(
+        (r) => r.check === 'issuer_stale',
+      );
+    // Yesterday's NAV would be on time; not loaded, nothing was fetched today.
+    expect(stale(navs().slice(0, 4))).toEqual([
+      expect.objectContaining({
+        date: TO,
+        status: 'yellow',
+        message: `plug-in not loaded, latest NAV ${dates[3]}`,
+      }),
+    ]);
+    // Its funds are unknown without records (the day overall says it is unavailable).
+    expect(stale([])).toEqual([]);
+  });
+
   it('an invalid tolerance setting observes premiums only and says so (yellow)', () => {
     const rs = layerD(primary, navs(0.1), { ...opts, tolerance: 0.01, toleranceInvalid: true });
     expect(of(rs, 'nav_premium').every((r) => r.status === 'green' && !r.tolerance)).toBe(true);

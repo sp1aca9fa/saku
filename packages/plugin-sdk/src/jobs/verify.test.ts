@@ -503,6 +503,47 @@ describe('verify', () => {
     expect(health[0]!.reasons).toContain('D.issuer_stale@iss');
   });
 
+  it('a source with a role but no loaded plug-in is unavailable, its funds never fresh', async () => {
+    const { db } = await setup();
+    await seedSourceRoles(db, [{ key: 'iss', dataKind: 'issuer', suggestedRole: 'check' }]);
+    // NAVs up to the 7th: one session behind the 8th would be on time.
+    await issue(db, 'iss', (close) => close, 3);
+    const check = async (
+      issuers: { source: string; supported: string[]; unavailable: string[] }[],
+    ) => {
+      const runId = await startRun(db, 'daily');
+      const summary = await verify(db, {
+        runId,
+        sessions,
+        mode: 'daily',
+        from: '2026-01-06',
+        to: '2026-01-08',
+        issuers,
+      });
+      const [stale] = await db
+        .select()
+        .from(schema.checkResults)
+        .where(
+          and(
+            eq(schema.checkResults.runId, runId),
+            eq(schema.checkResults.checkName, 'issuer_stale'),
+          ),
+        );
+      return { summary, stale };
+    };
+    // The run had no plug-in for it (no availability entry).
+    const missing = await check([]);
+    expect(missing.stale).toMatchObject({
+      status: 'yellow',
+      message: 'plug-in not loaded, latest NAV 2026-01-07',
+    });
+    expect(missing.summary.reasons).toContain('issuer_unavailable@iss');
+    // Loaded and delivered: on time, and the day has no issuer reason.
+    const loaded = await check([{ source: 'iss', supported: ['AAA'], unavailable: [] }]);
+    expect(loaded.stale).toMatchObject({ status: 'green' });
+    expect(loaded.summary.reasons).not.toContain('issuer_unavailable@iss');
+  });
+
   it('an invalid stored tolerance does not stop verify: observed only, yellow, told', async () => {
     const { db } = await setup();
     await seedSourceRoles(db, [{ key: 'iss', dataKind: 'issuer', suggestedRole: 'check' }]);

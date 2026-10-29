@@ -57,7 +57,9 @@ export interface VerifyOptions {
   now?: Date;
   /**
    * Per issuer source the run used: the tickers it `supports`, and those its fetch failed or
-   * stopped for this run (layer D grades a fund with no NAV stored from them yellow).
+   * stopped for this run (layer D grades a fund with no NAV stored from them yellow). Given, a
+   * source with a role but no entry is a plug-in that is not loaded: unavailable for the day and
+   * never fresh for the funds it has records for. Not given (a direct call): not judged.
    */
   issuers?: IssuerAvailability[];
 }
@@ -359,6 +361,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   ];
   const nav = await navTolerances(db);
   const availability = new Map((o.issuers ?? []).map((a) => [a.source, a]));
+  const notLoaded = (source: string) => o.issuers !== undefined && !availability.has(source);
   for (const s of symbols) {
     const bySource = raw.get(s.id)!;
     // A primary that delivers split-adjusted closes is put back on the raw basis too.
@@ -427,6 +430,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
             ...(nav.invalid && { toleranceInvalid: true }),
             ...(a?.supported.includes(s.ticker) && { supported: true }),
             ...(a?.unavailable.includes(s.ticker) && { unavailable: true }),
+            ...(notLoaded(source) && { notLoaded: true }),
           }),
         );
       }
@@ -526,9 +530,10 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   // be fetched (04 severity rules: an issuer site unavailable is yellow), a tolerance setting
   // that does not parse. Strategies read their symbols' grades, which say what each fund lacks.
   if (overall.has(o.to) && issuerSources.length > 0) {
-    for (const a of o.issuers ?? []) {
-      if (issuerSources.includes(a.source) && a.unavailable.length > 0) {
-        grade(o.to, 'yellow', `issuer_unavailable@${a.source}`);
+    for (const source of issuerSources) {
+      const a = availability.get(source);
+      if (notLoaded(source) || (a && a.unavailable.length > 0)) {
+        grade(o.to, 'yellow', `issuer_unavailable@${source}`);
       }
     }
     if (nav.invalid) grade(o.to, 'yellow', 'issuer_nav_tolerance_invalid');

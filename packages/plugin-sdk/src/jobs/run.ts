@@ -17,7 +17,7 @@ import {
   startRun,
 } from '@saku/db';
 import { type LoadedPlugins, allInfos, savePluginInfos } from '../registry';
-import { assignedOnly, dataKindOf, unassigned } from '../roles';
+import { DATA_KIND, assignedOnly, dataKindOf, unassigned } from '../roles';
 import type { Logger, PluginContext, PluginInfo } from '../types';
 import {
   type AlertOptions,
@@ -99,6 +99,18 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     const idle = unassigned(infos, roles);
     if (idle.length > 0) {
       log.warn(`Loaded but not used (no role): ${idle.map((i) => i.key).join(', ')}`);
+    }
+    // An issuer source with a role but no loaded plug-in (the private package absent or failed
+    // to load) fetches nothing; verify grades it unavailable (yellow) rather than staying silent.
+    const absent = roles.filter(
+      (r) =>
+        r.dataKind === DATA_KIND.issuer &&
+        !infos.some((i) => i.key === r.pluginKey && dataKindOf(i) === r.dataKind),
+    );
+    if (absent.length > 0) {
+      log.warn(
+        `Issuer source with a role but no plug-in loaded: ${absent.map((r) => r.pluginKey).join(', ')}`,
+      );
     }
     const used = assignedOnly(plugins, roles);
     log.info(`${job} for ${target}`, { runId });
