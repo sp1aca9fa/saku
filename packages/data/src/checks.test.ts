@@ -4,7 +4,9 @@ import { Sessions } from './calendar';
 import {
   adjReturnCheck,
   fxCheck,
+  fxUnavailable,
   indexCheck,
+  indexUnavailable,
   layerA,
   layerB,
   leverageCheck,
@@ -192,5 +194,68 @@ describe('layer C', () => {
       '2026-01-06 green',
       '2026-01-07 green',
     ]);
+  });
+
+  it('is yellow where the index lacks a value inside its history, never green', () => {
+    const four = [...spy, bar('2026-01-08', 102)];
+    const index = [
+      { date: '2026-01-05', value: 5000 },
+      { date: '2026-01-07', value: 5050 },
+      { date: '2026-01-08', value: 5100 },
+    ];
+    // 01-06 is missing: both returns that need it cannot be compared.
+    const rs = indexCheck(four, index, { source: 'idx', to: '2026-01-08' });
+    expect(rs.map((r) => `${r.date} ${r.check} ${r.status} ${r.source}`)).toEqual([
+      '2026-01-06 index_unavailable yellow idx',
+      '2026-01-07 index_unavailable yellow idx',
+      '2026-01-08 index_match green idx',
+    ]);
+  });
+
+  it('starts where the index history starts (a provider limit is not a gap)', () => {
+    const index = [
+      { date: '2026-01-06', value: 5100 },
+      { date: '2026-01-07', value: 5050 },
+    ];
+    expect(statuses(indexCheck(spy, index), 'index_match')).toEqual(['2026-01-07 green']);
+    expect(indexCheck(spy, index).some((r) => r.check === 'index_unavailable')).toBe(false);
+  });
+
+  it('leaves only the run date to the next run when just that day is not yet published', () => {
+    const index = [
+      { date: '2026-01-05', value: 5000 },
+      { date: '2026-01-06', value: 5100 },
+    ];
+    // The run's own day: the publication lag (the next run's window checks it again).
+    expect(indexCheck(spy, index, { to: '2026-01-07' }).map((r) => r.check)).toEqual([
+      'index_match',
+    ]);
+    // Any other date, or with no run date given: the check could not run, yellow.
+    expect(indexCheck(spy, index).map((r) => `${r.date} ${r.check}`)).toEqual([
+      '2026-01-06 index_match',
+      '2026-01-07 index_unavailable',
+    ]);
+    // Two days behind on the run's date: yellow on both, the run's date included.
+    const behind = [{ date: '2026-01-05', value: 5000 }];
+    expect(indexCheck(spy, behind, { to: '2026-01-07' }).map((r) => r.status)).toEqual([
+      'yellow',
+      'yellow',
+    ]);
+  });
+
+  it('gives nothing for an empty index (the caller grades a series with no value)', () => {
+    expect(indexCheck(spy, [], { to: '2026-01-07' })).toEqual([]);
+    expect(indexUnavailable('2026-01-07', 'idx')).toMatchObject({
+      layer: 'C',
+      check: 'index_unavailable',
+      status: 'yellow',
+      source: 'idx',
+    });
+    expect(fxUnavailable('2026-01-07', 's')).toMatchObject({
+      layer: 'B',
+      check: 'fx_unavailable',
+      status: 'yellow',
+      source: 's',
+    });
   });
 });

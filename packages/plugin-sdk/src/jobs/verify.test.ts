@@ -6,6 +6,7 @@ import {
   setSourceRole,
   startRun,
   setSetting,
+  storeFx,
   storeIssuerRecords,
   storeRawBars,
   storeSeries,
@@ -90,7 +91,8 @@ async function setup(o: { aaaPrimaryDays?: number } = {}) {
       date: dates[i]!,
       value: close * 50,
     })),
-    fetchedAt: 't',
+    // Known before the dates checked (the index freshness is read through asOf).
+    fetchedAt: '2026-01-02T00:00:00Z',
   });
   return { db, store };
 }
@@ -217,6 +219,97 @@ describe('verify', () => {
     expect(gap.reasons).toContain('DTB3:stale(3)@idx');
     await cash(3);
     expect((await overallOn('2026-01-08')).reasons.some((r) => r.startsWith('DTB3'))).toBe(false);
+  });
+
+  it('grades a missing index value: the fund yellow, the index freshness on the day', async () => {
+    const { db } = await setup();
+    const runFor = async (to: string) => {
+      const runId = await startRun(db, 'daily');
+      await verify(db, { runId, sessions, mode: 'daily', from: '2026-01-06', to });
+      const rows = await db
+        .select()
+        .from(schema.dataHealth)
+        .where(eq(schema.dataHealth.runId, runId));
+      const results = await db
+        .select()
+        .from(schema.checkResults)
+        .where(eq(schema.checkResults.runId, runId));
+      const aaa = (await symbolId(db, 'AAA'))!;
+      return {
+        overall: rows.find((r) => r.symbolId === null && r.date === to)!,
+        aaa: rows.find((r) => r.symbolId === aaa && r.date === to)!,
+        index: results
+          .filter((r) => r.checkName.startsWith('index_'))
+          .map((r) => `${r.date} ${r.checkName} ${r.status}`),
+      };
+    };
+    // The index stops two sessions before the run's date: the fund yellow there (the check could
+    // not run), the day yellow for the stale series (2 business days behind).
+    await db.delete(schema.series).where(eq(schema.series.date, '2026-01-07'));
+    await db.delete(schema.series).where(eq(schema.series.date, '2026-01-08'));
+    const stale = await runFor('2026-01-08');
+    expect(stale.index).toEqual([
+      '2026-01-06 index_match green',
+      '2026-01-07 index_unavailable yellow',
+      '2026-01-08 index_unavailable yellow',
+    ]);
+    expect(stale.aaa.reasons).toContain('C.index_unavailable@idx');
+    expect(stale.overall.reasons).toContain('IDX:stale(2)@idx');
+    // Only the run's own day missing: the publication lag, green, compared by the next run.
+    const lag = await runFor('2026-01-07');
+    expect(lag.index).toEqual(['2026-01-06 index_match green']);
+    expect(lag.overall.reasons.some((r) => r.startsWith('IDX:'))).toBe(false);
+    // No value at all: the fund yellow on the run's date, the day red (missing).
+    await db.delete(schema.series);
+    const none = await runFor('2026-01-08');
+    expect(none.index).toEqual(['2026-01-08 index_unavailable yellow']);
+    expect(none.aaa.reasons).toContain('C.index_unavailable@idx');
+    expect(none.overall).toMatchObject({ status: 'red' });
+    expect(none.overall.reasons).toContain('IDX:missing@idx');
+  });
+
+  it('grades the base-currency FX: freshness on the day, a cross-check that cannot run', async () => {
+    const { db } = await setup();
+    await setSetting(db, 'base_currency', 'XXX');
+    await seedSourceRoles(db, [
+      { key: 'fx1', dataKind: 'fx', suggestedRole: 'primary' },
+      { key: 'fx2', dataKind: 'fx', suggestedRole: 'secondary' },
+    ]);
+    const fx = (source: string, n: number) =>
+      storeFx(db, {
+        source,
+        kind: 'valuation',
+        rates: dates.slice(0, n).map((date) => ({ pair: 'USDXXX', date, rate: 150 })),
+        fetchedAt: '2026-01-02T00:00:00Z',
+      });
+    const overallOn = async (to: string) => {
+      const runId = await startRun(db, 'daily');
+      await verify(db, { runId, sessions, mode: 'daily', from: to, to });
+      const rows = await db
+        .select()
+        .from(schema.dataHealth)
+        .where(and(eq(schema.dataHealth.runId, runId), eq(schema.dataHealth.date, to)));
+      const symbols = rows.filter((r) => r.symbolId !== null);
+      return { overall: rows.find((r) => r.symbolId === null)!, symbols };
+    };
+    // No primary rate at all: red for the day, the cross-check yellow; no symbol touched.
+    await fx('fx2', 4);
+    const none = await overallOn('2026-01-08');
+    expect(none.overall.status).toBe('red');
+    expect(none.overall.reasons).toEqual(
+      expect.arrayContaining(['USDXXX:missing@fx1', 'USDXXX:B.fx_unavailable@fx2']),
+    );
+    expect(none.symbols.every((r) => !r.reasons.some((x) => x.includes('fx')))).toBe(true);
+    // The primary two sessions behind: yellow, the cross-check still cannot run on the day.
+    await fx('fx1', 2);
+    const stale = await overallOn('2026-01-08');
+    expect(stale.overall.reasons).toEqual(
+      expect.arrayContaining(['USDXXX:stale(2)@fx1', 'USDXXX:B.fx_unavailable@fx2']),
+    );
+    // Up to date: nothing about FX.
+    await fx('fx1', 4);
+    const fresh = await overallOn('2026-01-08');
+    expect(fresh.overall.reasons.some((r) => r.startsWith('USDXXX'))).toBe(false);
   });
 
   it('stands a secondary bar in for a missing primary day, then resolves it', async () => {

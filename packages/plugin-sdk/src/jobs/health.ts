@@ -19,10 +19,11 @@
 //   without a row until the next full run.
 // - The latest such run (by start) decides the date, so a later full-history run that found a
 //   day green overrides an older daily yellow or red; an older grade is never shown over it.
-// - The cash rate's freshness is graded only on a run's own target. For a date the deciding run
-//   did not target, the cash reason of the latest counted run that targeted it is merged into the
-//   overall grade (its status from the reason), so a day graded red for the cash rate (what the
-//   forward record acted on) never reads green later.
+// - Series freshness (the cash rate, each fund's index, the base-currency FX pair) is graded only
+//   on a run's own target. For a date the deciding run did not target, the freshness reasons of
+//   the latest counted run that targeted it are merged into the overall grade (status from the
+//   reason), so a day graded red for a stale series (what the forward record acted on) never
+//   reads green later.
 // - A symbol before its first canonical bar is not part of the day (verify grades from there),
 //   unless its inception date says it should have data: then it is "not graded". An active
 //   symbol with no canonical bar at all is "not graded" unless the run graded it.
@@ -32,7 +33,7 @@ import { type Sessions, freshnessStatus, worst } from '@saku/data';
 import { type Db, schema } from '@saku/db';
 import { and, desc, eq, inArray, isNotNull, isNull, min } from 'drizzle-orm';
 import { DAILY_OVERLAP } from './ingest';
-import { parseCashReason } from './verify';
+import { parseFreshnessReason } from './verify';
 
 export type Grade =
   { status: HealthStatus; reasons: string[] } | { status: 'not_graded'; reasons: [] };
@@ -214,11 +215,11 @@ export async function healthReport(
     const overallRow = rows.find((r) => r.symbolId === null);
     let overall = overallRow ? grade(overallRow) : NOT_GRADED;
     if (overall.status !== 'not_graded' && run.target !== date) {
-      // The cash rate as the run that targeted this date graded it (only that run did).
+      // Series freshness as the run that targeted this date graded it (only that run did).
       const own = await latest((r) => r.target === date);
       const row = own && (await overallRowOf(own.id, date));
       for (const code of row?.reasons ?? []) {
-        const cash = parseCashReason(code);
+        const cash = parseFreshnessReason(code);
         if (!cash || overall.reasons.includes(code)) continue;
         overall = {
           status: worst(overall.status, freshnessStatus(cash.behind ?? Infinity)),

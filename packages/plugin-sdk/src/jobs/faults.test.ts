@@ -4,7 +4,7 @@
 // Separately, a day with a single source is never green. Layer D (issuer data) faults are
 // advisory: yellow with the reason, never red, never a change of the normal signal. Synthetic
 // data, no network.
-import { type IssuerRecord, type RawBar, totalReturnIndex } from '@saku/core';
+import { type IssuerRecord, type RawBar, totalReturnIndex, zonedInstant } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   addChannel,
@@ -20,7 +20,7 @@ import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { BlockedError } from '../http';
 import { emptyPlugins } from '../registry';
-import type { BarSource, IssuerSource, SeriesSource } from '../types';
+import type { BarSource, FxSource, IssuerSource, SeriesSource } from '../types';
 import { runJob } from './run';
 import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
 
@@ -105,7 +105,53 @@ function source(key: string, o: { fault?: Fault; down?: boolean; adjusted?: bool
   return s;
 }
 
-const rates = cashRates(sessions, DATES, TARGET);
+/**
+ * The series source: the USD cash rate (`cashUntil`: the first date it no longer has) and SPY's
+ * price index `IDX` (SPY's close x10, published 18:00 New York the next session); the index has
+ * nothing after `indexUntil` and fails every call once `to` reaches `indexDownFrom`.
+ */
+function seriesSource(
+  o: { cashUntil?: string; indexUntil?: string; indexDownFrom?: string } = {},
+): SeriesSource {
+  const cash = cashRates(sessions, DATES, o.cashUntil ?? TARGET);
+  const spy = clean().SPY;
+  return {
+    info: {
+      ...cash.info,
+      provides: { series: ['CASH', 'IDX'], cashRates: { USD: 'CASH' } },
+    },
+    async fetchSeries(id, from, to, ctx) {
+      if (id !== 'IDX') return cash.fetchSeries(id, from, to, ctx);
+      if (o.indexDownFrom && to >= o.indexDownFrom) throw new Error('idx: HTTP 503');
+      return spy
+        .filter((b) => b.date >= from && b.date <= to && (!o.indexUntil || b.date <= o.indexUntil))
+        .map((b) => ({
+          date: b.date,
+          value: b.close * 10,
+          publishedAt: zonedInstant(sessions.after(b.date), '18:00', 'America/New_York'),
+        }));
+    },
+  };
+}
+const rates = seriesSource();
+
+/**
+ * An FX source for `USDJPY` (rate 150, published 16:00 UTC the same day); `primary` suggests
+ * itself as the primary; nothing after `until`; every call failing once `to` reaches `downFrom`.
+ */
+function fxSource(key: string, o: { primary?: boolean; until?: string; downFrom?: string } = {}) {
+  const s: FxSource = {
+    info: testInfo(key, 'fx', { suggestedRole: o.primary ? 'primary' : 'secondary' }),
+    supports: (pair) => pair === 'USDJPY',
+    async fetchRates(pair, from, to) {
+      if (o.downFrom && to >= o.downFrom) throw new Error(`${key}: HTTP 503`);
+      return DATES.filter((d) => d >= from && d <= to && (!o.until || d <= o.until)).map(
+        (date) => ({ pair, date, rate: 150, publishedAt: `${date}T16:00:00Z` }),
+      );
+    },
+  };
+  return s;
+}
 
 /** A corruption of the issuer's records for a ticker. */
 type IssuerFault = (ticker: Ticker, records: IssuerRecord[]) => IssuerRecord[];
@@ -157,10 +203,13 @@ async function run(
   series: SeriesSource = rates,
   // `dailyMissing`: the plug-in is loaded for the bootstrap (its role is seeded), not the daily run.
   issuer?: { source: IssuerSource; tolerances?: string; dailyMissing?: boolean },
+  // A base currency other than USD, with its FX sources.
+  fx?: { base: string; sources: FxSource[] },
 ) {
   const db = await testDb();
   await upsertSymbols(db, [
-    { ticker: 'SPY', tier: 0, assetClass: 'equity', currency: 'USD' },
+    // SPY's index check (layer C) runs on every case.
+    { ticker: 'SPY', tier: 0, assetClass: 'equity', currency: 'USD', indexSeries: 'IDX' },
     {
       ticker: 'SSO',
       tier: 0,
@@ -180,6 +229,7 @@ async function run(
   });
   await setSetting(db, 'forward_records_from', '2026-01-02');
   if (issuer?.tolerances) await setSetting(db, 'issuer_nav_tolerance', issuer.tolerances);
+  if (fx) await setSetting(db, 'base_currency', fx.base);
   const version = await registerVersion(db, {
     ownerId: owner,
     name: 'Trend 2x',
@@ -215,6 +265,7 @@ async function run(
         ...emptyPlugins(),
         bars: list,
         series: [series],
+        fx: fx?.sources ?? [],
         issuers: issuer && !(job === 'daily' && issuer.dailyMissing) ? [issuer.source] : [],
       },
       {
@@ -359,12 +410,13 @@ const FAULTS: { name: string; fault: Fault; on?: Source; expect: 'red'; caught: 
     caught: 'SPY:B.close_match@s1',
   },
   {
-    // The primary lacks the target day: SPY's stand-in passes, SSO's fails layer C against the
-    // shifted underlying. The shifted days before are red on their own dates.
+    // The primary lacks the target day: SPY's stand-in fails the index check against the shifted
+    // day before (the primary's), so SPY is red. The shifted days before are red on their own
+    // dates.
     name: 'timezone shift (each bar a session early)',
     fault: (_t, bars) => bars.slice(1).map((b, i) => ({ ...b, date: bars[i]!.date })),
     expect: 'red',
-    caught: 'SSO:stand_in_refused:layer_c',
+    caught: 'SPY:stand_in_refused:index',
   },
 ];
 
@@ -531,12 +583,85 @@ describe('fault injection (layer F)', () => {
   it('a stale cash rate is red for the day overall and tells the admins', async () => {
     // The rate stops a week before (more than 5 business days behind). By design it grades the day,
     // not the strategy: it moves cash and financing equity, never the signal (docs/data-pipeline.md).
-    const stale = cashRates(sessions, DATES, sessions.before(TARGET, 7));
+    const stale = seriesSource({ cashUntil: sessions.before(TARGET, 7) });
     const { today, adminAlerts } = await run(sources(), stale);
     expect(today.dataStatus).toBe('green');
     expect(adminAlerts.some((t) => t.startsWith(`Saku: data for ${TARGET} is not green`))).toBe(
       true,
     );
     expect(adminAlerts.join('\n')).toMatch(/CASH/);
+  });
+
+  it('the index source down for days: the fund yellow, the allocation kept, admins told', async () => {
+    // The index stops three sessions before and its source fails from the target on: SPY's index
+    // check cannot run (yellow, a cross-check unavailable), the series 3 business days behind.
+    const down = seriesSource({ indexUntil: sessions.before(TARGET, 3), indexDownFrom: TARGET });
+    const { result, today, reasons, alert, adminAlerts } = await run(sources(), down);
+    expect(result.error).toBe('incomplete: rates');
+    expect(today).toMatchObject({
+      dataStatus: 'yellow',
+      safeStateApplied: false,
+      allocation: 'Risk on',
+    });
+    expect(reasons).toContain('SPY:C.index_unavailable@rates');
+    expect(alert).toContain('Data health: yellow (computed with a warning).');
+    const told = adminAlerts.join('\n');
+    expect(told).toMatch(new RegExp(`Saku: data for ${TARGET} is not green`));
+    expect(told).toContain('IDX: 3 business days behind (rates)');
+  });
+
+  for (const c of [
+    { name: 'three sessions', until: 3, grade: 'yellow', words: 'USDJPY: 3 business days behind' },
+    { name: 'a week', until: 7, grade: 'red', words: 'USDJPY: 7 business days behind' },
+  ]) {
+    it(`the FX primary down for ${c.name} (base JPY): the day ${c.grade}, the strategy unaffected`, async () => {
+      // FX health never affects a signal computed in USD (04): the day overall only.
+      const fx = [
+        fxSource('fxp', {
+          primary: true,
+          until: sessions.before(TARGET, c.until),
+          downFrom: TARGET,
+        }),
+        fxSource('fxs'),
+      ];
+      const { db, result, today, adminAlerts } = await run(sources(), rates, undefined, {
+        base: 'JPY',
+        sources: fx,
+      });
+      expect(result.error).toBe('incomplete: fxp');
+      expect(today).toMatchObject({
+        dataStatus: 'green',
+        safeStateApplied: false,
+        allocation: 'Risk on',
+      });
+      const [overall] = await db
+        .select()
+        .from(schema.dataHealth)
+        .where(eq(schema.dataHealth.runId, result.runId))
+        .then((rows) => rows.filter((r) => r.symbolId === null && r.date === TARGET));
+      expect(overall).toMatchObject({ status: c.grade });
+      expect(overall!.reasons).toEqual(
+        expect.arrayContaining([`USDJPY:stale(${c.until})@fxp`, 'USDJPY:B.fx_unavailable@fxs']),
+      );
+      const told = adminAlerts.join('\n');
+      expect(told).toContain(c.words);
+      expect(told).toContain('the exchange rate cross-check could not run');
+    });
+  }
+
+  it('a clean FX primary and secondary (base JPY) stay green (the control)', async () => {
+    const { result, today, db } = await run(sources(), rates, undefined, {
+      base: 'JPY',
+      sources: [fxSource('fxp', { primary: true }), fxSource('fxs')],
+    });
+    expect(result.ok).toBe(true);
+    expect(today).toMatchObject({ dataStatus: 'green', allocation: 'Risk on' });
+    const rows = await db
+      .select()
+      .from(schema.dataHealth)
+      .where(eq(schema.dataHealth.runId, result.runId));
+    expect(rows.find((r) => r.symbolId === null && r.date === TARGET)).toMatchObject({
+      status: 'green',
+    });
   });
 });

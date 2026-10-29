@@ -54,7 +54,9 @@
         "split_match": "ソース間で分割が異なります({source})",
         "leverage_track": "ファンドが原資産のレバレッジに連動していません({source})",
         "index_match": "ファンドが指数に連動していません({source})",
-        "fx_match": "ソース間で為替レートが異なります({source})"
+        "fx_match": "ソース間で為替レートが異なります({source})",
+        "index_unavailable": "指数チェックを実行できませんでした。この日の指数の値がありません({source})",
+        "fx_unavailable": "為替レートの照合を実行できませんでした。メインのソースにこの日のレートがありません({source})"
       },
       "issuer": {
         "nav_premium": "市場の終値が発行体の基準価額から通常より離れています({source})",

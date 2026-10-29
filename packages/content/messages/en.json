@@ -54,7 +54,9 @@
         "split_match": "splits differ between sources ({source})",
         "leverage_track": "the fund does not track its leverage of the underlying ({source})",
         "index_match": "the fund does not track its index ({source})",
-        "fx_match": "exchange rates differ between sources ({source})"
+        "fx_match": "exchange rates differ between sources ({source})",
+        "index_unavailable": "the index check could not run: the index has no value for the day ({source})",
+        "fx_unavailable": "the exchange rate cross-check could not run: the main source has no rate for the day ({source})"
       },
       "issuer": {
         "nav_premium": "the market close is further from the issuer's NAV than usual ({source})",

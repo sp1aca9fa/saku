@@ -17,7 +17,9 @@ import {
   TOLERANCE,
   adjReturnCheck,
   fxCheck,
+  fxUnavailable,
   indexCheck,
+  indexUnavailable,
   layerA,
   layerB,
   layerD,
@@ -31,6 +33,7 @@ import {
 import {
   type Db,
   activeSymbols,
+  fxPointInTime,
   getSetting,
   issuerRecordsOf,
   navTolerances,
@@ -91,17 +94,25 @@ type CanonicalBar = RawBar & { source: string; standIn: boolean };
 
 type Stored = CheckResult & { symbolId: number | null };
 
-/** The cash series' freshness reason on a run's date: `<series>:missing@<source>` or `stale(n)`. */
+/**
+ * A point-in-time series' freshness reason on a run's date (the cash rate, a fund's index, the
+ * base-currency FX pair): `<series>:missing@<source>` or `<series>:stale(n)@<source>`.
+ */
+export function freshnessReason(series: string, source: string, behind: number | undefined) {
+  const what = behind === undefined ? 'missing' : `stale(${behind})`;
+  return `${series}:${what}@${source}`;
+}
+
+/** The cash series' freshness reason (`cash:missing@none` when no source declares a cash rate). */
 export function cashReason(
   source: { series: string; source: string } | undefined,
   behind: number | undefined,
 ): string {
-  const what = behind === undefined ? 'missing' : `stale(${behind})`;
-  return `${source?.series ?? 'cash'}:${what}@${source?.source ?? 'none'}`;
+  return freshnessReason(source?.series ?? 'cash', source?.source ?? 'none', behind);
 }
 
-/** The days behind in a cash freshness reason (undefined: missing), or null for another code. */
-export function parseCashReason(code: string): { behind: number | undefined } | null {
+/** The days behind in a freshness reason (undefined: missing), or null for another code. */
+export function parseFreshnessReason(code: string): { behind: number | undefined } | null {
   const m = /^[^:@\s]+:(missing|stale\((\d+)\))@[^@\s]+$/.exec(code);
   if (!m) return null;
   return { behind: m[2] === undefined ? undefined : Number(m[2]) };
@@ -352,6 +363,8 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   };
 
   const seriesRoles = await roles(db, 'series');
+  /** The index series of the symbols graded (their freshness grades the day overall). */
+  const indexes = new Set<string>();
   // Layer D: every issuer source with a role (they are all check sources).
   const issuer = await roles(db, 'issuer');
   const issuerSources = [
@@ -368,10 +381,13 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     const primary = unsplit((bySource.get(bars.primary) ?? []).filter((b) => b.date <= o.to));
     const own: CheckResult[] = [];
     const add = (rs: CheckResult[]) => own.push(...rs);
-    const index =
-      s.indexSeries && seriesRoles.primary
+    // The fund's index (layer C), from the series primary; no primary or no value: empty, and
+    // graded below (never skipped as if the check had passed).
+    const index = s.indexSeries
+      ? seriesRoles.primary
         ? await latestSeries(db, s.indexSeries, seriesRoles.primary)
-        : undefined;
+        : []
+      : undefined;
 
     for (const [source, list] of bySource) {
       const mine = list.filter((b) => b.date <= o.to);
@@ -411,7 +427,13 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       );
       add(leverageCheck(primary, u, s.leverageFactor));
     }
-    if (index) add(indexCheck(primary, index));
+    if (index) {
+      const source = seriesRoles.primary;
+      add(indexCheck(primary, index, { ...(source && { source }), to: o.to }));
+      // No index value at all: no history to compare within, so the run's date only.
+      if (index.length === 0 && primary.length > 0) add([indexUnavailable(o.to, source ?? 'none')]);
+      if (primary.length > 0) indexes.add(s.indexSeries!);
+    }
     if (issuerSources.length > 0) {
       const tolerance = Object.hasOwn(nav.tolerances, s.ticker)
         ? nav.tolerances[s.ticker]
@@ -507,22 +529,52 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
 
   const base = await getSetting(db, 'base_currency');
   const fx = await roles(db, 'fx');
-  if (base && base !== 'USD' && fx.primary) {
+  const at = (o.now ?? new Date()).toISOString();
+  if (base && base !== 'USD') {
     const pair = `USD${base}`;
-    const primary = await latestFx(db, pair, fx.primary);
+    const primary = fx.primary ? await latestFx(db, pair, fx.primary) : [];
     for (const source of fx.secondaries) {
       const rs = fxCheck(primary, await latestFx(db, pair, source), source);
+      // The cross-check cannot run on the run's date without the primary's rate for it.
+      if (overall.has(o.to) && !primary.some((r) => r.date === o.to)) {
+        rs.push(fxUnavailable(o.to, source));
+      }
       results.push(...rs.map((r) => ({ ...r, symbolId: null })));
       for (const r of rs) {
         if (overall.has(r.date)) grade(r.date, r.status, `${pair}:${r.layer}.${r.check}@${source}`);
       }
+    }
+    // The primary rate's freshness on the run's date, read through asOf (04 point-in-time
+    // series), on the trading calendar: it grades the day overall, never a symbol, so it never
+    // changes a signal computed in USD (04). No FX primary: missing, red.
+    if (overall.has(o.to)) {
+      const pit = fx.primary ? await fxPointInTime(db, pair, fx.primary) : undefined;
+      const last = pit?.asOf(o.to, at)?.date;
+      const h = seriesHealth(o.sessions, o.to, last);
+      const behind = last === undefined ? undefined : h.behind;
+      grade(o.to, h.status, freshnessReason(pair, fx.primary ?? 'none', behind));
+    }
+  }
+  // Each graded fund's index series: its freshness on the run's date, read through asOf, on the
+  // trading calendar (the index is compared on the fund's sessions), for the day overall like the
+  // cash rate. Its gaps reach the fund through `index_unavailable` (yellow); a stale index alone
+  // never applies a strategy's safe state (the bars are checked by layers A and B).
+  if (overall.has(o.to)) {
+    for (const id of [...indexes].sort()) {
+      const pit = seriesRoles.primary
+        ? await seriesPointInTime(db, id, seriesRoles.primary)
+        : undefined;
+      const last = pit?.asOf(o.to, at)?.date;
+      const h = seriesHealth(o.sessions, o.to, last);
+      const behind = last === undefined ? undefined : h.behind;
+      grade(o.to, h.status, freshnessReason(id, seriesRoles.primary ?? 'none', behind));
     }
   }
   // The cash series' freshness on the run's date (rates are read only through asOf).
   const source = await cashSeries(db);
   if (o.seriesSessions && overall.has(o.to)) {
     const cash = source ? await seriesPointInTime(db, source.series, source.source) : undefined;
-    const last = cash?.asOf(o.to, (o.now ?? new Date()).toISOString())?.date;
+    const last = cash?.asOf(o.to, at)?.date;
     const s = seriesHealth(o.seriesSessions, o.to, last);
     grade(o.to, s.status, cashReason(source, last === undefined ? undefined : s.behind));
   }

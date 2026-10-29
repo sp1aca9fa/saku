@@ -306,24 +306,46 @@ export function leverageCheck(
   return out;
 }
 
-/** Layer C: a fund's price return against its index's return, on dates both have. */
+/**
+ * Layer C: a fund's price return against its index's return (`source`: the index's series
+ * source). Within the index's history (from its first value on; before that is the provider's
+ * history limit, as layer B starts where a secondary starts), a fund date whose return cannot be
+ * compared because the index lacks a value is yellow `index_unavailable` (requirements 04: an
+ * unexpected gap of a point-in-time series is yellow, a cross-check unavailable is yellow; a check
+ * that could not run is never green). One exception, the publication lag (as for the cash rate):
+ * on the run's date `to`, the index may lack only that day's value while it has the day before;
+ * that comparison is left to the next run, whose window covers the date again. With no index value
+ * at all there is no history to compare within: the caller grades that (`indexUnavailable`).
+ */
 export function indexCheck(
   fund: RawBar[],
   index: { date: TradingDate; value: number }[],
+  o: { source?: string; to?: TradingDate } = {},
 ): CheckResult[] {
   const out: CheckResult[] = [];
   const level = new Map(index.map((p) => [p.date, p.value]));
+  let first: TradingDate | undefined;
+  for (const p of index) if (first === undefined || p.date < first) first = p.date;
+  if (first === undefined) return out;
   for (let i = 1; i < fund.length; i++) {
-    const a = level.get(fund[i - 1]!.date);
-    const b = level.get(fund[i]!.date);
-    if (a === undefined || b === undefined) continue;
+    const prevDate = fund[i - 1]!.date;
+    const date = fund[i]!.date;
+    if (prevDate < first) continue;
+    const a = level.get(prevDate);
+    const b = level.get(date);
+    if (a === undefined || b === undefined) {
+      if (date === o.to && a !== undefined) continue;
+      out.push(indexUnavailable(date, o.source));
+      continue;
+    }
     const expected = b / a - 1;
     const observed = priceReturn(fund[i - 1]!, fund[i]!);
     const dev = Math.abs(observed - expected);
     out.push({
       layer: 'C',
       check: 'index_match',
-      date: fund[i]!.date,
+      ...(o.source !== undefined && { source: o.source }),
+      date,
       status: statusC(dev, TOLERANCE.index),
       deviation: dev,
       observed,
@@ -332,6 +354,18 @@ export function indexCheck(
     });
   }
   return out;
+}
+
+/** Layer C: the index check could not run on `date` (no index value): yellow, never green. */
+export function indexUnavailable(date: TradingDate, source?: string): CheckResult {
+  return {
+    layer: 'C',
+    check: 'index_unavailable',
+    ...(source !== undefined && { source }),
+    date,
+    status: 'yellow',
+    message: 'no index value',
+  };
 }
 
 /** Layer B for FX: primary rate against a secondary's, on dates both have. */
@@ -359,4 +393,20 @@ export function fxCheck(
       },
     ];
   });
+}
+
+/**
+ * Layer B for FX: the cross-check against secondary `source` could not run on `date` because the
+ * primary has no rate for it (requirements 04 severity rules: an FX cross-check unavailable is
+ * yellow). Never more than yellow: FX health never affects a signal computed in USD.
+ */
+export function fxUnavailable(date: TradingDate, source: string): CheckResult {
+  return {
+    layer: 'B',
+    check: 'fx_unavailable',
+    source,
+    date,
+    status: 'yellow',
+    message: 'no primary rate',
+  };
 }
