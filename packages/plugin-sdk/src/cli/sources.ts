@@ -44,7 +44,7 @@ const fail = (message: string): never => {
 };
 const KINDS = Object.values(DATA_KIND) as string[];
 
-/** Role changes and imports wait for a running job (which reads roles throughout). */
+/** Role changes and imports are refused while a job runs (it reads roles throughout). */
 function withJobsLock<T>(fn: () => Promise<T>): Promise<T> {
   const held = lock('jobs');
   if ('heldBy' in held) fail(`A job is running (process ${held.heldBy}); try again later.`);
