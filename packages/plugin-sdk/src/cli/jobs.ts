@@ -77,46 +77,57 @@ if (job === 'probe') {
 }
 
 if (job === 'daily' && !force && (readStamp('daily') ?? '') >= target) {
+  // Done for the day; a heartbeat that failed then is tried again (not the whole run).
+  if ((readStamp('heartbeat') ?? '') < target && (await heartbeat()))
+    writeStamp('heartbeat', target);
   held.release();
   process.exit(0);
 }
 
 // From here on, the jobs that record a run.
-const result = await runJob(db, plugins, {
-  job: job as 'bootstrap' | 'daily' | 'checks',
-  target,
-  sessions,
-  seriesSessions,
-  now,
-  log,
-  context: (info) => pluginContext(info, log),
-  alerting: {
-    date: target,
-    notifiers: plugins.notifiers,
-    authSecret: process.env.AUTH_SECRET?.trim() ?? '',
-    context: notifierContexts(log),
+let result: Awaited<ReturnType<typeof runJob>> | undefined;
+try {
+  result = await runJob(db, plugins, {
+    job: job as 'bootstrap' | 'daily' | 'checks',
+    target,
+    sessions,
+    seriesSessions,
+    now,
     log,
-  },
-  tsa: {
-    authorities: (process.env.SAKU_TSA_URLS ?? '')
-      .split(',')
-      .map((u) => u.trim())
-      .filter(Boolean),
-    ...(process.env.SAKU_TSA_CAFILE?.trim() && { caFile: process.env.SAKU_TSA_CAFILE.trim() }),
-  },
-  code: codeVersion(),
-  afterDaily: async () => {
-    const backup = await backupDatabase(dbConfigFromEnv().url, backupDir(), localDay(now));
-    await pruneBackups(backupDir());
-    log.info(`Backup ${backup.file} (${(backup.bytes / 1e6).toFixed(1)} MB)`);
-  },
-  onComplete: async () => {
-    writeStamp('daily', target);
-    return heartbeat();
-  },
-});
-held.release();
-process.exit(result.ok ? 0 : 1);
+    context: (info) => pluginContext(info, log),
+    alerting: {
+      date: target,
+      notifiers: plugins.notifiers,
+      authSecret: process.env.AUTH_SECRET?.trim() ?? '',
+      context: notifierContexts(log),
+      log,
+    },
+    tsa: {
+      authorities: (process.env.SAKU_TSA_URLS ?? '')
+        .split(',')
+        .map((u) => u.trim())
+        .filter(Boolean),
+      ...(process.env.SAKU_TSA_CAFILE?.trim() && { caFile: process.env.SAKU_TSA_CAFILE.trim() }),
+    },
+    code: codeVersion(),
+    afterDaily: async () => {
+      const backup = await backupDatabase(dbConfigFromEnv().url, backupDir(), localDay(now));
+      await pruneBackups(backupDir());
+      log.info(`Backup ${backup.file} (${(backup.bytes / 1e6).toFixed(1)} MB)`);
+    },
+    onComplete: async () => {
+      writeStamp('daily', target);
+      const sent = await heartbeat();
+      if (sent) writeStamp('heartbeat', target);
+      return sent;
+    },
+  });
+} catch (e) {
+  log.warn('Run could not start or finish', { error: String(e) });
+} finally {
+  held.release();
+}
+process.exit(result?.ok ? 0 : 1);
 /** Pings healthchecks.io after a full success; the missing ping is what raises the alarm. */
 async function heartbeat(): Promise<boolean> {
   const url = process.env.HEALTHCHECK_URL?.trim();

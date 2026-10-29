@@ -11,4 +11,3 @@ export * from './jobs/forward';
 export * from './jobs/anchor';
 export * from './jobs/alerts';
 export * from './jobs/cash';
-export * from './jobs/run';

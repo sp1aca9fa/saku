@@ -29,6 +29,8 @@ export interface RunOptions {
   /** The cash series' business days; a run without it fails before any request. */
   seriesSessions: Sessions | undefined;
   now: Date;
+  /** The time the checks look from (values known by then count); default: the clock. */
+  clock?: () => Date;
   log: Logger;
   context: (info: PluginInfo) => PluginContext;
   alerting: AlertOptions;
@@ -49,8 +51,7 @@ export interface RunResult {
 
 export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Promise<RunResult> {
   const { job, target, sessions, log, alerting, now } = o;
-  const run = job;
-  const runId = await startRun(db, run, now);
+  const runId = await startRun(db, job, now);
   let ok = false;
   let error: string | undefined;
   let heartbeatSent = false;
@@ -83,9 +84,9 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     const markIncomplete = (what: string) => {
       if (!incomplete.includes(what)) incomplete.push(what);
     };
-    if (run !== 'checks') {
+    if (job !== 'checks') {
       const reports = await ingest(db, plugins, {
-        mode: run,
+        mode: job,
         to: target,
         sessions,
         runId,
@@ -104,7 +105,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       sessions,
       to: target,
       seriesSessions: checkedSessions,
-      now,
+      now: o.clock?.() ?? new Date(),
       ...(job === 'daily'
         ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
         : { mode: 'full' as const }),
@@ -122,7 +123,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     }
 
     // Forward records (A2; nothing before forward_records_from is set, the A1 gate).
-    if (run === 'daily') {
+    if (job === 'daily') {
       const f = await forward(db, {
         runId,
         sessions,
@@ -173,16 +174,23 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       }
     }
 
-    // The run is done when every source answered for every item.
+    // The run is done when every source answered for every item and the backup was made.
+    if (job === 'daily') await o.afterDaily?.();
     ok = incomplete.length === 0;
     if (!ok) error = `incomplete: ${incomplete.join(', ')}`;
-    if (run === 'daily') await o.afterDaily?.();
-    if (ok && run === 'daily') heartbeatSent = (await o.onComplete?.()) ?? false;
+    if (ok && job === 'daily') heartbeatSent = (await o.onComplete?.()) ?? false;
   } catch (e) {
+    ok = false;
     error = e instanceof Error ? (e.stack ?? e.message) : String(e);
     log.warn('Run failed', { error });
   } finally {
-    await finishRun(db, runId, { ok, error, datesProcessed: [target], heartbeatSent });
+    try {
+      await finishRun(db, runId, { ok, error, datesProcessed: [target], heartbeatSent });
+    } catch (e) {
+      // Still tell the admins below; the run row stays as started.
+      ok = false;
+      log.warn('Run not recorded', { error: String(e) });
+    }
     if (!ok) {
       try {
         const sent = await sendJobFailure(db, {

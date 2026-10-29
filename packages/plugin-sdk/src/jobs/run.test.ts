@@ -83,12 +83,15 @@ const rates: SeriesSource = {
   },
 };
 
-function fakeNotifier() {
+function fakeNotifier(down: string[] = []) {
   const sent: { target: string; text: string }[] = [];
   const notifier: Notifier = {
     info: { key: 'fake', kind: 'notifier', name: 'Fake', termsUrl: 'x', maxLength: 2000 },
     validTarget: () => true,
-    send: async (target, text) => void sent.push({ target, text }),
+    send: async (target, text) => {
+      if (down.includes(target)) throw new Error('Fake: HTTP 500');
+      sent.push({ target, text });
+    },
   };
   return { notifier, sent };
 }
@@ -147,6 +150,7 @@ function options(
     sessions,
     seriesSessions: sessions,
     now: new Date('2026-01-17T01:30:00Z'),
+    clock: () => new Date('2026-01-17T01:30:00Z'),
     log: quiet,
     context: () => ({ http: null as never, now: new Date(), log: quiet }),
     alerting: {
@@ -205,6 +209,37 @@ describe('a daily run', () => {
     );
     const [run] = await db.select().from(schema.jobRuns);
     expect(run).toMatchObject({ status: 'failed', heartbeatSent: false });
+  });
+
+  it('a failed backup fails the run, even when every step finished', async () => {
+    const { db } = await setup();
+    const { notifier, sent } = fakeNotifier();
+    const o = options(notifier, {
+      afterDaily: async () => {
+        throw new Error('disk full');
+      },
+    });
+    const r = await runJob(db, plugins([barSource('p'), barSource('s')]), o);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('disk full');
+    expect(o.hooks).toEqual([]);
+    expect(sent.some((m) => m.target === 'ops' && m.text.includes('did not finish'))).toBe(true);
+  });
+
+  it('an undelivered alert leaves the run incomplete (tried again at the next check)', async () => {
+    const { db } = await setup();
+    const { notifier } = fakeNotifier(['me']);
+    const r = await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier));
+    expect(r).toMatchObject({ ok: false, error: 'incomplete: alerts' });
+    const again = fakeNotifier();
+    const second = await runJob(
+      db,
+      plugins([barSource('p'), barSource('s')]),
+      options(again.notifier),
+    );
+    expect(second.ok).toBe(true);
+    // Only what was not delivered before.
+    expect(again.sent.map((m) => m.target)).toEqual(['me']);
   });
 
   it('without the cash calendar it fails before any request', async () => {
