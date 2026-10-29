@@ -159,6 +159,21 @@ describe('why a request was refused', () => {
     );
   });
 
+  it('masks the whole answer before cutting, so no part of a key survives the cut', async () => {
+    const key = 'LONGSECRET987';
+    const { http } = fakeClient([() => new Response(`${'x'.repeat(195)}${key}`, { status: 400 })]);
+    const message = await refused(http, `https://example.test/a?api_key=${key}`);
+    expect(message.endsWith(`${'x'.repeat(195)}***`)).toBe(true);
+    expect(message).not.toContain('LONG');
+    // A key JSON escapes (`\/`) is masked in the decoded message too.
+    const escaped = fakeClient([
+      () => new Response('{"error_message":"bad key k3y\\/v4lue"}', { status: 400 }),
+    ]);
+    expect(await refused(escaped.http, 'https://example.test/a?api_key=k3y%2Fv4lue')).toBe(
+      'HTTP 400 for https://example.test/a?api_key=***: bad key ***',
+    );
+  });
+
   it('adds no excerpt to a server error', async () => {
     const { http } = fakeClient([() => new Response('stack trace', { status: 500 })], {
       retries: 0,

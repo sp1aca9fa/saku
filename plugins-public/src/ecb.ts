@@ -3,7 +3,7 @@
 // cross of two euro rates (a modification the ECB asks users to state).
 // https://data.ecb.europa.eu/help/api/overview
 import { isTradingDate, zonedInstant } from '@saku/core';
-import type { FxRate, FxSource } from '@saku/plugin-sdk';
+import { type FxRate, type FxSource, HttpError } from '@saku/plugin-sdk';
 
 const BASE = 'https://data-api.ecb.europa.eu/service/data/EXR';
 const CURRENCY = /^[A-Z]{3}$/;
@@ -39,9 +39,13 @@ export function ecbChunks(from: string, to: string): { from: string; to: string 
 
 /**
  * Parses the API's `csvdata` answer into date -> rate (units of currency per euro), adding to
- * `out`; a date already there with another rate is refused.
+ * `out`; a date already there with another rate is refused. Returns the rows read. Columns are
+ * found by name; only CURRENCY, TIME_PERIOD and OBS_VALUE are used, so the request asks for
+ * `detail=dataonly` (no attribute columns). An empty answer has no rows.
  */
-function parseCsv(text: string, currency: string, out: Map<string, number>): void {
+function parseCsv(text: string, currency: string, out: Map<string, number>): number {
+  if (text.trim() === '') return 0;
+  let read = 0;
   const [header, ...rows] = text.trim().split(/\r?\n/);
   const cols = (header ?? '').split(',');
   const iCur = cols.indexOf('CURRENCY');
@@ -58,7 +62,9 @@ function parseCsv(text: string, currency: string, out: Map<string, number>): voi
     if (had !== undefined && had !== value)
       throw new Error(`ECB: two rates for ${currency} on ${date}`);
     out.set(date, value);
+    read++;
   }
+  return read;
 }
 
 export const ecb: FxSource = {
@@ -84,13 +90,44 @@ export const ecb: FxSource = {
     const baseRates = base === 'EUR' ? null : new Map<string, number>();
     const quoteRates = quote === 'EUR' ? null : new Map<string, number>();
     // Nothing exists before the euro: the range starts no earlier than 1999.
-    for (const part of ecbChunks(from < FIRST ? FIRST : from, to)) {
-      const text = await ctx.http.text(
-        `${BASE}/D.${needed.join('+')}.EUR.SP00.A?startPeriod=${part.from}&endPeriod=${part.to}&format=csvdata`,
-        { Accept: 'text/csv' },
-      );
-      if (baseRates) parseCsv(text, base, baseRates);
-      if (quoteRates) parseCsv(text, quote, quoteRates);
+    const parts = ecbChunks(from < FIRST ? FIRST : from, to);
+    // A part with no data (404 "No results found", or an empty answer) counts as zero rows only
+    // at either end of the range: before a series starts or after it ended. An empty part between
+    // two parts with rows is a multi-year hole that nothing downstream checks, so it is refused.
+    // When every part is empty, the range is refused, as a single request was before.
+    const counts: number[] = [];
+    let noResults: HttpError | null = null;
+    for (const part of parts) {
+      let text: string;
+      try {
+        text = await ctx.http.text(
+          `${BASE}/D.${needed.join('+')}.EUR.SP00.A?startPeriod=${part.from}&endPeriod=${part.to}` +
+            '&detail=dataonly&format=csvdata',
+          { Accept: 'text/csv' },
+        );
+      } catch (e) {
+        if (!(e instanceof HttpError) || e.status !== 404) throw e;
+        noResults = e;
+        counts.push(0);
+        continue;
+      }
+      let rows = 0;
+      if (baseRates) rows += parseCsv(text, base, baseRates);
+      if (quoteRates) rows += parseCsv(text, quote, quoteRates);
+      counts.push(rows);
+    }
+    const first = counts.findIndex((n) => n > 0);
+    const last = counts.findLastIndex((n) => n > 0);
+    if (parts.length > 0 && first < 0) {
+      throw noResults ?? new Error(`ECB: no rates for ${pair} from ${from} to ${to}`);
+    }
+    for (let i = first + 1; i < last; i++) {
+      if (counts[i] === 0) {
+        const hole = parts[i]!;
+        throw new Error(
+          `ECB: no rates for ${pair} from ${hole.from} to ${hole.to}, between parts with rates`,
+        );
+      }
     }
     const dates = [
       ...new Set([...(baseRates?.keys() ?? []), ...(quoteRates?.keys() ?? [])]),

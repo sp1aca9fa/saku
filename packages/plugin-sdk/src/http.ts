@@ -48,6 +48,9 @@ const CHALLENGE_MARKERS = [/captcha/i, /cf-challenge/i, /Just a moment\.\.\./];
 /** Query parameters that carry keys; their values never appear in errors or logs. */
 const SECRET_PARAMS = /([?&](?:token|apikey|api_key|key|access_key)=)[^&]*/gi;
 
+/** The same parameters inside free text (an answer body): the value ends at a quote, space or tag. */
+const SECRET_PARAMS_IN_TEXT = /([?&](?:token|apikey|api_key|key|access_key)=)[^&\s"'<>]*/gi;
+
 export function redactUrl(url: string): string {
   return url.replace(SECRET_PARAMS, '$1***');
 }
@@ -199,30 +202,40 @@ export class PoliteHttp {
 
   /**
    * A short excerpt of a refused request's answer, so the error says why (e.g. FRED's JSON
-   * `error_message`). Keys are masked: the registered secrets, every key-like query value of the
-   * request URL wherever it appears, and key-like query parameters in the text.
+   * `error_message`). The whole answer is masked first (the registered secrets, every key-like
+   * query value of the request URL wherever it appears, key-like query parameters in the text);
+   * only then is a message picked, tags stripped and the text cut.
    */
   private async excerpt(res: Response, url: string): Promise<string | undefined> {
     let body: string;
     try {
-      body = (await res.text()).slice(0, 20_000);
+      body = await res.text();
     } catch {
       return undefined;
     }
+    body = this.masked(body, url);
     let text = body;
     try {
       const parsed = JSON.parse(body) as Record<string, unknown>;
       const said = ['error_message', 'message', 'error', 'detail'].find(
         (k) => typeof parsed?.[k] === 'string',
       );
-      if (said) text = parsed[said] as string;
+      // Masked again: JSON escapes (e.g. `\/`) can hide a key from the first pass.
+      if (said) text = this.masked(parsed[said] as string, url);
     } catch {
       // Not JSON: plain text or a page; tags are dropped below.
     }
     text = text
       .replace(/<[^>]*>/g, ' ')
       .replace(/\s+/g, ' ')
-      .trim();
+      .trim()
+      .slice(0, EXCERPT_CHARS);
+    return text || undefined;
+  }
+
+  /** Text with every secret masked: registered ones, and key-like query values of `url`. */
+  private masked(text: string, url: string): string {
+    let out = text;
     for (const m of url.matchAll(SECRET_PARAMS)) {
       const raw = m[0].slice(m[1]!.length);
       let decoded = raw;
@@ -232,11 +245,11 @@ export class PoliteHttp {
         // A malformed escape: mask the raw text only.
       }
       for (const value of [raw, decoded]) {
-        if (value.length >= 4) text = text.replaceAll(value, '***');
+        if (value.length >= 4) out = out.replaceAll(value, '***');
       }
     }
-    text = this.shown(text).slice(0, EXCERPT_CHARS);
-    return text || undefined;
+    for (const secret of this.secrets) out = out.replaceAll(secret, '***');
+    return out.replace(SECRET_PARAMS_IN_TEXT, '$1***');
   }
 
   /** Waits for the minimum gap and for every limit window to have room under 80%. */

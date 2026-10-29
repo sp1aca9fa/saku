@@ -143,14 +143,18 @@ function sameValue(a: string, b: string): boolean {
  * 9999-12-31), so the windows cover the whole real-time axis without gaps or overlap. A series
  * that fits in one window is fetched with the single full-axis request, as before.
  *
- * Merge rule: FRED clips each row's real-time period to the request's window, so a value that
- * was already in effect when a window starts comes back with realtime_start = the window's
- * start. Such a row is a continuation, not a new vintage, when the previous window has a row for
- * the same date that was still in effect at that window's end (realtime_end = its end) with the
- * same value; it is then dropped and the value keeps its true, earliest realtime_start. FRED
- * never splits a real-time period where the value does not change, so a different value (or no
- * row in effect at the boundary) at a window's start is a real vintage on that date (a window
- * starts on a vintage date by construction).
+ * Merge rule. Assumed, from FRED's documented examples: FRED clips each row's real-time period
+ * to the request's window, so a value already in effect when a window starts comes back with
+ * realtime_start = the window's start. Unclipped periods (realtime_start before the window,
+ * realtime_end past it) are handled the same way, so either answer gives the same points. A row
+ * that starts on or before a window's start (window 2 on) is a continuation, not a new vintage,
+ * when the previous window has a row for the same date still in effect at that window's end
+ * (realtime_end on or past it) with the same value (and, if unclipped, the same
+ * realtime_start); it is then dropped and the value keeps its true, earliest realtime_start.
+ * FRED never splits a real-time period where the value does not change, so a different value
+ * (or no row in effect at the boundary) at a window's start is a real vintage on that date (a
+ * window starts on a vintage date by construction). A row that starts before its window without
+ * matching such a row, or lies outside its window, is refused.
  */
 async function observations(id: string, from: string, to: string, ctx: PluginContext) {
   const vintages = await vintageDates(id, ctx);
@@ -172,12 +176,18 @@ async function observations(id: string, from: string, to: string, ctx: PluginCon
       if (o.realtime_start > o.realtime_end) {
         throw new Error(`FRED ${id}: real-time period ends before it starts ${JSON.stringify(o)}`);
       }
-      // At or past the window's end: in effect when the next window starts (past it only if a
-      // period came back unclipped).
+      if (o.realtime_start > w.end || o.realtime_end < w.start) {
+        throw new Error(`FRED ${id}: row outside its real-time window ${JSON.stringify(o)}`);
+      }
+      // On or past the window's end: in effect when the next window starts.
       if (o.realtime_end >= w.end) atEnd.set(o.date, o);
       if (k > 0 && o.realtime_start <= w.start) {
         const before = atPreviousEnd.get(o.date);
-        if (before && sameValue(before.value, o.value)) continue; // continuation, see above
+        const continues =
+          before !== undefined &&
+          sameValue(before.value, o.value) &&
+          (o.realtime_start === w.start || o.realtime_start === before.realtime_start);
+        if (continues) continue; // see the merge rule above
         if (o.realtime_start < w.start) {
           // Claims a start inside an earlier window that the earlier window did not show.
           throw new Error(

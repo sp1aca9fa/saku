@@ -163,21 +163,70 @@ describe('FRED', () => {
       ]);
     });
 
+    const expected = [
+      // A continues through both boundaries: one vintage, the first.
+      { date: '2009-12-01', value: 1, publishedAt: at18NY(v[0]!) },
+      // B changed on the boundary vintage itself: a real new vintage there.
+      { date: '2009-12-02', value: 2, publishedAt: at18NY(v[5]!) },
+      { date: '2009-12-02', value: 2.5, publishedAt: at18NY(w1) },
+      // C: the continuation at the boundary is dropped; the revision inside is kept.
+      { date: '2009-12-03', value: 3, publishedAt: at18NY(v[10]!) },
+      { date: '2009-12-03', value: 3.1, publishedAt: at18NY(v[1500]!) },
+      // D: missing at the boundary, so the same value coming back there is a new vintage.
+      { date: '2009-12-04', value: 4, publishedAt: at18NY(v[20]!) },
+      { date: '2009-12-04', value: 4, publishedAt: at18NY(w1) },
+    ];
+
     it('keeps each value at its first vintage; a change at or inside a window is a new one', async () => {
       const points = await fredSeries.fetchSeries('DTB3', '2009-12-01', '2009-12-04', context());
-      expect(points).toEqual([
-        // A continues through both boundaries: one vintage, the first.
-        { date: '2009-12-01', value: 1, publishedAt: at18NY(v[0]!) },
-        // B changed on the boundary vintage itself: a real new vintage there.
-        { date: '2009-12-02', value: 2, publishedAt: at18NY(v[5]!) },
-        { date: '2009-12-02', value: 2.5, publishedAt: at18NY(w1) },
-        // C: the clipped continuation at the boundary is dropped; the revision inside is kept.
-        { date: '2009-12-03', value: 3, publishedAt: at18NY(v[10]!) },
-        { date: '2009-12-03', value: 3.1, publishedAt: at18NY(v[1500]!) },
-        // D: missing at the boundary, so the same value coming back there is a new vintage.
-        { date: '2009-12-04', value: 4, publishedAt: at18NY(v[20]!) },
-        { date: '2009-12-04', value: 4, publishedAt: at18NY(w1) },
-      ]);
+      expect(points).toEqual(expected);
+    });
+
+    it('gives the same points when the periods come back unclipped', async () => {
+      // The true real-time periods; each window answers those that overlap it, unclipped.
+      const truth = [
+        row('2009-12-01', '1.00', v[0]!, '9999-12-31'),
+        row('2009-12-02', '2.00', v[5]!, end0),
+        row('2009-12-02', '2.50', w1, '9999-12-31'),
+        row('2009-12-03', '3.00', v[10]!, addDays(v[1500]!, -1)),
+        row('2009-12-03', '3.10', v[1500]!, '9999-12-31'),
+        row('2009-12-04', '4.00', v[20]!, v[29]!),
+        row('2009-12-04', '.', v[30]!, end0),
+        row('2009-12-04', '4.00', w1, '9999-12-31'),
+      ];
+      const windows: [string, string][] = [
+        ['1776-07-04', end0],
+        [w1, end1],
+        [w2, '9999-12-31'],
+      ];
+      const unclipped = Object.fromEntries(
+        windows.map(([a, b]) => [
+          a,
+          truth.filter((r) => r.realtime_start <= b && r.realtime_end >= a),
+        ]),
+      );
+      // w1 does answer rows that start before it and end after it.
+      expect(unclipped[w1]!.some((r) => r.realtime_start < w1 && r.realtime_end > end1)).toBe(true);
+      const points = await fredSeries.fetchSeries(
+        'DTB3',
+        '2009-12-01',
+        '2009-12-04',
+        context(unclipped),
+      );
+      expect(points).toEqual(expected);
+    });
+
+    it('refuses a row outside its own window', async () => {
+      // Starts after the first window's end.
+      const late = context({ '1776-07-04': [row('2009-12-01', '1.00', w1, end1)] });
+      await expect(
+        fredSeries.fetchSeries('DTB3', '2009-12-01', '2009-12-04', late),
+      ).rejects.toThrow(/outside its real-time window/);
+      // Ends before the second window starts.
+      const early = context({ [w1]: [row('2009-12-01', '1.00', v[0]!, v[3]!)] });
+      await expect(
+        fredSeries.fetchSeries('DTB3', '2009-12-01', '2009-12-04', early),
+      ).rejects.toThrow(/outside its real-time window/);
     });
 
     it('refuses a row that claims to start in an earlier window the earlier window did not show', async () => {
@@ -230,6 +279,53 @@ describe('FRED', () => {
     ).rejects.toThrow(/unordered vintage date/);
   });
 
+  it('refuses a vintage page at the wrong offset or an empty page before the end', async () => {
+    const v = Array.from({ length: 20_001 }, (_, i) => addDays('1950-01-01', i));
+    const shifted = fixtureContext(
+      fredRoutes((url) => observationPage([], url), vintagePage(v.slice(0, 10_000), v.length, 5)),
+      { apiKey: 'abc' },
+    );
+    await expect(
+      fredSeries.fetchSeries('DTB3', '2026-01-01', '2026-01-06', shifted),
+    ).rejects.toThrow(/vintage page at the wrong offset/);
+    const hole = fixtureContext(
+      fredRoutes(
+        (url) => observationPage([], url),
+        (url: URL) => {
+          const offset = Number(url.searchParams.get('offset'));
+          const dates = offset === 10_000 ? [] : v.slice(offset, offset + 10_000);
+          return vintagePage(dates, v.length, offset);
+        },
+      ),
+      { apiKey: 'abc' },
+    );
+    await expect(fredSeries.fetchSeries('DTB3', '2026-01-01', '2026-01-06', hole)).rejects.toThrow(
+      /empty vintage page/,
+    );
+  });
+
+  it('refuses a real-time period that ends before it starts', async () => {
+    const ctx = fixtureContext(
+      fredRoutes((url) =>
+        observationPage(
+          [
+            {
+              realtime_start: '2026-01-07',
+              realtime_end: '2026-01-06',
+              date: '2026-01-02',
+              value: '3.61',
+            },
+          ],
+          url,
+        ),
+      ),
+      { apiKey: 'abc' },
+    );
+    await expect(fredSeries.fetchSeries('DTB3', '2026-01-01', '2026-01-06', ctx)).rejects.toThrow(
+      /ends before it starts/,
+    );
+  });
+
   it('says why FRED refused a request, without the key', async () => {
     const key = 'abcd1234efgh';
     const error = fixture('fred-error.json') as { error_message: string };
@@ -259,6 +355,9 @@ describe('ECB', () => {
     expect(ctx.requested[0]).toContain('/EXR/D.USD+JPY.EUR.SP00.A?');
     const url = new URL(ctx.requested[0]!);
     expect(url.searchParams.get('startPeriod')).toBe('2026-01-02');
+    // Only the observations: the parser reads CURRENCY, TIME_PERIOD and OBS_VALUE.
+    expect(url.searchParams.get('detail')).toBe('dataonly');
+    expect(url.searchParams.get('format')).toBe('csvdata');
     expect(url.searchParams.get('endPeriod')).toBe('2026-01-05');
     expect(rates.map((r) => [r.date, r.rate, r.publishedAt])).toEqual([
       ['2026-01-02', 160, '2026-01-02T15:00:00.000Z'],
@@ -303,7 +402,7 @@ describe('ECB', () => {
   describe('long ranges', () => {
     const header = csv.split('\n')[0]!;
     const line = (cur: string, date: string, value: string) =>
-      `EXR.D.${cur}.EUR.SP00.A,D,${cur},EUR,SP00,A,${date},${value},A,F,,,P1D,,A,,,,,,,,,,4,,4F0,,x,x,${cur},0`;
+      `EXR.D.${cur}.EUR.SP00.A,D,${cur},EUR,SP00,A,${date},${value}`;
     /** Answers each request with rates on its first and last day. */
     const perPart = (url: URL) => {
       const days = [url.searchParams.get('startPeriod')!, url.searchParams.get('endPeriod')!];
@@ -358,6 +457,86 @@ describe('ECB', () => {
       await expect(
         ecb.fetchRates('USDJPY', '1999-01-01', '2026-10-28', fixtureContext(clash)),
       ).rejects.toThrow(/two rates for JPY on 2020-06-01/);
+    });
+  });
+
+  describe('parts with no data', () => {
+    const header = csv.split('\n')[0]!;
+    const noResults = () => new Response('No results found.', { status: 404 });
+    // QQQ (made up): its series ends in 2004, so the later parts have no results.
+    const ended = (url: URL) => {
+      const start = url.searchParams.get('startPeriod')!;
+      if (start > '2004-12-31') return noResults();
+      return `${header}\nEXR.D.QQQ.EUR.SP00.A,D,QQQ,EUR,SP00,A,${start},2.5000`;
+    };
+
+    it('counts a part answering 404 or nothing as zero rows', async () => {
+      const ctx = fixtureContext(ended);
+      const rates = await ecb.fetchRates('EURQQQ', '1999-01-01', '2026-10-28', ctx);
+      expect(ctx.requested.length).toBeGreaterThan(2);
+      expect(rates.map((r) => r.date)).toEqual(['1999-01-01', expect.any(String)]);
+      expect(rates.every((r) => r.rate === 2.5 && r.date <= '2004-12-31')).toBe(true);
+      const blank = fixtureContext((url) =>
+        url.searchParams.get('startPeriod') === '1999-01-01' ? '' : ended(url),
+      );
+      expect(
+        (await ecb.fetchRates('EURQQQ', '1999-01-01', '2026-10-28', blank)).map((r) => r.date),
+      ).toHaveLength(1);
+    });
+
+    it('accepts empty parts at the start or end, and refuses a hole between parts with rates', async () => {
+      const parts = ecbChunks('1999-01-01', '2026-10-28');
+      expect(parts.length).toBeGreaterThan(3);
+      const emptyAt = (empty: number[]) => (url: URL) => {
+        const start = url.searchParams.get('startPeriod')!;
+        const i = parts.findIndex((p) => p.from === start);
+        if (empty.includes(i)) return i % 2 === 0 ? noResults() : header;
+        return `${header}\nEXR.D.QQQ.EUR.SP00.A,D,QQQ,EUR,SP00,A,${start},2.5000`;
+      };
+      // Leading and trailing empty parts (a series that started late and ended early).
+      const edges = await ecb.fetchRates(
+        'EURQQQ',
+        '1999-01-01',
+        '2026-10-28',
+        fixtureContext(emptyAt([0, 1, parts.length - 1])),
+      );
+      expect(edges.map((r) => r.date)).toEqual(parts.slice(2, -1).map((p) => p.from));
+      // A 404 or header-only part between parts with rates is refused, naming its range.
+      for (const hole of [2, 3]) {
+        const p = parts[hole]!;
+        await expect(
+          ecb.fetchRates('EURQQQ', '1999-01-01', '2026-10-28', fixtureContext(emptyAt([hole]))),
+        ).rejects.toThrow(
+          `ECB: no rates for EURQQQ from ${p.from} to ${p.to}, between parts with rates`,
+        );
+      }
+    });
+
+    it('refuses the range when every part is empty', async () => {
+      await expect(
+        ecb.fetchRates('EURQQQ', '2010-01-01', '2026-10-28', fixtureContext(noResults)),
+      ).rejects.toThrow(/^HTTP 404 for .*: No results found\.$/);
+      await expect(
+        ecb.fetchRates(
+          'EURQQQ',
+          '2026-01-02',
+          '2026-01-05',
+          fixtureContext(() => header),
+        ),
+      ).rejects.toThrow(/no rates for EURQQQ/);
+      // Other failures are not taken as empty.
+      await expect(
+        ecb.fetchRates(
+          'EURQQQ',
+          '1999-01-01',
+          '2026-10-28',
+          fixtureContext((url) =>
+            url.searchParams.get('startPeriod')! > '2004-12-31'
+              ? new Response('', { status: 400 })
+              : ended(url),
+          ),
+        ),
+      ).rejects.toThrow(/HTTP 400/);
     });
   });
 });
