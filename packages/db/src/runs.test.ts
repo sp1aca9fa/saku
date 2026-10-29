@@ -60,11 +60,20 @@ describe('source roles set by the admin', () => {
     expect(
       await setSourceRole(db, { dataKind: 'bars', key: 'csv', role: 'primary', actor: 'cli' }),
     ).toEqual({});
+    // The primary is never demoted or removed by itself: one primary always remains.
+    await expect(
+      setSourceRole(db, { dataKind: 'bars', key: 'csv', role: 'secondary', actor: 'cli' }),
+    ).rejects.toThrow('set another source as primary first');
+    await expect(
+      removeSourceRole(db, { dataKind: 'bars', key: 'csv', actor: 'cli' }),
+    ).rejects.toThrow('primary');
+    await setSourceRole(db, { dataKind: 'bars', key: 'a', role: 'primary', actor: 'cli' });
     expect(await removeSourceRole(db, { dataKind: 'bars', key: 'csv', actor: 'cli' })).toBe(true);
     expect(await removeSourceRole(db, { dataKind: 'bars', key: 'csv', actor: 'cli' })).toBe(false);
     const log = (await db.select().from(activityLog)).map((r) => r.action);
     expect(log).toEqual([
       'source_roles.seed',
+      'source_roles.set',
       'source_roles.set',
       'source_roles.set',
       'source_roles.remove',

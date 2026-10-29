@@ -16,6 +16,7 @@ import {
   startRun,
 } from '@saku/db';
 import { type LoadedPlugins, allInfos, savePluginInfos } from '../registry';
+import { assignedOnly, dataKindOf, unassigned } from '../roles';
 import type { Logger, PluginContext, PluginInfo } from '../types';
 import {
   type AlertOptions,
@@ -31,8 +32,6 @@ import { forward, recompute } from './forward';
 import { DAILY_OVERLAP, ingest, type SourceReport } from './ingest';
 import { integrity } from './integrity';
 import { storeRunChecks, verify } from './verify';
-
-const DATA_KIND = { bar: 'bars', series: 'series', fx: 'fx' } as const;
 
 export interface RunOptions {
   job: 'bootstrap' | 'daily' | 'weekly' | 'checks';
@@ -76,32 +75,20 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     await seedSourceRoles(
       db,
       infos.flatMap((i) =>
-        i.kind in DATA_KIND
-          ? [
-              {
-                key: i.key,
-                dataKind: DATA_KIND[i.kind as keyof typeof DATA_KIND],
-                suggestedRole: i.suggestedRole,
-              },
-            ]
+        dataKindOf(i)
+          ? [{ key: i.key, dataKind: dataKindOf(i)!, suggestedRole: i.suggestedRole }]
           : [],
       ),
     );
     if (plugins.missing.length > 0) log.info(`Not present: ${plugins.missing.join(', ')}`);
-    // Roles are seeded once per data kind; a plug-in added later is unused until the admin
-    // assigns it (pnpm sources set).
+    // Roles are seeded once per data kind; a plug-in added later is unused (neither fetched nor
+    // checked) until the admin assigns it (pnpm sources set).
     const roles = await sourceRolesOf(db);
-    const unassigned = infos.filter(
-      (i) =>
-        i.kind in DATA_KIND &&
-        !roles.some(
-          (r) =>
-            r.pluginKey === i.key && r.dataKind === DATA_KIND[i.kind as keyof typeof DATA_KIND],
-        ),
-    );
-    if (unassigned.length > 0) {
-      log.warn(`Loaded but not used (no role): ${unassigned.map((i) => i.key).join(', ')}`);
+    const idle = unassigned(infos, roles);
+    if (idle.length > 0) {
+      log.warn(`Loaded but not used (no role): ${idle.map((i) => i.key).join(', ')}`);
     }
+    const used = assignedOnly(plugins, roles);
     log.info(`${job} for ${target}`, { runId });
 
     // Before any request: the cash series is checked on this calendar.
@@ -130,7 +117,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     };
     if (job === 'weekly') await o.beforeRefetch?.();
     if (job !== 'checks') {
-      const reports = await ingest(db, plugins, {
+      const reports = await ingest(db, used, {
         // The weekly run refetches the full history; changes go to the revision log.
         mode: job === 'daily' ? 'daily' : 'bootstrap',
         to: target,

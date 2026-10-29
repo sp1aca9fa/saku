@@ -78,7 +78,8 @@ export function sourceRolesOf(db: Db) {
 
 /**
  * The admin assigns a source's role for a data kind (an unassigned source is not used). A new
- * primary turns the previous one into a secondary: there is exactly one. A new source goes last.
+ * primary turns the previous one into a secondary: there is exactly one, so the primary itself
+ * cannot be demoted (name its successor instead). A new source goes last.
  */
 export async function setSourceRole(
   db: Db,
@@ -86,6 +87,12 @@ export async function setSourceRole(
 ): Promise<{ demoted?: string }> {
   return db.transaction(async (tx) => {
     const rows = await tx.select().from(sourceRoles).where(eq(sourceRoles.dataKind, o.dataKind));
+    const current = rows.find((r) => r.pluginKey === o.key);
+    if (current?.role === 'primary' && o.role !== 'primary') {
+      throw new Error(
+        `${o.key} is the ${o.dataKind} primary: set another source as primary first.`,
+      );
+    }
     const old = rows.find((r) => r.role === 'primary' && r.pluginKey !== o.key);
     if (o.role === 'primary' && old) {
       await tx
@@ -93,9 +100,7 @@ export async function setSourceRole(
         .set({ role: 'secondary' })
         .where(and(eq(sourceRoles.dataKind, o.dataKind), eq(sourceRoles.pluginKey, old.pluginKey)));
     }
-    const position =
-      rows.find((r) => r.pluginKey === o.key)?.position ??
-      Math.max(-1, ...rows.map((r) => r.position)) + 1;
+    const position = current?.position ?? Math.max(-1, ...rows.map((r) => r.position)) + 1;
     await tx
       .insert(sourceRoles)
       .values({ dataKind: o.dataKind, pluginKey: o.key, role: o.role, position })
@@ -113,12 +118,24 @@ export async function setSourceRole(
   });
 }
 
-/** Stops using a source for a data kind (its stored data stays). */
+/**
+ * Stops using a source for a data kind (its stored data stays). The primary stays until another
+ * source is primary, so a data kind keeps its roles (and is never seeded again).
+ */
 export async function removeSourceRole(
   db: Db,
   o: { dataKind: string; key: string; actor: string },
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(sourceRoles)
+      .where(and(eq(sourceRoles.dataKind, o.dataKind), eq(sourceRoles.pluginKey, o.key)));
+    if (row?.role === 'primary') {
+      throw new Error(
+        `${o.key} is the ${o.dataKind} primary: set another source as primary first.`,
+      );
+    }
     const gone = await tx
       .delete(sourceRoles)
       .where(and(eq(sourceRoles.dataKind, o.dataKind), eq(sourceRoles.pluginKey, o.key)))
