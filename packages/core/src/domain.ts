@@ -87,14 +87,19 @@ export interface SeriesPoint {
 
 /**
  * What a fund issuer publishes for one date (layer D, best effort; for checks only, never a value
- * used in calculations): the NAV per share, and on an ex-date the distribution per share or the
- * split ratio (new shares per old share, 2 for a 2-for-1 split). Over the dates a source returns
- * (its first to its last record), every distribution and split it does not report reads as a
- * mismatch, so a source reports all of them in that range.
+ * used in calculations). One record per date. Values are as published for that date: the NAV
+ * per share on that day's share basis, never adjusted for later splits or distributions (an
+ * adjusted history reads as a premium on every day before the event). On an ex-date, the
+ * distribution per share (every distribution going ex that day summed) and the split ratio (new
+ * shares per old share, 2 for a 2-for-1 split). A source that publishes NAV is compared on the
+ * dates it has a record; a source without NAV (events only) reports every distribution and split
+ * from its first to its last record, since one it leaves out reads as a mismatch.
  */
 export interface IssuerRecord {
   date: TradingDate;
   nav?: number;
+  /** The NAV's currency (ISO 4217), required with a NAV; compared with the fund's currency. */
+  currency?: string;
   distribution?: number;
   split?: number;
 }

@@ -60,7 +60,8 @@
         "nav_premium": "the market close is further from the issuer's NAV than usual ({source})",
         "distribution_match": "distributions differ from the issuer's records ({source})",
         "split_match": "splits differ from the issuer's records ({source})",
-        "issuer_stale": "the issuer's NAV is more than one trading day old ({source})"
+        "issuer_stale": "the issuer's NAV is missing or more than one trading day old ({source})",
+        "nav_tolerance_invalid": "the NAV tolerance setting is invalid, so premiums are only observed ({source})"
       },
       "single_source": "only one source had data",
       "primary_missing": "the main source has no data and no stand-in passed",
@@ -71,6 +72,8 @@
       "standInRefused": "the main source was missing and no stand-in passed the checks",
       "stale": "{days} business days behind ({source})",
       "seriesMissing": "no value yet ({source})",
+      "issuerUnavailable": "issuer data could not be fetched ({source})",
+      "issuer_nav_tolerance_invalid": "the issuer NAV tolerance setting is invalid; reset it (pnpm settings set issuer_nav_tolerance)",
       "notGreen": "not green",
       "evaluation": "the strategy could not be evaluated"
     },

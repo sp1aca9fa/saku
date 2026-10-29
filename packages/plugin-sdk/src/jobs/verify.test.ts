@@ -348,33 +348,49 @@ describe('verify', () => {
     );
   });
 
-  it('runs layer D for issuer sources with a role, advisory: yellow at most', async () => {
-    const { db } = await setup();
-    await seedSourceRoles(db, [{ key: 'iss', dataKind: 'issuer', suggestedRole: 'check' }]);
-    const aaa = (await symbolId(db, 'AAA'))!;
-    const closes = [100, 101, 101.51, 100.4949];
-    const issue = (source: string, nav: (close: number, i: number) => number) =>
-      storeIssuerRecords(db, {
-        symbolId: aaa,
-        source,
-        records: closes.map((close, i) => ({
-          date: dates[i]!,
-          nav: nav(close, i),
-          ...(i === 2 && { distribution: 0.5 }),
-        })),
-        fetchedAt: 't',
-      });
-    // The NAV is 10% off on the 7th; a source without a role is far off every day.
-    await issue('iss', (close, i) => (i === 2 ? close * 1.1 : close));
-    await issue('other', (close) => close * 2);
-    await setSetting(db, 'issuer_nav_tolerance', '{"AAA":0.01}');
-    const runId = await startRun(db, 'daily');
-    await verify(db, { runId, sessions, mode: 'daily', from: '2026-01-06', to: '2026-01-08' });
-    const d = await db
+  /** AAA's NAVs from an issuer source, one per date, the distribution on the 7th. */
+  const issue = async (
+    db: Awaited<ReturnType<typeof setup>>['db'],
+    source: string,
+    nav: (close: number, i: number) => number,
+    days = 4,
+  ) =>
+    storeIssuerRecords(db, {
+      symbolId: (await symbolId(db, 'AAA'))!,
+      source,
+      records: [100, 101, 101.51, 100.4949].slice(0, days).map((close, i) => ({
+        date: dates[i]!,
+        nav: nav(close, i),
+        currency: 'USD',
+        ...(i === 2 && { distribution: 0.5 }),
+      })),
+      fetchedAt: 't',
+    });
+  const layerDResults = (db: Awaited<ReturnType<typeof setup>>['db']) =>
+    db
       .select()
       .from(schema.checkResults)
       .where(eq(schema.checkResults.layer, 'D'))
       .orderBy(asc(schema.checkResults.date));
+
+  it('runs layer D for issuer sources with a role, advisory: yellow at most', async () => {
+    const { db } = await setup();
+    await seedSourceRoles(db, [{ key: 'iss', dataKind: 'issuer', suggestedRole: 'check' }]);
+    const aaa = (await symbolId(db, 'AAA'))!;
+    // The NAV is 10% off on the 7th; a source without a role is far off every day.
+    await issue(db, 'iss', (close, i) => (i === 2 ? close * 1.1 : close));
+    await issue(db, 'other', (close) => close * 2);
+    await setSetting(db, 'issuer_nav_tolerance', '{"AAA":0.01,"ZZZ":0.01}');
+    const runId = await startRun(db, 'daily');
+    const summary = await verify(db, {
+      runId,
+      sessions,
+      mode: 'daily',
+      from: '2026-01-06',
+      to: '2026-01-08',
+    });
+    expect(summary).toMatchObject({ toleranceInvalid: false, toleranceUnmatched: ['ZZZ'] });
+    const d = await layerDResults(db);
     expect(d.every((r) => r.source === 'iss' && r.symbolId === aaa)).toBe(true);
     expect(d.every((r) => r.status !== 'red')).toBe(true);
     expect(d.filter((r) => r.status !== 'green').map((r) => `${r.checkName} ${r.date}`)).toEqual([
@@ -390,23 +406,125 @@ describe('verify', () => {
     expect(health[0]).toMatchObject({ status: 'yellow' });
     expect(health[0]!.reasons).toContain('D.nav_premium@iss');
 
-    // The observed premium per fund and issuer source (every source with records).
+    // The observed premium per fund and issuer source (every source with records). AAA's 8th is
+    // graded red (a secondary's close is off): left out.
     const stats = await issuerStats(db, { from: '2026-01-01', to: '2026-01-08' });
-    expect(stats.map((r) => `${r.ticker} ${r.source} ${r.days}`)).toEqual([
-      'AAA iss 4',
-      'AAA other 4',
+    expect(stats.toleranceUnmatched).toEqual(['ZZZ']);
+    expect(stats.rows.map((r) => `${r.ticker} ${r.source} ${r.days}`)).toEqual([
+      'AAA iss 3',
+      'AAA other 3',
     ]);
-    expect(stats[0]!.max).toBeCloseTo(1 - 1 / 1.1, 12);
-    expect(stats[0]!.median).toBe(0);
-    expect(stats[0]!.tolerance).toBe(0.01);
-    expect(stats[1]!.median).toBeCloseTo(0.5, 12);
-    expect(await issuerStats(db, { from: '2026-01-08', to: '2026-01-08' })).toMatchObject([
+    expect(stats.rows[0]!.leftOut).toEqual({ standIn: 0, red: 1 });
+    expect(stats.rows[0]!.max).toBeCloseTo(1 - 1 / 1.1, 12);
+    expect(stats.rows[0]!.median).toBe(0);
+    expect(stats.rows[0]!.tolerance).toBe(0.01);
+    expect(stats.rows[1]!.median).toBeCloseTo(0.5, 12);
+    expect((await issuerStats(db, { from: '2026-01-07', to: '2026-01-07' })).rows).toMatchObject([
       { days: 1 },
       { days: 1 },
     ]);
-    expect(await issuerStats(db, { from: '2026-02-01', to: '2026-02-08' })).toEqual([
-      { ticker: 'AAA', source: 'iss', days: 0, tolerance: 0.01 },
-      { ticker: 'AAA', source: 'other', days: 0, tolerance: 0.01 },
+    expect((await issuerStats(db, { from: '2026-02-01', to: '2026-02-08' })).rows).toEqual([
+      { ticker: 'AAA', source: 'iss', days: 0, tolerance: 0.01, leftOut: { standIn: 0, red: 0 } },
+      { ticker: 'AAA', source: 'other', days: 0, tolerance: 0.01, leftOut: { standIn: 0, red: 0 } },
+    ]);
+  });
+
+  it('stats leave out stand-in days and records before the period', async () => {
+    const { db, store } = await setup({ aaaPrimaryDays: 3 });
+    // The secondary's last close matches the index: it stands in for the primary's 8th.
+    await store(
+      'AAA',
+      's',
+      bars([100, 101, 101.51, 100.4949], (i) => ({ divCash: i === 2 ? 0.5 : 0 })),
+    );
+    await seedSourceRoles(db, [{ key: 'iss', dataKind: 'issuer', suggestedRole: 'check' }]);
+    await issue(db, 'iss', (close) => close);
+    const runId = await startRun(db, 'daily');
+    await verify(db, { runId, sessions, mode: 'daily', from: '2026-01-06', to: '2026-01-08' });
+    const standIn = await db
+      .select()
+      .from(schema.bars)
+      .where(and(eq(schema.bars.date, '2026-01-08'), eq(schema.bars.standIn, true)));
+    expect(standIn).toHaveLength(1);
+    const period = { from: '2026-01-06', to: '2026-01-08' };
+    const before = (await issuerStats(db, period)).rows[0]!;
+    // The 5th is before the period and the 8th a stand-in: the 6th and 7th count.
+    expect(before).toMatchObject({ days: 2, leftOut: { standIn: 1, red: 0 } });
+    // Another record before the period changes nothing.
+    await storeIssuerRecords(db, {
+      symbolId: (await symbolId(db, 'AAA'))!,
+      source: 'iss',
+      records: [{ date: '2026-01-02', nav: 1, currency: 'USD' }],
+      fetchedAt: 't2',
+    });
+    expect((await issuerStats(db, period)).rows[0]).toEqual(before);
+  });
+
+  it('grades a fund the issuer supports or failed for, with no NAV stored, yellow', async () => {
+    const { db } = await setup();
+    await seedSourceRoles(db, [
+      { key: 'iss', dataKind: 'issuer', suggestedRole: 'check' },
+      { key: 'iss2', dataKind: 'issuer', suggestedRole: 'check' },
+    ]);
+    await issue(db, 'iss', (close) => close);
+    const runId = await startRun(db, 'daily');
+    const summary = await verify(db, {
+      runId,
+      sessions,
+      mode: 'daily',
+      from: '2026-01-06',
+      to: '2026-01-08',
+      issuers: [
+        // AAA's NAV is on time; AAA2 failed this run and has nothing stored.
+        { source: 'iss', supported: ['AAA', 'AAA2'], unavailable: ['AAA2'] },
+        // Supports AAA, never delivered anything.
+        { source: 'iss2', supported: ['AAA'], unavailable: [] },
+        // No role: not used.
+        { source: 'nobody', supported: ['AAA'], unavailable: ['AAA'] },
+      ],
+    });
+    const stale = (await layerDResults(db))
+      .filter((r) => r.checkName === 'issuer_stale')
+      .map((r) => `${r.symbolId} ${r.source} ${r.status} ${r.message ?? ''}`);
+    const [aaa, aaa2] = [(await symbolId(db, 'AAA'))!, (await symbolId(db, 'AAA2'))!];
+    expect(stale.sort()).toEqual(
+      [
+        `${aaa} iss green `,
+        `${aaa} iss2 yellow supported, no record stored`,
+        `${aaa2} iss yellow not fetched, no NAV stored`,
+      ].sort(),
+    );
+    expect(summary.reasons).toContain('issuer_unavailable@iss');
+    expect(summary.reasons).not.toContain('issuer_unavailable@nobody');
+    const health = await db
+      .select()
+      .from(schema.dataHealth)
+      .where(and(eq(schema.dataHealth.symbolId, aaa2), eq(schema.dataHealth.date, '2026-01-08')));
+    expect(health[0]!.reasons).toContain('D.issuer_stale@iss');
+  });
+
+  it('an invalid stored tolerance does not stop verify: observed only, yellow, told', async () => {
+    const { db } = await setup();
+    await seedSourceRoles(db, [{ key: 'iss', dataKind: 'issuer', suggestedRole: 'check' }]);
+    await issue(db, 'iss', (close, i) => (i === 2 ? close * 1.1 : close));
+    // Only a hand edit can store this (the setting is validated when set).
+    await db.insert(schema.appSettings).values({ key: 'issuer_nav_tolerance', value: '{"AAA":5}' });
+    const runId = await startRun(db, 'daily');
+    const summary = await verify(db, {
+      runId,
+      sessions,
+      mode: 'daily',
+      from: '2026-01-06',
+      to: '2026-01-08',
+    });
+    expect(summary.toleranceInvalid).toBe(true);
+    expect(summary.reasons).toContain('issuer_nav_tolerance_invalid');
+    const d = await layerDResults(db);
+    expect(d.filter((r) => r.checkName === 'nav_premium').every((r) => r.status === 'green')).toBe(
+      true,
+    );
+    expect(d.filter((r) => r.checkName === 'nav_tolerance_invalid')).toEqual([
+      expect.objectContaining({ date: '2026-01-08', status: 'yellow' }),
     ]);
   });
 });

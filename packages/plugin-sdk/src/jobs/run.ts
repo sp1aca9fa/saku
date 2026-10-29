@@ -9,6 +9,7 @@ import type { TradingDate } from '@saku/core';
 import type { Sessions } from '@saku/data';
 import {
   type Db,
+  activeSymbols,
   finishRun,
   revisionsOfRun,
   seedSourceRoles,
@@ -30,10 +31,17 @@ import {
 } from './alerts';
 import { anchor } from './anchor';
 import { forward, recompute } from './forward';
-import { DAILY_OVERLAP, countsForRun, ingest, type SourceReport } from './ingest';
+import {
+  DAILY_OVERLAP,
+  countsForRun,
+  ingest,
+  issuerAvailability,
+  type SourceReport,
+  supportedBy,
+} from './ingest';
 import { integrity } from './integrity';
 import { parity } from './parity';
-import { storeRunChecks, verify } from './verify';
+import { type IssuerAvailability, storeRunChecks, verify } from './verify';
 
 export interface RunOptions {
   job: 'bootstrap' | 'daily' | 'weekly' | 'checks';
@@ -120,6 +128,13 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       if (told.failed.length > 0) markIncomplete('alerts');
     };
     if (job === 'weekly') await o.beforeRefetch?.();
+    // Layer D: what each issuer source supports; a fetching run adds what it did not deliver.
+    const tickers = (await activeSymbols(db)).map((s) => s.ticker);
+    let issuers: IssuerAvailability[] = used.issuers.map((source) => ({
+      source: source.info.key,
+      supported: supportedBy(source, tickers).supported,
+      unavailable: [],
+    }));
     if (job !== 'checks') {
       const reports = await ingest(db, used, {
         // The weekly run refetches the full history; changes go to the revision log.
@@ -135,13 +150,15 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       }
       const failing = reports.filter((r) => r.stopped || r.failed.length > 0);
       incomplete = failing.filter(countsForRun).map((r) => r.source);
-      // Best effort (issuer data): logged, graded by its staleness, the run still complete.
+      // Best effort (issuer data): logged, graded yellow by verify (the fund's staleness and the
+      // day's `issuer_unavailable`, which the admins are told), the run still complete.
       for (const r of failing.filter((x) => !countsForRun(x))) {
-        log.warn(`${r.kind} ${r.source} incomplete (best effort; staleness grades the day)`, {
+        log.warn(`${r.kind} ${r.source} incomplete (best effort; graded yellow, admins told)`, {
           failed: r.failed,
           ...(r.stopped && { stopped: r.stopped }),
         });
       }
+      issuers = issuerAvailability(reports);
     }
 
     // Checks run whatever the sources did: a missing source is itself a finding.
@@ -151,6 +168,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       to: target,
       seriesSessions: checkedSessions,
       now: o.clock?.() ?? new Date(),
+      issuers,
       ...(job === 'daily'
         ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
         : { mode: 'full' as const }),
@@ -160,6 +178,14 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       stored: checked.stored,
     });
     health = checked.health;
+    if (checked.toleranceInvalid) {
+      log.warn('issuer_nav_tolerance does not parse: layer D observes premiums only (yellow)');
+    }
+    if (checked.toleranceUnmatched.length > 0) {
+      log.warn(
+        `issuer_nav_tolerance names no active symbol: ${checked.toleranceUnmatched.join(', ')}`,
+      );
+    }
     log.info(`Data health on ${target}: ${checked.health}`, { standIns: checked.standIns });
     for (const s of checked.standInsOff) {
       log.warn(

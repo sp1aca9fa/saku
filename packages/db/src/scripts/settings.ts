@@ -2,7 +2,15 @@
 import { createDb } from '../client';
 import { dbConfigFromEnv, loadRootEnv } from '../env';
 import { exitIfUnmigrated } from '../migrate';
-import { SETTINGS, getSetting, isSettingKey, setSetting } from '../settings';
+import { activeSymbols } from '../market';
+import {
+  SETTINGS,
+  getSetting,
+  isSettingKey,
+  parseNavTolerances,
+  setSetting,
+  unmatchedTolerances,
+} from '../settings';
 
 loadRootEnv();
 const db = createDb(dbConfigFromEnv());
@@ -17,6 +25,13 @@ if (command === 'list') {
   try {
     await setSetting(db, key, value);
     console.log(`${key} = ${value}`);
+    if (key === 'issuer_nav_tolerance') {
+      const tickers = (await activeSymbols(db)).map((s) => s.ticker);
+      const unmatched = unmatchedTolerances(parseNavTolerances(value) ?? {}, tickers);
+      if (unmatched.length > 0) {
+        console.log(`Warning: no active symbol named ${unmatched.join(', ')} (stored as given).`);
+      }
+    }
   } catch (e) {
     console.error((e as Error).message);
     process.exit(1);

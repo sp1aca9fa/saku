@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { getSetting, navTolerances, parseNavTolerances, setSetting } from './settings';
+import { appSettings } from './schema';
+import {
+  getSetting,
+  navTolerances,
+  parseNavTolerances,
+  setSetting,
+  unmatchedTolerances,
+} from './settings';
 import { testDb } from './testing';
 
 describe('settings', () => {
@@ -17,7 +24,7 @@ describe('settings', () => {
 
   it('validates the layer D NAV tolerances: a map of ticker to a fraction in (0, 0.2]', async () => {
     const db = await testDb();
-    expect(await navTolerances(db)).toEqual({});
+    expect(await navTolerances(db)).toEqual({ tolerances: {}, invalid: false });
     for (const bad of [
       '',
       '[]',
@@ -34,11 +41,21 @@ describe('settings', () => {
     }
     expect(parseNavTolerances('{}')).toEqual({});
     await setSetting(db, 'issuer_nav_tolerance', '{"AAA":0.005,"BBB":0.2}');
-    expect(await navTolerances(db)).toEqual({ AAA: 0.005, BBB: 0.2 });
+    expect(await navTolerances(db)).toEqual({
+      tolerances: { AAA: 0.005, BBB: 0.2 },
+      invalid: false,
+    });
+    expect(unmatchedTolerances({ BBB: 0.2, AAA: 0.005, ZZZ: 0.01 }, ['AAA'])).toEqual([
+      'BBB',
+      'ZZZ',
+    ]);
     // A ticker named like an object property is still only what was set.
     await setSetting(db, 'issuer_nav_tolerance', '{"__proto__":0.01}');
-    const t = await navTolerances(db);
+    const t = (await navTolerances(db)).tolerances;
     expect(Object.hasOwn(t, '__proto__')).toBe(true);
     expect(Object.hasOwn(t, 'constructor')).toBe(false);
+    // A stored value that no longer parses (a hand edit) is reported, not read as "none set".
+    await db.update(appSettings).set({ value: '{"AAA":5}' });
+    expect(await navTolerances(db)).toEqual({ tolerances: {}, invalid: true });
   });
 });

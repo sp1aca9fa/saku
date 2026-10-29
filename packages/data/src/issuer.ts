@@ -27,17 +27,20 @@ const statusD = (deviation: number, tol: number): HealthStatus =>
 
 /**
  * The market close's premium (+) or discount (-) to the issuer's NAV, close / NAV - 1, on dates
- * the primary has a bar and the issuer a NAV. Both are per share as traded that day (the primary
- * un-split). Dates where either value is not positive have no premium (layer D flags them).
+ * the primary has a bar and the issuer a NAV in the fund's currency. Both are per share as traded
+ * that day (the primary un-split). Dates where either value is not positive, or the NAV is in
+ * another (or no) currency, have no premium (layer D flags them).
  */
 export function navPremiums(
   primary: RawBar[],
   records: IssuerRecord[],
+  currency: string,
 ): { date: TradingDate; close: number; nav: number; premium: number }[] {
   const close = new Map(primary.map((b) => [b.date, b.close]));
   return records.flatMap((r) => {
     const c = close.get(r.date);
-    if (c === undefined || r.nav === undefined || !(r.nav > 0) || !(c > 0)) return [];
+    if (c === undefined || r.nav === undefined || r.currency !== currency) return [];
+    if (!(r.nav > 0) || !(c > 0)) return [];
     return [{ date: r.date, close: c, nav: r.nav, premium: c / r.nav - 1 }];
   });
 }
@@ -45,8 +48,19 @@ export function navPremiums(
 export interface LayerDOptions {
   /** The issuer source's key (stored with each result). */
   source: string;
+  /** The fund's trading currency (ISO 4217): a NAV in another one is not compared. */
+  currency: string;
   /** The fund's NAV tolerance (`issuer_nav_tolerance`); none: observed only, always green. */
   tolerance?: number;
+  /**
+   * The stored `issuer_nav_tolerance` does not parse: premiums are observed only and one yellow
+   * `nav_tolerance_invalid` result on the run's date says so (for a source with NAV).
+   */
+  toleranceInvalid?: boolean;
+  /** The source says it publishes this fund (`supports`). */
+  supported?: boolean;
+  /** This run's fetch from the source failed or stopped for this fund. */
+  unavailable?: boolean;
   sessions: Sessions;
   /** The run's date: records after it are ignored; freshness is judged on it. */
   to: TradingDate;
@@ -56,12 +70,18 @@ export interface LayerDOptions {
  * Layer D for one symbol and one issuer source, one result per check and date, every status
  * capped at LAYER_D_MAX_STATUS:
  * - `nav_premium`: |close / NAV - 1| against the fund's tolerance (no tolerance: green, the
- *   deviation recorded). A NAV that is not positive is a mismatch.
+ *   deviation recorded). A NAV that is not positive, or not in the fund's currency, is a
+ *   mismatch and never a premium.
  * - `distribution_match`, `split_match`: the issuer's events against the primary's on the same
- *   dates, within the dates both cover (an event on one side only is a mismatch; amounts within
- *   the layer B event tolerance, 1%).
+ *   dates (an event on one side only is a mismatch; amounts within the layer B event tolerance,
+ *   1%), within the dates both cover. A source that publishes NAV is compared on the dates it
+ *   has a record; a primary event on a date it has none is yellow "not compared" (issuer data
+ *   unavailable, 04 severity rules), never a mismatch. A source without NAV (events only)
+ *   reports every event in its range, so a date without its record reads as no event.
  * - `issuer_stale`: on the run's date, the latest NAV more than ISSUER_MAX_BEHIND sessions
- *   behind (only for a source that publishes NAV for this fund).
+ *   behind. With no NAV stored at all, yellow when this run's fetch failed for the fund, or when
+ *   the source supports it and has no record of it (a NAV-less source that delivered records is
+ *   events-only and has no freshness).
  */
 export function layerD(
   primary: RawBar[],
@@ -72,44 +92,46 @@ export function layerD(
   const base = { layer: 'D' as const, source: o.source };
   const bars = primary.filter((b) => b.date <= o.to);
   const recs = records.filter((r) => r.date <= o.to).sort((a, b) => a.date.localeCompare(b.date));
-  if (recs.length === 0) return out;
   const mine = new Map(bars.map((b) => [b.date, b]));
+  const tolerance = o.toleranceInvalid ? undefined : o.tolerance;
+  const later = (a: TradingDate, b: TradingDate) => (a > b ? a : b);
+  const earlier = (a: TradingDate, b: TradingDate) => (a < b ? a : b);
+  const publishesNav = recs.some((r) => r.nav !== undefined);
 
   for (const r of recs) {
     const b = mine.get(r.date);
     if (!b || r.nav === undefined) continue;
-    if (!(r.nav > 0)) {
-      out.push({
-        ...base,
-        check: 'nav_premium',
-        date: r.date,
-        status: cap('red'),
-        observed: b.close,
-        expected: r.nav,
-        ...(o.tolerance !== undefined && { tolerance: o.tolerance }),
-        message: 'issuer NAV not positive',
-      });
-      continue;
-    }
-    const dev = Math.abs(b.close / r.nav - 1);
+    const bad =
+      r.currency !== o.currency
+        ? `NAV currency differs (${r.currency ?? 'none'}, the fund trades in ${o.currency})`
+        : !(r.nav > 0)
+          ? 'issuer NAV not positive'
+          : undefined;
+    const dev = bad === undefined ? Math.abs(b.close / r.nav - 1) : undefined;
+    const message =
+      bad ?? (tolerance === undefined ? 'no tolerance set (observed only)' : undefined);
     out.push({
       ...base,
       check: 'nav_premium',
       date: r.date,
-      status: o.tolerance === undefined ? 'green' : statusD(dev, o.tolerance),
-      deviation: dev,
+      status:
+        dev === undefined
+          ? cap('red')
+          : tolerance === undefined
+            ? 'green'
+            : statusD(dev, tolerance),
+      ...(dev !== undefined && { deviation: dev }),
       observed: b.close,
       expected: r.nav,
-      ...(o.tolerance !== undefined && { tolerance: o.tolerance }),
-      ...(o.tolerance === undefined && { message: 'no tolerance set (observed only)' }),
+      ...(tolerance !== undefined && { tolerance }),
+      ...(message !== undefined && { message }),
     });
   }
 
-  // Events on any date either side reports, within the dates both cover.
-  const later = (a: TradingDate, b: TradingDate) => (a > b ? a : b);
-  const earlier = (a: TradingDate, b: TradingDate) => (a < b ? a : b);
-  const first = bars[0] && later(recs[0]!.date, bars[0].date);
-  const last = bars[0] && earlier(recs.at(-1)!.date, bars.at(-1)!.date);
+  // Events on any date either side reports, within the dates both cover (after the issuer's last
+  // record, its staleness speaks instead).
+  const first = bars[0] && recs[0] && later(recs[0].date, bars[0].date);
+  const last = bars[0] && recs[0] && earlier(recs.at(-1)!.date, bars.at(-1)!.date);
   if (first && last && first <= last) {
     const theirs = new Map(recs.map((r) => [r.date, r]));
     const dates = [...new Set([...mine.keys(), ...theirs.keys()])]
@@ -119,15 +141,22 @@ export function layerD(
       const p = mine.get(date);
       const s = theirs.get(date);
       for (const ev of [
-        {
-          check: 'distribution_match',
-          a: p?.divCash ?? 0,
-          b: s?.distribution ?? 0,
-          none: 0,
-        },
+        { check: 'distribution_match', a: p?.divCash ?? 0, b: s?.distribution ?? 0, none: 0 },
         { check: 'split_match', a: p?.splitFactor ?? 1, b: s?.split ?? 1, none: 1 },
       ]) {
         if (ev.a === ev.none && ev.b === ev.none) continue;
+        if (!s && publishesNav) {
+          // A NAV source without a record that day: the event cannot be compared (unknown).
+          out.push({
+            ...base,
+            check: ev.check,
+            date,
+            status: cap('yellow'),
+            expected: ev.a,
+            message: 'not compared: the issuer has no record on this date',
+          });
+          continue;
+        }
         // An event on one side only is a mismatch on the event's date.
         const oneSide = ev.a === ev.none || ev.b === ev.none;
         const dev = oneSide ? Infinity : Math.abs(ev.b / ev.a - 1);
@@ -149,7 +178,7 @@ export function layerD(
     }
   }
 
-  // Freshness on the run's date, for a source that publishes NAV for this fund.
+  // Freshness on the run's date.
   const lastNav = recs.filter((r) => r.nav !== undefined).at(-1)?.date;
   if (lastNav !== undefined) {
     // A NAV older than the calendar counts the calendar's sessions (still far behind).
@@ -163,6 +192,26 @@ export function layerD(
       observed: behind,
       tolerance: ISSUER_MAX_BEHIND,
       ...(behind > ISSUER_MAX_BEHIND && { message: `latest NAV ${lastNav}` }),
+    });
+  } else if (o.unavailable || (o.supported && recs.length === 0)) {
+    // Never graded green by having nothing to compare.
+    out.push({
+      ...base,
+      check: 'issuer_stale',
+      date: o.to,
+      status: cap('yellow'),
+      tolerance: ISSUER_MAX_BEHIND,
+      message: o.unavailable ? 'not fetched, no NAV stored' : 'supported, no record stored',
+    });
+  }
+
+  if (o.toleranceInvalid && publishesNav) {
+    out.push({
+      ...base,
+      check: 'nav_tolerance_invalid',
+      date: o.to,
+      status: cap('yellow'),
+      message: 'the issuer_nav_tolerance setting is invalid: premiums observed only',
     });
   }
   return out;

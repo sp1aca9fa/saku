@@ -377,12 +377,15 @@ export async function storeFx(
 }
 
 const ISSUER_FIELDS = ['nav', 'distribution', 'split'] as const;
+/** Every stored issuer value (a change in any one is a new row). */
+const ISSUER_VALUES = [...ISSUER_FIELDS, 'currency'] as const;
 
 /**
  * Stores one issuer source's records for one symbol (layer D): a row is added only when the
  * values for (symbol, source, date) differ from the latest stored, so a changed value is a new
- * row and nothing stored is overwritten. A response with the same date twice, or a value that is
- * not a finite number, is refused whole (nothing stored; the caller reports it).
+ * row and nothing stored is overwritten. A response with the same date twice, a value that is
+ * not a finite number, or a NAV without its currency (ISO 4217) is refused whole (nothing stored;
+ * the caller reports it).
  */
 export async function storeIssuerRecords(
   db: Db,
@@ -403,6 +406,13 @@ export async function storeIssuerRecords(
         throw new Error(`${input.source} sent a ${f} that is not a number on ${r.date}`);
       }
     }
+    // A NAV in an unknown currency could not be compared: refused, never assumed.
+    if (r.currency !== undefined && !/^[A-Z]{3}$/.test(r.currency)) {
+      throw new Error(`${input.source} sent a currency that is not ISO 4217 on ${r.date}`);
+    }
+    if (r.nav !== undefined && r.currency === undefined) {
+      throw new Error(`${input.source} sent a NAV without its currency on ${r.date}`);
+    }
   }
   const key = and(
     eq(issuerRecords.symbolId, input.symbolId),
@@ -421,13 +431,14 @@ export async function storeIssuerRecords(
       source: input.source,
       date: r.date,
       nav: r.nav ?? null,
+      currency: r.currency ?? null,
       distribution: r.distribution ?? null,
       split: r.split ?? null,
       fetchedAt: input.fetchedAt,
     }))
     .filter((row) => {
       const prev = latest.get(row.date);
-      return !prev || ISSUER_FIELDS.some((f) => prev[f] !== row[f]);
+      return !prev || ISSUER_VALUES.some((f) => prev[f] !== row[f]);
     });
   for (let i = 0; i < rows.length; i += CHUNK) {
     await db.insert(issuerRecords).values(rows.slice(i, i + CHUNK));
@@ -456,6 +467,7 @@ export async function issuerRecordsOf(
     bySource.set(r.date, {
       date: r.date,
       ...(r.nav !== null && { nav: r.nav }),
+      ...(r.currency !== null && { currency: r.currency }),
       ...(r.distribution !== null && { distribution: r.distribution }),
       ...(r.split !== null && { split: r.split }),
     });

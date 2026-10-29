@@ -18,6 +18,7 @@ import {
 import { testDb } from '@saku/db/testing';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
+import { BlockedError } from '../http';
 import { emptyPlugins } from '../registry';
 import type { BarSource, IssuerSource, SeriesSource } from '../types';
 import { runJob } from './run';
@@ -111,19 +112,24 @@ type IssuerFault = (ticker: Ticker, records: IssuerRecord[]) => IssuerRecord[];
 
 /**
  * An issuer publishing the clean history (NAV = the close, SPY's distribution, SSO's split),
- * corrupted by `fault`; nothing after `until`; every call failing once `to` reaches `downFrom`.
+ * corrupted by `fault`; nothing after `until`; every call failing once `to` reaches `downFrom`;
+ * `blocked`: refusing every call (403), from the bootstrap on.
  */
-function issuerSource(o: { fault?: IssuerFault; until?: string; downFrom?: string } = {}) {
+function issuerSource(
+  o: { fault?: IssuerFault; until?: string; downFrom?: string; blocked?: boolean } = {},
+) {
   const data = clean();
   const s: IssuerSource = {
     info: testInfo('iss', 'issuer', { suggestedRole: 'check' }),
     supports: (ticker) => ticker === 'SPY' || ticker === 'SSO',
     async fetchRecords(ticker, from, to) {
+      if (o.blocked) throw new BlockedError('iss: HTTP 403');
       if (o.downFrom && to >= o.downFrom) throw new Error('iss: HTTP 503');
       const t = ticker as Ticker;
       let records: IssuerRecord[] = data[t].map((b) => ({
         date: b.date,
         nav: b.close,
+        currency: 'USD',
         ...(b.divCash > 0 && { distribution: b.divCash }),
         ...(b.splitFactor !== 1 && { split: b.splitFactor }),
       }));
@@ -457,6 +463,7 @@ describe('fault injection (layer F)', () => {
         source: () =>
           issuerSource({ fault: onIssuerTarget('SPY', (r) => ({ ...r, nav: r.nav! * 1.1 })) }),
         caught: 'SPY:D.nav_premium@iss',
+        told: false,
       },
       {
         name: "a missed distribution in the issuer's data",
@@ -465,15 +472,24 @@ describe('fault injection (layer F)', () => {
             fault: onIssuerTarget('SPY', ({ distribution: _d, ...r }) => r),
           }),
         caught: 'SPY:D.distribution_match@iss',
+        told: false,
       },
       {
         name: 'the issuer source down for days',
         source: () => issuerSource({ until: sessions.before(TARGET, 3), downFrom: TARGET }),
         caught: 'SPY:D.issuer_stale@iss',
+        told: true,
+      },
+      {
+        // Nothing ever stored: graded on what the source supports, never green by having nothing.
+        name: 'the issuer refusing every request from the bootstrap on',
+        source: () => issuerSource({ blocked: true }),
+        caught: 'SPY:D.issuer_stale@iss',
+        told: true,
       },
     ]) {
       it(`${c.name}: yellow with the reason, never red, the normal signal kept`, async () => {
-        const { db, result, today, reasons, alert } = await run(sources(), rates, {
+        const { db, result, today, reasons, alert, adminAlerts } = await run(sources(), rates, {
           source: c.source(),
           tolerances: TOLERANCES,
         });
@@ -489,6 +505,10 @@ describe('fault injection (layer F)', () => {
         const d = (await layerD(db, result.runId)).filter((r) => r.layer === 'D');
         expect(d.some((r) => r.status === 'yellow')).toBe(true);
         expect(d.every((r) => r.status !== 'red')).toBe(true);
+        // A source that could not be fetched is told to the admins in words.
+        expect(adminAlerts.join('\n').includes('issuer data could not be fetched (iss)')).toBe(
+          c.told,
+        );
       });
     }
   });

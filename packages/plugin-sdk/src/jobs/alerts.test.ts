@@ -360,6 +360,7 @@ describe('reason codes in words', () => {
       'distribution_match',
       'issuer_stale',
       'nav_premium',
+      'nav_tolerance_invalid',
       'split_match',
     ]);
     for (const check of ISSUER_CHECKS) {
@@ -375,13 +376,18 @@ describe('reason codes in words', () => {
       "SSO: splits differ from the issuer's records (iss)",
     );
     expect(describeReason(t, 'SPY:D.issuer_stale@iss')).toBe(
-      "SPY: the issuer's NAV is more than one trading day old (iss)",
+      "SPY: the issuer's NAV is missing or more than one trading day old (iss)",
     );
     // Layer B keeps its own text for the same check name; an unknown layer D check stays a code.
     expect(describeReason(t, 'SSO:B.split_match@s1')).toBe(
       'SSO: splits differ between sources (s1)',
     );
     expect(describeReason(t, 'SPY:D.close_match@iss')).toBe('SPY:D.close_match@iss');
+    expect(describeReason(t, 'issuer_unavailable@iss')).toBe(
+      'issuer data could not be fetched (iss)',
+    );
+    expect(describeReason(t, 'issuer_nav_tolerance_invalid')).toMatch(/setting is invalid/);
+    expect(describeReason(t, 'SPY:D.nav_tolerance_invalid@iss')).toMatch(/only observed \(iss\)$/);
     expect(describeReason(translator('ja'), 'SPY:D.distribution_match@iss')).toBe(
       'SPY: 分配金が発行体の記録と異なります(iss)',
     );

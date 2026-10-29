@@ -3,32 +3,56 @@
 // Read-only: `pnpm sources issuer-stats [--years N]` prints it.
 import type { TradingDate } from '@saku/core';
 import { type PremiumStats, navPremiums, premiumStats } from '@saku/data';
-import { type Db, activeSymbols, canonicalBars, issuerRecordsOf, navTolerances } from '@saku/db';
+import {
+  type Db,
+  activeSymbols,
+  canonicalBars,
+  issuerRecordsOf,
+  navTolerances,
+  unmatchedTolerances,
+} from '@saku/db';
 
 export interface IssuerStatsRow extends PremiumStats {
   ticker: string;
   source: string;
   /** The tolerance set for the fund, if any. */
   tolerance?: number;
+  /** Days with a NAV left out: a stand-in close (not the primary's), or a day graded red. */
+  leftOut: { standIn: number; red: number };
+}
+
+export interface IssuerStats {
+  rows: IssuerStatsRow[];
+  /** The stored `issuer_nav_tolerance` does not parse (no tolerance shown). */
+  toleranceInvalid: boolean;
+  /** Tolerance keys that name no active symbol. */
+  toleranceUnmatched: string[];
 }
 
 /**
  * Per active fund and issuer source with stored records: the days with both a primary close and
- * an issuer NAV from `from` to `to`, and the median, 99th percentile and largest |close / NAV - 1|.
- * Closes are the canonical bars from the primary (stand-in days left out: the primary's own
- * values, as layer D compares them).
+ * an issuer NAV in the fund's currency from `from` to `to`, and the median, 99th percentile and
+ * largest |close / NAV - 1|. Closes are the canonical bars from the primary; stand-in days and
+ * days graded red are left out (counted), since their close is not a trusted primary value.
  */
 export async function issuerStats(
   db: Db,
   o: { from: TradingDate; to: TradingDate },
-): Promise<IssuerStatsRow[]> {
-  const tolerances = await navTolerances(db);
-  const out: IssuerStatsRow[] = [];
-  for (const s of await activeSymbols(db)) {
+): Promise<IssuerStats> {
+  const nav = await navTolerances(db);
+  const symbols = await activeSymbols(db);
+  const rows: IssuerStatsRow[] = [];
+  for (const s of symbols) {
     const records = await issuerRecordsOf(db, s.id);
     if (records.size === 0) continue;
-    const primary = (await canonicalBars(db, s.id, o.to))
-      .filter((b) => !b.standIn && b.date >= o.from)
+    const canonical = (await canonicalBars(db, s.id, o.to)).filter((b) => b.date >= o.from);
+    const excluded = new Map<TradingDate, 'standIn' | 'red'>();
+    for (const b of canonical) {
+      if (b.standIn) excluded.set(b.date, 'standIn');
+      else if (b.status === 'red') excluded.set(b.date, 'red');
+    }
+    const primary = canonical
+      .filter((b) => !excluded.has(b.date))
       .map((b) => ({
         date: b.date,
         close: b.close,
@@ -38,14 +62,27 @@ export async function issuerStats(
       }));
     for (const [source, list] of records) {
       const inPeriod = list.filter((r) => r.date >= o.from && r.date <= o.to);
-      const premiums = navPremiums(primary, inPeriod).map((p) => p.premium);
-      out.push({
+      const leftOut = { standIn: 0, red: 0 };
+      for (const r of inPeriod) {
+        const why = r.nav !== undefined ? excluded.get(r.date) : undefined;
+        if (why) leftOut[why]++;
+      }
+      const premiums = navPremiums(primary, inPeriod, s.currency).map((p) => p.premium);
+      rows.push({
         ticker: s.ticker,
         source,
         ...premiumStats(premiums),
-        ...(Object.hasOwn(tolerances, s.ticker) && { tolerance: tolerances[s.ticker]! }),
+        ...(Object.hasOwn(nav.tolerances, s.ticker) && { tolerance: nav.tolerances[s.ticker]! }),
+        leftOut,
       });
     }
   }
-  return out;
+  return {
+    rows,
+    toleranceInvalid: nav.invalid,
+    toleranceUnmatched: unmatchedTolerances(
+      nav.tolerances,
+      symbols.map((s) => s.ticker),
+    ),
+  };
 }

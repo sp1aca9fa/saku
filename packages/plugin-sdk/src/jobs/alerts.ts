@@ -465,6 +465,7 @@ const SIMPLE_REASONS = [
   'no_data',
   'no_decision',
   'decision_margin',
+  'issuer_nav_tolerance_invalid',
 ];
 
 /**
@@ -498,6 +499,8 @@ export function describeReason(t: Translate, code: string): string {
   } else if (rest.startsWith('stand_in_refused:')) text = t('alerts.reason.standInRefused');
   else if ((m = /^stale\((\d+)\)@(.+)$/.exec(rest))) {
     text = t('alerts.reason.stale', { days: m[1]!, source: m[2]! });
+  } else if ((m = /^issuer_unavailable@(.+)$/.exec(rest))) {
+    text = t('alerts.reason.issuerUnavailable', { source: m[1]! });
   } else if ((m = /^missing@(.+)$/.exec(rest))) {
     text = t('alerts.reason.seriesMissing', { source: m[1]! });
   } else if (SIMPLE_REASONS.includes(rest)) text = t(`alerts.reason.${rest}`);

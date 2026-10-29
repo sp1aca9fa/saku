@@ -340,6 +340,8 @@ export const issuerRecords = sqliteTable(
     source: text('source').notNull(),
     date: text('date').notNull(),
     nav: real('nav'),
+    /** The NAV's currency (ISO 4217), as the issuer states it; added in 0007. */
+    currency: text('currency'),
     distribution: real('distribution'),
     split: real('split'),
     fetchedAt: text('fetched_at').notNull(),

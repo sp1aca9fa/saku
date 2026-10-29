@@ -120,16 +120,28 @@ if (tool === 'sources' && command === 'list') {
   const start = new Date(`${to}T00:00:00Z`);
   start.setUTCFullYear(start.getUTCFullYear() - years);
   const from = start.toISOString().slice(0, 10);
-  const rows = await issuerStats(db, { from, to });
-  if (rows.length === 0) {
+  const stats = await issuerStats(db, { from, to });
+  if (stats.toleranceInvalid) {
+    console.log('Warning: issuer_nav_tolerance does not parse; layer D observes only until reset.');
+  }
+  if (stats.toleranceUnmatched.length > 0) {
+    console.log(
+      `Warning: issuer_nav_tolerance names no active symbol: ${stats.toleranceUnmatched.join(', ')}`,
+    );
+  }
+  if (stats.rows.length === 0) {
     console.log('No issuer records stored (an issuer plug-in with a role fetches them).');
   } else {
     const pct = (v: number | undefined) => (v === undefined ? '-' : `${(100 * v).toFixed(3)}%`);
-    console.log(`|close / NAV - 1| from ${from} to ${to} (primary closes, stand-in days left out)`);
-    console.log('ticker  source  days  median  p99  max  tolerance set');
-    for (const r of rows) {
+    console.log(
+      `|close / NAV - 1| from ${from} to ${to} (primary closes; stand-in days and days graded ` +
+        'red left out)',
+    );
+    console.log('ticker  source  days  median  p99  max  left out (stand-in, red)  tolerance set');
+    for (const r of stats.rows) {
       console.log(
         `${r.ticker}  ${r.source}  ${r.days}  ${pct(r.median)}  ${pct(r.p99)}  ${pct(r.max)}  ` +
+          `${r.leftOut.standIn}, ${r.leftOut.red}  ` +
           `${r.tolerance === undefined ? 'none (observed only)' : pct(r.tolerance)}`,
       );
     }

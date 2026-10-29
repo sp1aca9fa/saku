@@ -35,6 +35,7 @@ import {
   issuerRecordsOf,
   navTolerances,
   schema,
+  unmatchedTolerances,
   seriesPointInTime,
 } from '@saku/db';
 import { cashSeries } from './cash';
@@ -54,6 +55,17 @@ export interface VerifyOptions {
   seriesSessions?: Sessions;
   /** When the run looks (only values known by then count). */
   now?: Date;
+  /**
+   * Per issuer source the run used: the tickers it `supports`, and those its fetch failed or
+   * stopped for this run (layer D grades a fund with no NAV stored from them yellow).
+   */
+  issuers?: IssuerAvailability[];
+}
+
+export interface IssuerAvailability {
+  source: string;
+  supported: string[];
+  unavailable: string[];
 }
 
 export interface VerifySummary {
@@ -67,6 +79,10 @@ export interface VerifySummary {
   standIns: number;
   /** Stand-ins the primary has now replaced, off by more than the layer B close tolerance. */
   standInsOff: { ticker: string; date: TradingDate; deviation: number }[];
+  /** The stored `issuer_nav_tolerance` does not parse (layer D observes only; yellow). */
+  toleranceInvalid: boolean;
+  /** `issuer_nav_tolerance` keys that name no active symbol. */
+  toleranceUnmatched: string[];
 }
 
 type CanonicalBar = RawBar & { source: string; standIn: boolean };
@@ -341,7 +357,8 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     ...issuer.secondaries,
     ...issuer.checks,
   ];
-  const navTolerance = issuerSources.length > 0 ? await navTolerances(db) : {};
+  const nav = await navTolerances(db);
+  const availability = new Map((o.issuers ?? []).map((a) => [a.source, a]));
   for (const s of symbols) {
     const bySource = raw.get(s.id)!;
     // A primary that delivers split-adjusted closes is put back on the raw basis too.
@@ -393,14 +410,23 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     }
     if (index) add(indexCheck(primary, index));
     if (issuerSources.length > 0) {
-      const tolerance = Object.hasOwn(navTolerance, s.ticker) ? navTolerance[s.ticker] : undefined;
-      for (const [source, records] of await issuerRecordsOf(db, s.id, issuerSources)) {
+      const tolerance = Object.hasOwn(nav.tolerances, s.ticker)
+        ? nav.tolerances[s.ticker]
+        : undefined;
+      const stored = await issuerRecordsOf(db, s.id, issuerSources);
+      // Every source with a role, also one with nothing stored for the fund (it may have failed).
+      for (const source of issuerSources) {
+        const a = availability.get(source);
         add(
-          layerD(primary, records, {
+          layerD(primary, stored.get(source) ?? [], {
             source,
+            currency: s.currency,
             sessions: o.sessions,
             to: o.to,
             ...(tolerance !== undefined && { tolerance }),
+            ...(nav.invalid && { toleranceInvalid: true }),
+            ...(a?.supported.includes(s.ticker) && { supported: true }),
+            ...(a?.unavailable.includes(s.ticker) && { unavailable: true }),
           }),
         );
       }
@@ -496,6 +522,17 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     const s = seriesHealth(o.seriesSessions, o.to, last);
     grade(o.to, s.status, cashReason(source, last === undefined ? undefined : s.behind));
   }
+  // Issuer data (layer D, advisory) for the day overall, for the admins: a source that could not
+  // be fetched (04 severity rules: an issuer site unavailable is yellow), a tolerance setting
+  // that does not parse. Strategies read their symbols' grades, which say what each fund lacks.
+  if (overall.has(o.to) && issuerSources.length > 0) {
+    for (const a of o.issuers ?? []) {
+      if (issuerSources.includes(a.source) && a.unavailable.length > 0) {
+        grade(o.to, 'yellow', `issuer_unavailable@${a.source}`);
+      }
+    }
+    if (nav.invalid) grade(o.to, 'yellow', 'issuer_nav_tolerance_invalid');
+  }
   for (const [date, h] of overall) healthRows.push({ symbolId: null, date, health: h });
 
   const inRange = (date: TradingDate) => date <= o.to && (!o.from || date >= o.from);
@@ -533,6 +570,11 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     reasons: overall.has(o.to) ? overall.get(o.to)!.reasons : ['no_data'],
     standIns: standInCount,
     standInsOff,
+    toleranceInvalid: nav.invalid,
+    toleranceUnmatched: unmatchedTolerances(
+      nav.tolerances,
+      symbols.map((s) => s.ticker),
+    ),
   };
 }
 

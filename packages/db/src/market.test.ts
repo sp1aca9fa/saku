@@ -223,61 +223,56 @@ describe('vintages', () => {
 });
 
 describe('issuer records', () => {
+  const usd = (date: string, nav: number, extra: Record<string, unknown> = {}) => ({
+    date,
+    nav,
+    currency: 'USD',
+    ...extra,
+  });
+
   it('adds a row only for new or changed values; reads take the latest per date', async () => {
     const { db, id } = await setup();
     const store = (records: Parameters<typeof storeIssuerRecords>[1]['records'], at: string) =>
       storeIssuerRecords(db, { symbolId: id, source: 'iss', records, fetchedAt: at });
     expect(
-      await store(
-        [
-          { date: '2026-01-02', nav: 100 },
-          { date: '2026-01-05', nav: 101, distribution: 0.5 },
-        ],
-        't1',
-      ),
+      await store([usd('2026-01-02', 100), usd('2026-01-05', 101, { distribution: 0.5 })], 't1'),
     ).toBe(2);
-    // Same values again: nothing new. A changed NAV and a removed distribution: new rows.
-    expect(
-      await store(
-        [
-          { date: '2026-01-02', nav: 100 },
-          { date: '2026-01-05', nav: 101 },
-        ],
-        't2',
-      ),
-    ).toBe(1);
-    expect(await store([{ date: '2026-01-02', nav: 100.5 }], 't3')).toBe(1);
-    expect(await db.select().from(issuerRecords)).toHaveLength(4);
+    // Same values again: nothing new. A removed distribution: a new row.
+    expect(await store([usd('2026-01-02', 100), usd('2026-01-05', 101)], 't2')).toBe(1);
+    expect(await store([usd('2026-01-02', 100.5)], 't3')).toBe(1);
+    // The same NAV in another currency is a change too.
+    expect(await store([{ date: '2026-01-05', nav: 101, currency: 'EUR' }], 't3')).toBe(1);
+    expect(await db.select().from(issuerRecords)).toHaveLength(5);
     const read = await issuerRecordsOf(db, id);
     expect(read.get('iss')).toEqual([
-      { date: '2026-01-02', nav: 100.5 },
-      { date: '2026-01-05', nav: 101 },
+      usd('2026-01-02', 100.5),
+      { date: '2026-01-05', nav: 101, currency: 'EUR' },
     ]);
     // Back to an earlier value is a change from the latest: stored again, never overwritten.
-    expect(await store([{ date: '2026-01-02', nav: 100 }], 't4')).toBe(1);
-    expect((await issuerRecordsOf(db, id)).get('iss')![0]).toEqual({
-      date: '2026-01-02',
-      nav: 100,
-    });
+    expect(await store([usd('2026-01-02', 100)], 't4')).toBe(1);
+    expect((await issuerRecordsOf(db, id)).get('iss')![0]).toEqual(usd('2026-01-02', 100));
     expect((await issuerRecordsOf(db, id, ['other'])).size).toBe(0);
   });
 
-  it('refuses a response with a date twice, a bad date or a value that is not a number', async () => {
+  it('refuses a date twice, a bad date, a value not a number or a NAV without its currency', async () => {
     const { db, id } = await setup();
     const store = (records: Parameters<typeof storeIssuerRecords>[1]['records']) =>
       storeIssuerRecords(db, { symbolId: id, source: 'iss', records, fetchedAt: 't' });
-    await expect(
-      store([
-        { date: '2026-01-02', nav: 1 },
-        { date: '2026-01-02', nav: 2 },
-      ]),
-    ).rejects.toThrow(/same date twice/);
-    await expect(store([{ date: '01/02/2026', nav: 1 }])).rejects.toThrow(/YYYY-MM-DD/);
-    await expect(store([{ date: '2026-01-02', nav: NaN }])).rejects.toThrow(/nav/);
+    await expect(store([usd('2026-01-02', 1), usd('2026-01-02', 2)])).rejects.toThrow(
+      /same date twice/,
+    );
+    await expect(store([usd('01/02/2026', 1)])).rejects.toThrow(/YYYY-MM-DD/);
+    await expect(store([usd('2026-01-02', NaN)])).rejects.toThrow(/nav/);
     await expect(store([{ date: '2026-01-02', split: '2' as unknown as number }])).rejects.toThrow(
       /split/,
     );
+    await expect(store([{ date: '2026-01-02', nav: 1 }])).rejects.toThrow(/without its currency/);
+    await expect(store([{ date: '2026-01-02', nav: 1, currency: 'usd' }])).rejects.toThrow(
+      /ISO 4217/,
+    );
     expect(await db.select().from(issuerRecords)).toHaveLength(0);
     expect(await store([])).toBe(0);
+    // Events without a NAV need no currency.
+    expect(await store([{ date: '2026-01-02', distribution: 0.2 }])).toBe(1);
   });
 });

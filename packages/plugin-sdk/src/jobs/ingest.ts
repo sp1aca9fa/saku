@@ -17,7 +17,8 @@ import {
 import type { Sessions } from '@saku/data';
 import { BlockedError, QuotaError } from '../http';
 import type { LoadedPlugins } from '../registry';
-import type { Logger, PluginContext, PluginInfo } from '../types';
+import type { IssuerSource, Logger, PluginContext, PluginInfo } from '../types';
+import type { IssuerAvailability } from './verify';
 
 /** The earliest date a bootstrap asks for. */
 export const BOOTSTRAP_FROM = '1990-01-01';
@@ -36,6 +37,8 @@ export interface SourceReport {
   readjustments: number;
   /** Stored dates a source no longer returned, per item. */
   missing: Record<string, TradingDate[]>;
+  /** Issuer sources: the tickers it supports (all of them when `supports` failed). */
+  supported?: string[];
 }
 
 export interface IngestOptions {
@@ -208,14 +211,17 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
   for (const source of plugins.issuers) {
     const r = report(source.info.key, 'issuer');
     reports.push(r);
-    let supported: typeof symbols;
-    try {
-      supported = symbols.filter((s) => source.supports(s.ticker));
-    } catch (e) {
-      r.stopped = message(e);
+    const support = supportedBy(
+      source,
+      symbols.map((s) => s.ticker),
+    );
+    r.supported = support.supported;
+    if (support.error !== undefined) {
+      r.stopped = support.error;
       o.log.warn(`${source.info.key} skipped`, { reason: r.stopped });
       continue;
     }
+    const supported = symbols.filter((s) => support.supported.includes(s.ticker));
     if (supported.length === 0) continue;
     const ctx = contextOrSkip(r, source.info, o);
     if (!ctx) continue;
@@ -237,4 +243,30 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
     );
   }
   return reports;
+}
+
+/**
+ * The tickers an issuer source supports. A `supports` that throws leaves it unknown: every ticker
+ * counts as supported (so a fund it never delivered is graded, never silently left out).
+ */
+export function supportedBy(
+  source: IssuerSource,
+  tickers: string[],
+): { supported: string[]; error?: string } {
+  try {
+    return { supported: tickers.filter((t) => source.supports(t)) };
+  } catch (e) {
+    return { supported: [...tickers], error: message(e) };
+  }
+}
+
+/** Per issuer source of a run: what it supports and what it did not deliver this run. */
+export function issuerAvailability(reports: SourceReport[]): IssuerAvailability[] {
+  return reports
+    .filter((r) => r.kind === 'issuer')
+    .map((r) => ({
+      source: r.source,
+      supported: r.supported ?? [],
+      unavailable: (r.supported ?? []).filter((t) => !r.ok.includes(t)),
+    }));
 }

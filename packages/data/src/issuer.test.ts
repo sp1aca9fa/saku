@@ -32,10 +32,11 @@ const navs = (premium = 0): IssuerRecord[] =>
   primary.map((b) => ({
     date: b.date,
     nav: b.close / (1 + premium),
+    currency: 'USD',
     ...(b.divCash > 0 && { distribution: b.divCash }),
     ...(b.splitFactor !== 1 && { split: b.splitFactor }),
   }));
-const opts = { source: 'iss', sessions, to: TO };
+const opts = { source: 'iss', currency: 'USD', sessions, to: TO };
 const of = (rs: ReturnType<typeof layerD>, check: string) => rs.filter((r) => r.check === check);
 
 describe('layer D (issuer reconciliation)', () => {
@@ -74,7 +75,30 @@ describe('layer D (issuer reconciliation)', () => {
     const r = of(layerD(primary, records, opts), 'nav_premium')[1]!;
     expect(r).toMatchObject({ status: 'yellow', message: 'issuer NAV not positive' });
     expect(r.deviation).toBeUndefined();
-    expect(navPremiums(primary, records)).toHaveLength(4);
+    expect(navPremiums(primary, records, 'USD')).toHaveLength(4);
+  });
+
+  it("compares a NAV only in the fund's currency: another or none is a mismatch (capped)", () => {
+    const records = navs().map((r, i) =>
+      i === 0 ? { ...r, currency: 'XXX' } : i === 1 ? { date: r.date, nav: r.nav! } : r,
+    );
+    const rs = of(layerD(primary, records, { ...opts, tolerance: 0.01 }), 'nav_premium');
+    expect(rs[0]).toMatchObject({
+      status: 'yellow',
+      message: 'NAV currency differs (XXX, the fund trades in USD)',
+    });
+    expect(rs[0]!.deviation).toBeUndefined();
+    expect(rs[1]!.message).toMatch(/differs \(none,/);
+    expect(rs[2]!.status).toBe('green');
+    expect(navPremiums(primary, records, 'USD').map((p) => p.date)).toEqual(dates.slice(2));
+  });
+
+  it('a split-adjusted NAV history (not as published that day) shows as a mismatch', () => {
+    // The issuer restated NAVs before the 2:1 split on today's share basis (halved).
+    const adjusted = navs().map((r, i) => (i < 3 ? { ...r, nav: r.nav! / 2 } : r));
+    const rs = of(layerD(primary, adjusted, { ...opts, tolerance: 0.01 }), 'nav_premium');
+    expect(rs.map((r) => r.status)).toEqual(['yellow', 'yellow', 'yellow', 'green', 'green']);
+    expect(rs[0]!.deviation).toBeCloseTo(1, 12);
   });
 
   it('flags a distribution or split on one side only, and amounts beyond 1%', () => {
@@ -103,6 +127,21 @@ describe('layer D (issuer reconciliation)', () => {
     });
   });
 
+  it('a NAV source without a record on an event date: not compared, never a mismatch', () => {
+    const gap = navs().filter((r) => r.date !== dates[2]);
+    const d = of(layerD(primary, gap, opts), 'distribution_match');
+    expect(d).toEqual([
+      expect.objectContaining({
+        date: dates[2],
+        status: 'yellow',
+        message: 'not compared: the issuer has no record on this date',
+      }),
+    ]);
+    expect(d[0]!.observed).toBeUndefined();
+    // After the issuer's last record its staleness speaks, not the events.
+    expect(of(layerD(primary, navs().slice(0, 2), opts), 'distribution_match')).toEqual([]);
+  });
+
   it('compares events only within the dates both sides cover', () => {
     // The issuer starts after the distribution: the primary's earlier event is not a mismatch.
     const late = navs().slice(3);
@@ -126,8 +165,48 @@ describe('layer D (issuer reconciliation)', () => {
     expect(behind(4).status).toBe('yellow');
   });
 
+  it('with no NAV stored: yellow when this run failed for the fund or a supported fund has none', () => {
+    const stale = (rs: ReturnType<typeof layerD>) => of(rs, 'issuer_stale');
+    expect(stale(layerD(primary, [], { ...opts, unavailable: true }))).toEqual([
+      expect.objectContaining({
+        date: TO,
+        status: 'yellow',
+        message: 'not fetched, no NAV stored',
+      }),
+    ]);
+    expect(stale(layerD(primary, [], { ...opts, supported: true }))).toEqual([
+      expect.objectContaining({ status: 'yellow', message: 'supported, no record stored' }),
+    ]);
+    // An events-only source that delivered records has no freshness; failing this run, it has.
+    const events = navs()
+      .filter((r) => r.distribution)
+      .map(({ nav: _n, currency: _c, ...r }) => r);
+    expect(stale(layerD(primary, events, { ...opts, supported: true }))).toEqual([]);
+    expect(stale(layerD(primary, events, { ...opts, unavailable: true }))[0]!.status).toBe(
+      'yellow',
+    );
+    // A run failure with a NAV stored: its age decides (yesterday's NAV is on time).
+    expect(
+      stale(layerD(primary, navs().slice(0, 4), { ...opts, unavailable: true }))[0]!.status,
+    ).toBe('green');
+  });
+
+  it('an invalid tolerance setting observes premiums only and says so (yellow)', () => {
+    const rs = layerD(primary, navs(0.1), { ...opts, tolerance: 0.01, toleranceInvalid: true });
+    expect(of(rs, 'nav_premium').every((r) => r.status === 'green' && !r.tolerance)).toBe(true);
+    expect(of(rs, 'nav_tolerance_invalid')).toEqual([
+      expect.objectContaining({ date: TO, status: 'yellow' }),
+    ]);
+    const events = navs()
+      .filter((r) => r.split)
+      .map(({ nav: _n, ...r }) => r);
+    expect(
+      of(layerD(primary, events, { ...opts, toleranceInvalid: true }), 'nav_tolerance_invalid'),
+    ).toEqual([]);
+  });
+
   it('ignores records after the run date and returns nothing without records', () => {
-    const later = [...navs(), { date: '2026-01-12', nav: 1 }];
+    const later = [...navs(), { date: '2026-01-12', nav: 1, currency: 'USD' }];
     expect(of(layerD(primary, later, opts), 'nav_premium')).toHaveLength(5);
     expect(layerD(primary, [], opts)).toEqual([]);
     expect(layerD([], navs(), opts).map((r) => r.check)).toEqual(['issuer_stale']);

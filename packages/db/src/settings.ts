@@ -53,14 +53,30 @@ export function parseNavTolerances(text: string): Record<string, number> | null 
   return Object.fromEntries(entries) as Record<string, number>;
 }
 
-/** The NAV tolerance per ticker (none set: an empty map, every fund observed only). */
-export async function navTolerances(db: Db): Promise<Record<string, number>> {
+/**
+ * The NAV tolerance per ticker (none set: an empty map, every fund observed only). A stored value
+ * that no longer parses (only a hand edit can do that) is reported as `invalid`, never read as
+ * "none set" without saying so: layer D then observes only and grades the day yellow.
+ */
+export async function navTolerances(
+  db: Db,
+): Promise<{ tolerances: Record<string, number>; invalid: boolean }> {
   const text = await getSetting(db, 'issuer_nav_tolerance');
-  if (text === undefined) return {};
+  if (text === undefined) return { tolerances: {}, invalid: false };
   const parsed = parseNavTolerances(text);
-  // Validated when set; a stored value that no longer parses is an error, never "none set".
-  if (parsed === null) throw new Error(`issuer_nav_tolerance is not valid: ${text}`);
-  return parsed;
+  return parsed === null
+    ? { tolerances: {}, invalid: true }
+    : { tolerances: parsed, invalid: false };
+}
+
+/** Tolerance keys that name no active symbol (a typo, or a fund no longer in the universe). */
+export function unmatchedTolerances(
+  tolerances: Record<string, number>,
+  tickers: string[],
+): string[] {
+  return Object.keys(tolerances)
+    .filter((t) => !tickers.includes(t))
+    .sort();
 }
 
 export type SettingKey = keyof typeof SETTINGS;

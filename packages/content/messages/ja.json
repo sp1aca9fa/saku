@@ -60,7 +60,8 @@
         "nav_premium": "市場の終値が発行体の基準価額から通常より離れています({source})",
         "distribution_match": "分配金が発行体の記録と異なります({source})",
         "split_match": "分割が発行体の記録と異なります({source})",
-        "issuer_stale": "発行体の基準価額が1取引日より古くなっています({source})"
+        "issuer_stale": "発行体の基準価額がないか、1取引日より古くなっています({source})",
+        "nav_tolerance_invalid": "基準価額の許容幅の設定が無効なため、乖離は観測のみです({source})"
       },
       "single_source": "データがあるのは1つのソースだけです",
       "primary_missing": "主ソースにデータがなく、代替値も検証を通りませんでした",
@@ -71,6 +72,8 @@
       "standInRefused": "主ソースが欠け、代替値も検証を通りませんでした",
       "stale": "{days} 営業日遅れています({source})",
       "seriesMissing": "まだ値がありません({source})",
+      "issuerUnavailable": "発行体のデータを取得できませんでした({source})",
+      "issuer_nav_tolerance_invalid": "発行体の基準価額の許容幅の設定が無効です。設定し直してください(pnpm settings set issuer_nav_tolerance)",
       "notGreen": "緑ではありません",
       "evaluation": "戦略を評価できませんでした"
     },

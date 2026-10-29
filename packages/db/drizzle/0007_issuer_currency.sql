@@ -1,0 +1,1 @@
+ALTER TABLE `issuer_records` ADD `currency` text;

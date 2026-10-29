@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { BlockedError } from '../http';
 import { emptyPlugins } from '../registry';
 import type { BarSource, FxSource, IssuerSource, PluginInfo } from '../types';
-import { ingest, windowStart } from './ingest';
+import { ingest, issuerAvailability, windowStart } from './ingest';
 
 const sessions = new Sessions({
   id: 'test',
@@ -152,14 +152,19 @@ describe('ingest', () => {
       supports: (ticker) => ticker === 'BBB',
       async fetchRecords(ticker, from, to) {
         asked.push(`${ticker} ${from} ${to}`);
-        return [{ date: to, nav: 20, distribution: 0.1 }];
+        return [{ date: to, nav: 20, currency: 'USD', distribution: 0.1 }];
       },
     };
     const reports = await ingest(db, { ...emptyPlugins(), issuers: [iss] }, options('daily'));
     expect(asked).toEqual(['BBB 2026-01-02 2026-01-16']);
     expect(reports[0]).toMatchObject({ kind: 'issuer', ok: ['BBB'], inserted: 1 });
     const stored = await issuerRecordsOf(db, (await symbolId(db, 'BBB'))!);
-    expect(stored.get('iss')).toEqual([{ date: '2026-01-16', nav: 20, distribution: 0.1 }]);
+    expect(stored.get('iss')).toEqual([
+      { date: '2026-01-16', nav: 20, currency: 'USD', distribution: 0.1 },
+    ]);
+    expect(issuerAvailability(reports)).toEqual([
+      { source: 'iss', supported: ['BBB'], unavailable: [] },
+    ]);
     // A full fetch asks from the symbol's inception (or the earliest date) to the target.
     await ingest(db, { ...emptyPlugins(), issuers: [iss] }, options('bootstrap'));
     expect(asked[1]).toBe('BBB 1990-01-01 2026-01-16');
@@ -191,6 +196,11 @@ describe('ingest', () => {
     };
     const [b] = await ingest(db, { ...emptyPlugins(), issuers: [broken] }, options('daily'));
     expect(b!.stopped).toBe('bad list');
+    // Unknown support counts every fund, none delivered: each is graded, never left out.
+    expect(issuerAvailability([r!, b!])).toEqual([
+      { source: 'iss', supported: ['AAA', 'BBB'], unavailable: ['AAA', 'BBB'] },
+      { source: 'iss', supported: ['AAA', 'BBB'], unavailable: ['AAA', 'BBB'] },
+    ]);
   });
 });
 
