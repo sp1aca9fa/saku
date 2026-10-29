@@ -17,7 +17,7 @@ import {
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
-import { sendStrategyAlerts } from './alerts';
+import { sendRecomputeDiffers, sendStrategyAlerts } from './alerts';
 import { forward, recompute, signalsDiffer } from './forward';
 import { verify } from './verify';
 
@@ -156,6 +156,39 @@ describe('forward', () => {
     const { annotationsOf } = await import('@saku/db');
     const [note] = await annotationsOf(db, version.id, 'recomputed');
     expect(note!.detail).toMatchObject({ code: 'c2', signalsDiffer: ['A'] });
+    // The admins hear of it; an undelivered alert is tried again on the next run.
+    const owner = version.ownerId!;
+    await addChannel(db, owner, {
+      type: 'fake',
+      target: 'ops',
+      admin: true,
+      authSecret: 'k'.repeat(32),
+    });
+    const texts: string[] = [];
+    let up = false;
+    const notifier: Notifier = {
+      info: { key: 'fake', kind: 'notifier', name: 'Fake', termsUrl: 'x', maxLength: 1000 },
+      validTarget: () => true,
+      send: async (_t, text) => {
+        if (!up) throw new Error('Fake: HTTP 500');
+        texts.push(text);
+      },
+    };
+    const quiet = { info() {}, warn() {} };
+    const alerting = {
+      date: D[3]!,
+      notifiers: [notifier],
+      authSecret: 'k'.repeat(32),
+      context: () => ({ http: null as never, now: new Date(), log: quiet }),
+      log: quiet,
+    };
+    expect((await sendRecomputeDiffers(db, alerting)).failed).toHaveLength(1);
+    up = true;
+    expect((await sendRecomputeDiffers(db, alerting)).sent).toBe(1);
+    expect((await sendRecomputeDiffers(db, alerting)).sent).toBe(0);
+    expect(texts[0]).toContain(
+      'Trend on 2026-01-08, recorded Risk on, now Calm; signals that differ: A.',
+    );
     // The record itself is untouched.
     expect((await forwardRecord(db, version.id)).map((e) => e.allocation)).toEqual([
       'Risk on',

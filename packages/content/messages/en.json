@@ -70,7 +70,7 @@
     },
     "recompute": {
       "title": "Saku: the engine now decides {count} recorded days differently",
-      "body": "First: {version} on {date}, recorded {recorded}, now {now}. Recorded entries stay as they are; each difference is annotated. Find the cause before trusting new signals."
+      "body": "First: {version} on {date}, recorded {recorded}, now {now}; signals that differ: {signals}. Recorded entries stay as they are; each difference is annotated. Find the cause before trusting new signals."
     },
     "healthDate": "(As of the last check, {date}.)"
   }

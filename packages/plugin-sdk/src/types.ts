@@ -29,7 +29,14 @@ export interface PluginInfo {
   /** The provider's name as shown in Settings. */
   name: string;
   /** What it provides: tickers or series ids, currencies, markets. */
-  provides: { tickers?: string[]; series?: string[]; pairs?: string[]; markets?: string[] };
+  provides: {
+    tickers?: string[];
+    series?: string[];
+    pairs?: string[];
+    markets?: string[];
+    /** A currency's cash rate series (percent a year), e.g. `{ USD: '<series id>' }`. */
+    cashRates?: Record<string, string>;
+  };
   suggestedRole: SourceRole;
   limits?: ProviderLimits;
   /** Environment variable(s) holding the provider's key, when one is needed. */

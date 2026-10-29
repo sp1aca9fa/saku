@@ -23,7 +23,7 @@ import {
   worst,
 } from '@saku/data';
 import { type Db, activeSymbols, getSetting, schema, seriesPointInTime } from '@saku/db';
-import { CASH_SERIES } from './forward';
+import { cashSeries } from './cash';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 
 const CHUNK = 500;
@@ -253,7 +253,8 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   const seriesRoles = await roles(db, 'series');
   for (const s of symbols) {
     const bySource = raw.get(s.id)!;
-    const primary = (bySource.get(bars.primary) ?? []).filter((b) => b.date <= o.to);
+    // A primary that delivers split-adjusted closes is put back on the raw basis too.
+    const primary = unsplit((bySource.get(bars.primary) ?? []).filter((b) => b.date <= o.to));
     const own: CheckResult[] = [];
     const add = (rs: CheckResult[]) => own.push(...rs);
     const index =
@@ -362,13 +363,13 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     }
   }
   // The cash series' freshness on the run's date (rates are read only through asOf).
-  const seriesRole = seriesRoles.primary;
+  const source = await cashSeries(db);
   if (o.seriesSessions && overall.has(o.to)) {
-    const cash = seriesRole ? await seriesPointInTime(db, CASH_SERIES, seriesRole) : undefined;
+    const cash = source ? await seriesPointInTime(db, source.series, source.source) : undefined;
     const last = cash?.asOf(o.to, (o.now ?? new Date()).toISOString())?.date;
     const s = seriesHealth(o.seriesSessions, o.to, last);
     const what = last === undefined ? 'missing' : `stale(${s.behind})`;
-    grade(o.to, s.status, `${CASH_SERIES}:${what}@${seriesRole ?? 'none'}`);
+    grade(o.to, s.status, `${source?.series ?? 'cash'}:${what}@${source?.source ?? 'none'}`);
   }
   for (const [date, h] of overall) healthRows.push({ symbolId: null, date, health: h });
 

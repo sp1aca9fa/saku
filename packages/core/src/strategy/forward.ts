@@ -9,6 +9,9 @@ import type { Holding, Strategy } from './schema';
 
 export const SAFE_STATE = 'Safe state';
 
+/** More stand-ins than this in one day's signals is red (2^n evaluations otherwise). */
+export const MAX_MARGIN_TICKERS = 4;
+
 export interface TickerHealth {
   status: HealthStatus;
   reasons: string[];
@@ -90,15 +93,24 @@ export function forwardDecision(
   }
   if (!day) flag('red', 'no_decision');
 
-  // Decision-margin test for every stand-in the signals read.
+  // Decision-margin test over the stand-ins the signals read, all at once: every corner of their
+  // bands (each close at its low or high end), since two shifts together can flip what one cannot.
   if (day && status !== 'red') {
-    for (const t of signalTickers(strategy)) {
+    const banded = signalTickers(strategy).flatMap((t) => {
       const band = health[t]?.standInBand;
-      if (band === undefined) continue;
-      for (const factor of [1 - band, 1 + band]) {
-        const other = dayOf(strategy, shifted(bars, t, date, factor), date);
+      return band === undefined ? [] : [{ t, band }];
+    });
+    const label = `${banded.map((b) => b.t).join('+')}:decision_margin`;
+    if (banded.length > MAX_MARGIN_TICKERS) flag('red', label);
+    else if (banded.length > 0) {
+      for (let corner = 0; corner < 2 ** banded.length; corner++) {
+        let moved = bars;
+        banded.forEach((b, i) => {
+          moved = shifted(moved, b.t, date, corner & (1 << i) ? 1 + b.band : 1 - b.band);
+        });
+        const other = dayOf(strategy, moved, date);
         if (!other || !sameSignals(day, other)) {
-          flag('red', `${t}:decision_margin`);
+          flag('red', label);
           break;
         }
       }

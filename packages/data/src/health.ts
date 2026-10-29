@@ -46,7 +46,7 @@ export interface StandIn {
    * independent check that passed (two secondaries agreeing, the index, else layer C).
    */
   band: number;
-  basis: 'secondaries_agree' | 'index' | 'layer_c';
+  basis: 'secondaries_agree' | 'index' | 'layer_c' | 'unchecked';
 }
 
 export interface StandInRefusal {
@@ -133,7 +133,8 @@ export function standIns(o: StandInInput): { standIns: StandIn[]; refused: Stand
       continue;
     }
 
-    let basis: StandIn['basis'] = 'layer_c';
+    // No independent check yet: the layer C base tolerance (documented assumption).
+    let basis: StandIn['basis'] = 'unchecked';
     let band: number = TOLERANCE.leverageBase;
     if (valid.length >= 2) {
       basis = 'secondaries_agree';
@@ -150,7 +151,10 @@ export function standIns(o: StandInInput): { standIns: StandIn[]; refused: Stand
           refuse('layer_c');
           continue;
         }
-        if (basis === 'layer_c') band = tol;
+        if (basis === 'unchecked') {
+          basis = 'layer_c';
+          band = tol;
+        }
       }
       const ia = level?.get(before);
       const ib = level?.get(date);

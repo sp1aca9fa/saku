@@ -12,6 +12,7 @@ import {
 import { testDb } from '@saku/db/testing';
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
+import { savePluginInfos } from '../registry';
 import { verify } from './verify';
 
 const sessions = new Sessions({
@@ -169,6 +170,27 @@ describe('verify', () => {
 
   it('grades the cash series freshness on the run date', async () => {
     const { db } = await setup();
+    const runFor = async (to: string) => {
+      const runId = await startRun(db, 'daily');
+      await verify(db, { runId, sessions, mode: 'daily', from: to, to, seriesSessions: sessions });
+      const rows = await db
+        .select()
+        .from(schema.dataHealth)
+        .where(and(eq(schema.dataHealth.runId, runId), isNull(schema.dataHealth.symbolId)));
+      return rows[0]!;
+    };
+    // No series source declares a cash rate: red, never a silent skip.
+    expect((await runFor('2026-01-07')).reasons).toContain('cash:missing@none');
+    await savePluginInfos(db, [
+      {
+        key: 'idx',
+        kind: 'series',
+        name: 'Index',
+        provides: { series: ['IDX', 'DTB3'], cashRates: { USD: 'DTB3' } },
+        suggestedRole: 'primary',
+        termsUrl: 'x',
+      },
+    ]);
     const cash = async (last: number) =>
       storeSeries(db, {
         series: 'DTB3',

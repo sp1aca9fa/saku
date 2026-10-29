@@ -29,7 +29,7 @@ import {
 } from '../jobs/alerts';
 import { anchor } from '../jobs/anchor';
 import { forward, recompute } from '../jobs/forward';
-import { execFileSync } from 'node:child_process';
+import { codeVersion } from '../code-version';
 import { verify } from '../jobs/verify';
 import {
   allInfos,
@@ -133,6 +133,10 @@ try {
   if (plugins.missing.length > 0) log.info(`Not present: ${plugins.missing.join(', ')}`);
   log.info(`${job} for ${target}`, { runId });
 
+  // Before any request: the cash series is checked on this calendar.
+  const checkedSessions =
+    seriesSessions ??
+    fail('No us-fed calendar plug-in is loaded (the cash series is checked on it).');
   let incomplete: string[] = [];
   const markIncomplete = (what: string) => {
     if (!incomplete.includes(what)) incomplete.push(what);
@@ -157,9 +161,7 @@ try {
     runId,
     sessions,
     to: target,
-    seriesSessions:
-      seriesSessions ??
-      fail('No us-fed calendar plug-in is loaded (the cash series is checked on it).'),
+    seriesSessions: checkedSessions,
     ...(job === 'daily'
       ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
       : { mode: 'full' as const }),
@@ -199,9 +201,10 @@ try {
       log.info(`Recomputed ${r.checked} recorded days: ${r.differences.length} new differences`);
       if (r.differences.length > 0) {
         log.warn('The engine decides recorded days differently', { differences: r.differences });
-        const sent = await sendRecomputeDiffers(db, { ...alerting, differences: r.differences });
-        if (sent.failed.length > 0) markIncomplete('alerts');
       }
+      // Every annotated difference not yet told (also those found by `pnpm strategy recompute`).
+      const told = await sendRecomputeDiffers(db, alerting);
+      if (told.failed.length > 0) markIncomplete('alerts');
       const a = await anchor(db, {
         date: target,
         authorities: (process.env.SAKU_TSA_URLS ?? '')
@@ -272,15 +275,6 @@ function summary(r: SourceReport): string {
 
 function fail(message: string): never {
   throw new Error(message);
-}
-
-/** The checked-out commit, named in recompute annotations. */
-function codeVersion(): string {
-  try {
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
-  } catch {
-    return 'unknown';
-  }
 }
 
 /** Pings healthchecks.io after a full success; the missing ping is what raises the alarm. */

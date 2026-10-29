@@ -13,6 +13,7 @@ import {
   type Db,
   alertSent,
   allVersions,
+  annotationsOf,
   deliveryTargets,
   getSetting,
   lastEntry,
@@ -22,7 +23,6 @@ import {
 } from '@saku/db';
 import { desc, eq, isNull } from 'drizzle-orm';
 import type { Logger, Notifier, PluginContext } from '../types';
-import type { RecomputeSummary } from './forward';
 
 export type AlertType =
   | 'state_change'
@@ -38,6 +38,8 @@ export interface Alert {
   key: AlertKey & { type: AlertType };
   /** The allocation the alert tells (kept to detect the next change). */
   allocation?: string;
+  /** Every key the message covers (default: `key`), all recorded once it is delivered. */
+  keys?: (AlertKey & { type: AlertType })[];
   text: string;
 }
 
@@ -198,23 +200,34 @@ export async function sendAdminAlert(
   },
 ): Promise<AlertSummary> {
   const summary: AlertSummary = { sent: 0, failed: [] };
-  if (!(await getSetting(db, 'forward_records_from'))) return summary;
-  const latest = o.health ? undefined : await latestOverallHealth(db);
-  const health = o.health ?? latest?.status ?? 'unknown';
+  const key = { subject: o.subject, date: o.date, type: o.type };
+  await eachAdminChannel(db, o, o.health, async (t, channel, healthLine) => {
+    const text = [...o.lines(t), healthLine].join('\n');
+    await deliver(db, o, channel, { key, text }, summary);
+  });
+  return summary;
+}
+
+/** Every admin channel with its owner's translator and the health line (after the A1 gate). */
+async function eachAdminChannel(
+  db: Db,
+  o: AlertOptions,
+  health: string | undefined,
+  fn: (t: Translate, channel: Target, healthLine: string) => Promise<void>,
+) {
+  if (!(await getSetting(db, 'forward_records_from'))) return;
+  const latest = health ? undefined : await latestOverallHealth(db);
+  const status = health ?? latest?.status ?? 'unknown';
   const admins = await db.select().from(schema.users).where(eq(schema.users.isAdmin, true));
   for (const admin of admins) {
     const t = translator(await languageOf(db, admin.id));
     const healthLine = latest
-      ? `${t(`alerts.health.${health}`)} ${t('alerts.healthDate', { date: latest.date })}`
-      : t(`alerts.health.${health}`);
-    const text = [...o.lines(t), healthLine].join('\n');
+      ? `${t(`alerts.health.${status}`)} ${t('alerts.healthDate', { date: latest.date })}`
+      : t(`alerts.health.${status}`);
     for (const channel of await deliveryTargets(db, admin.id, o.authSecret)) {
-      if (!channel.admin) continue;
-      const key = { subject: o.subject, date: o.date, type: o.type };
-      await deliver(db, o, channel, { key, text }, summary);
+      if (channel.admin) await fn(t, channel, healthLine);
     }
   }
-  return summary;
 }
 
 /** A job that did not finish, once per job and day. */
@@ -266,21 +279,55 @@ export function sendUpdateFailed(
   });
 }
 
-/** The current engine decides recorded days differently (each one is annotated). */
-export function sendRecomputeDiffers(
-  db: Db,
-  o: AlertOptions & { differences: RecomputeSummary['differences'] },
-): Promise<AlertSummary> {
-  const first = o.differences[0]!;
-  return sendAdminAlert(db, {
-    ...o,
-    subject: 'recompute',
-    type: 'recompute_differs',
-    lines: (t) => [
-      t('alerts.recompute.title', { count: o.differences.length }),
-      t('alerts.recompute.body', { ...first }),
-    ],
+/**
+ * Recompute differences not yet told, one message per admin channel. Driven by the annotations
+ * (one alert key each), so an undelivered alert is tried again at the next run.
+ */
+export async function sendRecomputeDiffers(db: Db, o: AlertOptions): Promise<AlertSummary> {
+  const summary: AlertSummary = { sent: 0, failed: [] };
+  const notes: { key: Alert['key']; version: string; date: string; detail: RecomputeDetail }[] = [];
+  for (const v of await allVersions(db)) {
+    for (const a of await annotationsOf(db, v.id, 'recomputed')) {
+      const key = {
+        subject: `recompute:${a.id}`,
+        date: a.date,
+        type: 'recompute_differs' as const,
+      };
+      notes.push({ key, version: v.name, date: a.date, detail: a.detail as RecomputeDetail });
+    }
+  }
+  if (notes.length === 0) return summary;
+  await eachAdminChannel(db, o, undefined, async (t, channel, healthLine) => {
+    const pending = [];
+    for (const n of notes) if (!(await alertSent(db, channel, n.key))) pending.push(n);
+    const first = pending[0];
+    if (!first) return;
+    const text = [
+      t('alerts.recompute.title', { count: pending.length }),
+      t('alerts.recompute.body', {
+        version: first.version,
+        date: first.date,
+        recorded: first.detail.recordedAllocation,
+        now: first.detail.recomputedAllocation,
+        signals: first.detail.signalsDiffer.join(', ') || '-',
+      }),
+      healthLine,
+    ].join('\n');
+    await deliver(
+      db,
+      o,
+      channel,
+      { key: first.key, keys: pending.map((n) => n.key), text },
+      summary,
+    );
   });
+  return summary;
+}
+
+interface RecomputeDetail {
+  recordedAllocation: string;
+  recomputedAllocation: string;
+  signalsDiffer: string[];
 }
 
 async function latestOverallHealth(db: Db) {
@@ -293,10 +340,12 @@ async function latestOverallHealth(db: Db) {
   return row;
 }
 
+type Target = Channel & { target: string | null };
+
 async function deliver(
   db: Db,
   o: AlertOptions,
-  channel: Channel & { target: string | null },
+  channel: Target,
   alert: Alert,
   summary: AlertSummary,
 ) {
@@ -315,7 +364,9 @@ async function deliver(
   const text = alert.text.length > max ? `${alert.text.slice(0, max - 1)}…` : alert.text;
   try {
     await notifier.send(channel.target, text, o.context(notifier, channel.id));
-    await recordAlertSent(db, channel, alert.key, alert.allocation);
+    for (const key of alert.keys ?? [alert.key]) {
+      await recordAlertSent(db, channel, key, alert.allocation);
+    }
     summary.sent++;
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
@@ -358,7 +409,7 @@ export function describeReason(t: Translate, code: string): string {
   } else if ((m = /^missing@(.+)$/.exec(rest))) {
     text = t('alerts.reason.seriesMissing', { source: m[1]! });
   } else if (SIMPLE_REASONS.includes(rest)) text = t(`alerts.reason.${rest}`);
-  else if (!subject && /^[^:@\s]+$/.test(rest)) {
+  else if (!subject && /^\^?[A-Z0-9][A-Z0-9.=?&/-]*$/.test(rest)) {
     return `${rest}: ${t('alerts.reason.notGreen')}`;
   }
   if (text === undefined) return code;

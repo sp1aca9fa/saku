@@ -23,6 +23,34 @@ const decide = (tickers: string[]): StrategyDay[] =>
 const none = () => 0;
 
 describe('backtest', () => {
+  it('an unknown cash rate fails only where cash or financing is needed', () => {
+    const unknown = () => undefined;
+    const x = { X: [bar(D[0]!, 100), bar(D[1]!, 110), bar(D[2]!, 99)] };
+    const held = backtest({
+      strategy: { execution: 'same_close', costs: {} },
+      days: decide(['X', 'X', 'X']),
+      bars: x,
+      cashRate: unknown,
+    });
+    expect(held.points.at(-1)!.equity).toBeCloseTo(0.99, 12);
+    expect(() =>
+      backtest({
+        strategy: { execution: 'same_close', costs: {} },
+        days: decide(['X', 'CASH_USD', 'CASH_USD']),
+        bars: x,
+        cashRate: unknown,
+      }),
+    ).toThrow(/No cash rate/);
+    expect(() =>
+      backtest({
+        strategy: { execution: 'same_close', costs: {} },
+        days: decide(['X?L=3', 'X?L=3', 'X?L=3']),
+        bars: x,
+        cashRate: unknown,
+      }),
+    ).toThrow(/No cash rate/);
+  });
+
   it('same close: holds from the deciding close (testfol timing)', () => {
     const r = backtest({
       strategy: { execution: 'same_close', costs: {} },

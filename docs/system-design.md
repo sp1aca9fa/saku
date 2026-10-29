@@ -188,14 +188,14 @@ A plug-in package's `src/index.ts`: `export const bars: BarSource[] = [...]; exp
 - Each `forward_entries` row stores `payload` (canonical JSON including `prevHash`: the previous entry's hash, or the version's hash for the first entry) and `hash = sha256(payload)`. The columns (allocation, holdings, safe state, data status, equity) repeat the payload for queries; verification checks they match. `strategy_versions`, `forward_entries`, `forward_annotations` and `chain_anchors` are append-only: SQLite triggers refuse updates and deletes.
 - Daily, the chain heads are timestamped by an RFC 3161 timestamp authority (`openssl ts`, no npm dependency; a second authority as fallback) and recorded in `chain_anchors`. Signed git tags are not used: they prove who, not when.
 - `pnpm strategy verify` recomputes every chain and checks the stored text matches the structured columns (timestamp tokens join with the RFC 3161 anchors); status on the admin page and in the MCP later.
-- Each day's entry: the decision at the close with the data health of every dependency (signal tickers and anything the strategy may hold). Yellow: the decision with its reasons. Red, or a stand-in price that could flip a signal within its band (decision-margin test): the declared safe state, recorded as such. Missed days are caught up in order. A stand-in later corrected by the primary adds a `stand_in_corrected` annotation (recorded vs corrected allocation), never an edit.
+- Each day's entry: the decision at the close with the data health of every dependency (signal tickers and anything the strategy may hold). Yellow: the decision with its reasons. Red, or stand-in prices that could flip a signal within their bands (decision-margin test: every corner of the bands of all of the day's stand-ins together, more than 4 is red): the declared safe state, recorded as such. Missed days are caught up in order. A stand-in later corrected by the primary adds a `stand_in_corrected` annotation (recorded vs corrected allocation), never an edit.
 - Every daily run evaluates each recorded day again with the current engine on today's canonical bars (`pnpm strategy recompute` by hand). A different allocation or signal adds a `recomputed` annotation naming the commit, once per distinct result, and an admin alert; the entry is never edited. A difference can come from the engine or from data corrected since; the cause is found before new signals are trusted.
 
 ## 9. Numerics and time
 - Trading dates are `YYYY-MM-DD` strings (America/New_York), never `Date` objects in core logic. Display in the install's time zone.
 - 252-day annualization; float64 analytics (1e-9 relative tolerance); decimal.js money and tax.
 - Near-tie rule: within 1e-9 relative, keep the previous state.
-- Synthetic leverage and USD cash use `asOf(DTB3)` converted to a daily rate; base-currency cash uses the deposit rate setting.
+- Synthetic leverage and USD cash use `asOf` of the series a series plug-in declares as the USD cash rate (`provides.cashRates.USD`; FRED: `DTB3`) converted to a daily rate (unknown stays unknown, never 0%); base-currency cash uses the deposit rate setting.
 
 ## 10. Compute placement
 Library evaluation, robustness sweeps and Monte Carlo run in server jobs (results stored) or in the browser via Web Workers. Server actions only serve light requests.

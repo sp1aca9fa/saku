@@ -10,3 +10,4 @@ export type * from './types';
 export * from './jobs/forward';
 export * from './jobs/anchor';
 export * from './jobs/alerts';
+export * from './jobs/cash';

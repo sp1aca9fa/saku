@@ -152,8 +152,8 @@ describe('vintages', () => {
   it('keeps every published version of a series value, and only new ones', async () => {
     const db = await testDb();
     const points = [
-      { date: '2026-01-02', value: 3.61, publishedAt: '2026-01-05' },
-      { date: '2026-01-02', value: 3.62, publishedAt: '2026-01-07' },
+      { date: '2026-01-02', value: 3.61, publishedAt: '2026-01-05T23:00:00Z' },
+      { date: '2026-01-02', value: 3.62, publishedAt: '2026-01-07T18:00:00-05:00' },
     ];
     expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't1' })).toBe(2);
     expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't2' })).toBe(0);
@@ -161,6 +161,16 @@ describe('vintages', () => {
     const pit = await seriesPointInTime(db, 'S', 'x');
     expect(pit.asOf('2026-01-02', '2026-01-06')!.value).toBe(3.61);
     expect(pit.asOf('2026-01-02', '2026-01-08')!.value).toBe(3.62);
+    // Stored as UTC text, so string comparison is time comparison.
+    expect(pit.asOf('2026-01-02', '2026-01-07T22:59:00.000Z')!.value).toBe(3.61);
+  });
+
+  it('refuses a publication date without a time of day (it would read as midnight)', async () => {
+    const db = await testDb();
+    const points = [{ date: '2026-01-02', value: 3.61, publishedAt: '2026-01-05' }];
+    await expect(
+      storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't1' }),
+    ).rejects.toThrow(/time of day/);
   });
 
   it('without a publication time, a changed value is a new row known from its fetch', async () => {

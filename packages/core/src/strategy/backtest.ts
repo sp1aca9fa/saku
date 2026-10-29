@@ -27,8 +27,11 @@ export interface BacktestInput {
   days: StrategyDay[];
   /** Bars of every holding's base ticker, sorted by date. */
   bars: Record<string, RawBar[]>;
-  /** USD cash rate in percent a year, as known before the date's session (point in time). */
-  cashRate: (date: TradingDate) => number;
+  /**
+   * USD cash rate in percent a year, as known before the date's session (point in time).
+   * Undefined when unknown: the backtest then fails only where cash or financing is needed.
+   */
+  cashRate: (date: TradingDate) => number | undefined;
 }
 
 export interface EquityPoint {
@@ -83,13 +86,19 @@ export function backtest(input: BacktestInput): BacktestResult {
     return [list[i - 1]!, list[i]!];
   };
   const holdingReturn = (ticker: string, date: TradingDate, segment: Segment): number => {
-    const cashDay = input.cashRate(date) / 100 / 252;
+    const cashDay = () => {
+      const rate = input.cashRate(date);
+      if (rate === undefined) throw new Error(`No cash rate known for ${date}.`);
+      return rate / 100 / 252;
+    };
     const financed = segment !== 'intraday';
-    if (ticker === CASH_USD) return financed ? cashDay : 0;
+    if (ticker === CASH_USD) return financed ? cashDay() : 0;
     const t = parseTicker(ticker);
     const [prev, bar] = barAt(t.base, date);
     const r = t.leverage * assetReturn(prev, bar, segment, t.base);
-    return financed ? r - (t.leverage - 1) * cashDay - t.expensePct / 100 / 252 : r;
+    if (!financed) return r;
+    const financing = t.leverage === 1 ? 0 : (t.leverage - 1) * cashDay();
+    return r - financing - t.expensePct / 100 / 252;
   };
 
   let equity = 1;

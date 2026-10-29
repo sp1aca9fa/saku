@@ -106,6 +106,29 @@ describe('forwardDecision', () => {
     expect(far).toMatchObject({ dataStatus: 'yellow', allocation: 'Risk on' });
   });
 
+  it('decision margin: shifts every stand-in together, not one at a time', () => {
+    const pair = Strategy.parse({
+      ...strategy,
+      signals: [
+        {
+          id: 'A',
+          type: 'compare',
+          left: { indicator: 'price', ticker: 'X' },
+          op: '>',
+          right: { indicator: 'price', ticker: 'Y' },
+        },
+      ],
+    });
+    const standIn = { status: 'yellow' as const, reasons: ['stand_in@s'], standInBand: 0.003 };
+    // 100.5 vs 100: neither 0.3% shift alone flips it (100.2 > 100, 100.5 > 100.3); both do.
+    const input = { X: bars([100, 100, 100, 100.5]), Y: bars([100, 100, 100, 100]) };
+    const one = forwardDecision(pair, D, input, { X: standIn, Y: green, X3: green });
+    expect(one).toMatchObject({ dataStatus: 'yellow', allocation: 'Risk on' });
+    const both = forwardDecision(pair, D, input, { X: standIn, Y: standIn, X3: green });
+    expect(both).toMatchObject({ dataStatus: 'red', safeStateApplied: true });
+    expect(both.reasons).toContain('X+Y:decision_margin');
+  });
+
   it('red when the day cannot be evaluated (no bar that day)', () => {
     const d = forwardDecision(
       strategy,

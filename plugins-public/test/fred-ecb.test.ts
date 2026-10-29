@@ -9,9 +9,10 @@ describe('FRED', () => {
   it('keeps every vintage and leaves out missing values', async () => {
     const ctx = fixtureContext(() => fixture('fred-dtb3.json'), { apiKey: 'abc' });
     expect(await fredSeries.fetchSeries('DTB3', '2026-01-01', '2026-01-06', ctx)).toEqual([
-      { date: '2026-01-02', value: 3.61, publishedAt: '2026-01-05' },
-      { date: '2026-01-02', value: 3.62, publishedAt: '2026-01-07' },
-      { date: '2026-01-05', value: 3.6, publishedAt: '2026-01-06' },
+      // The vintage day at 18:00 New York (EST: 23:00 UTC), never its midnight.
+      { date: '2026-01-02', value: 3.61, publishedAt: '2026-01-05T23:00:00.000Z' },
+      { date: '2026-01-02', value: 3.62, publishedAt: '2026-01-07T23:00:00.000Z' },
+      { date: '2026-01-05', value: 3.6, publishedAt: '2026-01-06T23:00:00.000Z' },
     ]);
     const url = new URL(ctx.requested[0]!);
     expect(url.searchParams.get('series_id')).toBe('DTB3');
@@ -26,7 +27,7 @@ describe('FRED', () => {
       pair: 'USDJPY',
       date: '2026-01-02',
       rate: 3.61,
-      publishedAt: '2026-01-05',
+      publishedAt: '2026-01-05T23:00:00.000Z',
     });
     await expect(fredFx.fetchRates('USDXXX', '2026-01-01', '2026-01-06', ctx)).rejects.toThrow();
   });

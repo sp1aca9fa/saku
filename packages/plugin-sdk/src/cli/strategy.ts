@@ -45,6 +45,7 @@ import { createInterface } from 'node:readline/promises';
 import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA, verifyToken } from '../jobs/anchor';
 import { recompute } from '../jobs/forward';
+import { codeVersion } from '../code-version';
 import { loadPlugins, notifierContexts } from '../registry';
 import { assertServerOnly } from '../server-only';
 
@@ -145,10 +146,11 @@ if (tool === 'strategy' && command === 'check') {
   }
   process.exit(bad ? 1 : 0);
 } else if (tool === 'strategy' && command === 'recompute') {
-  const r = await recompute(db, { runId: null, code: 'cli' });
+  const r = await recompute(db, { runId: null, code: codeVersion() });
   for (const d of r.differences) {
     console.log(`${d.version} ${d.date}: recorded ${d.recorded}, now ${d.now} (annotated)`);
   }
+  if (r.differences.length) console.log('The next daily run alerts the admins.');
   console.log(`${r.checked} recorded days, ${r.differences.length} new differences.`);
   process.exit(r.differences.length ? 1 : 0);
 } else if (tool === 'journal' && command === 'add') {
@@ -159,6 +161,7 @@ if (tool === 'strategy' && command === 'check') {
     fail('The action is done, skipped or delayed.');
   }
   const date = flag('date');
+  if (date !== undefined && !isTradingDate(date)) fail('--date is a date like 2026-10-28.');
   const note = flag('note');
   await addJournalEntry(db, await userId(), {
     versionId: versionId!,

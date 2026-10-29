@@ -37,10 +37,12 @@ const input = (o: Partial<StandInInput>): StandInInput => ({
 });
 
 describe('standIns', () => {
-  it('takes a valid secondary bar for a missing primary day, with the layer C band', () => {
+  it('takes a valid secondary bar for a missing primary day, with the base band if unchecked', () => {
     const r = standIns(input({ secondaries: [['s1', series([100, 101, 102])]] }));
     expect(r.refused).toEqual([]);
-    expect(r.standIns).toMatchObject([{ date: D[2], source: 's1', basis: 'layer_c', band: 0.005 }]);
+    expect(r.standIns).toMatchObject([
+      { date: D[2], source: 's1', basis: 'unchecked', band: 0.005 },
+    ]);
     expect(r.standIns[0]!.bar.close).toBe(102);
   });
 
@@ -81,7 +83,7 @@ describe('standIns', () => {
         ],
       }),
     );
-    expect(r.standIns).toMatchObject([{ source: 's2', basis: 'layer_c' }]);
+    expect(r.standIns).toMatchObject([{ source: 's2', basis: 'unchecked' }]);
   });
 
   it('allows two stand-in days in a row; the third and later are refused', () => {

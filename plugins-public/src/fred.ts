@@ -1,7 +1,7 @@
 // FRED, Federal Reserve Bank of St. Louis (official API): rates and index levels, and the H.10
 // exchange rates as a secondary FX source. Every vintage is fetched (ALFRED real-time periods),
 // so a past run's view can be reproduced. https://fred.stlouisfed.org/docs/api/fred/
-import { isTradingDate } from '@saku/core';
+import { isTradingDate, zonedInstant } from '@saku/core';
 import type {
   FxRate,
   FxSource,
@@ -58,8 +58,13 @@ async function observations(id: string, from: string, to: string, ctx: PluginCon
       if (o.value === '.') continue;
       const value = Number(o.value);
       if (!Number.isFinite(value)) throw new Error(`FRED ${id}: unreadable value "${o.value}"`);
-      // The vintage date: the value was known from that day (FRED gives no time of day).
-      out.push({ date: o.date, value, publishedAt: o.realtime_start });
+      // The vintage date gives no time of day. Assumption: known from 18:00 New York that day
+      // (the H.15 and H.10 releases come out in the afternoon), never from midnight.
+      out.push({
+        date: o.date,
+        value,
+        publishedAt: zonedInstant(o.realtime_start, '18:00', 'America/New_York'),
+      });
     }
     if (offset + PAGE >= page.count) return out;
   }
@@ -69,7 +74,8 @@ export const fredSeries: SeriesSource = {
   info: {
     ...common,
     kind: 'series',
-    provides: { series: ['DTB3', 'SP500'] },
+    // DTB3: the 3-month Treasury bill, secondary market rate (USD cash and financing).
+    provides: { series: ['DTB3', 'SP500'], cashRates: { USD: 'DTB3' } },
     suggestedRole: 'primary',
     // S&P Dow Jones Indices' copyright: personal use only (docs/data-spike.md).
     noAiItems: ['SP500'],

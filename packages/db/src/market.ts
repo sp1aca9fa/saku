@@ -277,6 +277,18 @@ function newVintages<T extends { date: string; publishedAt: string | null; fetch
   });
 }
 
+/**
+ * A publication time as UTC ISO text, so `known_at` values compare correctly as strings. A date
+ * without a time is refused: read as midnight it would make a value known hours early.
+ */
+function instant(text: string): string {
+  const ms = Date.parse(text);
+  if (!/T\d{2}:\d{2}/.test(text) || Number.isNaN(ms)) {
+    throw new Error(`publishedAt must be an instant with a time of day, not "${text}"`);
+  }
+  return new Date(ms).toISOString();
+}
+
 export async function storeSeries(
   db: Db,
   input: { series: string; source: string; points: SeriesPoint[]; fetchedAt: string },
@@ -297,7 +309,7 @@ export async function storeSeries(
       value: p.value,
       publishedAt: p.publishedAt ?? null,
       fetchedAt: input.fetchedAt,
-      knownAt: p.publishedAt ?? input.fetchedAt,
+      knownAt: p.publishedAt ? instant(p.publishedAt) : input.fetchedAt,
     })),
     (a, b) => a.value === b.value,
   );
@@ -337,7 +349,7 @@ export async function storeFx(
         rate: r.rate,
         publishedAt: r.publishedAt ?? null,
         fetchedAt: input.fetchedAt,
-        knownAt: r.publishedAt ?? input.fetchedAt,
+        knownAt: r.publishedAt ? instant(r.publishedAt) : input.fetchedAt,
       })),
       (a, b) => a.rate === b.rate,
     );

@@ -10,6 +10,8 @@ import {
   type TradingDate,
   backtest,
   dependencies,
+  canonicalJson,
+  evaluate,
   forwardDecision,
   NEAR_TIE,
   zonedInstant,
@@ -28,15 +30,12 @@ import {
   getSetting,
   lastEntry,
   latestHealth,
-  schema,
   seriesPointInTime,
+  sha256,
   standInOn,
 } from '@saku/db';
+import { cashSeries } from './cash';
 import type { VerifySummary } from './verify';
-import { asc, eq } from 'drizzle-orm';
-
-/** The USD cash rate series (FRED 3-month T-bill, percent a year). */
-export const CASH_SERIES = 'DTB3';
 
 export interface ForwardOptions {
   runId: string;
@@ -72,15 +71,12 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   if (!from) return { ...summary, skipped: 'forward records not started (forward_records_from)' };
 
   const { symbolIds, loadRows, barsOf } = await reader(db);
-  const [seriesRole] = await db
-    .select()
-    .from(schema.sourceRoles)
-    .where(eq(schema.sourceRoles.dataKind, 'series'))
-    .orderBy(asc(schema.sourceRoles.position));
-  const cash = seriesRole ? await seriesPointInTime(db, CASH_SERIES, seriesRole.pluginKey) : null;
-  // Known before the session opens (no look-ahead).
+  const source = await cashSeries(db);
+  const cash = source ? await seriesPointInTime(db, source.series, source.source) : null;
+  // Known before the session opens (no look-ahead). Unknown stays unknown: the equity of a day
+  // that needs it is then null, never computed with a guessed 0%.
   const cashRate = (date: TradingDate) =>
-    cash?.asOf(date, zonedInstant(date, '09:30', 'America/New_York'))?.value ?? 0;
+    cash?.asOf(date, zonedInstant(date, '09:30', 'America/New_York'))?.value;
 
   /** Each ticker's grade on the date: the canonical bar's status (set by every verify run). */
   const healthOn = async (rows: Rows, date: TradingDate) => {
@@ -209,9 +205,11 @@ export interface RecomputeSummary {
 
 /**
  * Requirements A2: the current engine must reproduce every recorded decision, or the difference
- * is annotated. Each recorded day is evaluated again on today's canonical bars, with the health
- * graded then (a difference can come from the engine or from data corrected since; the
- * annotation names the code version). Signals compare exactly, numbers within the near-tie rule.
+ * is annotated. Each version is evaluated once over today's canonical bars (the engine is causal,
+ * so each recorded day reads only bars up to that day), and only the engine's output is compared:
+ * health was graded and recorded then. A difference can come from the engine or from data
+ * corrected since; the annotation names the code version. Skipped: safe-state days that recorded
+ * no signals (nothing to reproduce) and days a corrected stand-in already explains.
  */
 export async function recompute(
   db: Db,
@@ -220,27 +218,38 @@ export async function recompute(
   const summary: RecomputeSummary = { checked: 0, differences: [] };
   const { loadRows, barsOf } = await reader(db);
   for (const version of await allVersions(db)) {
+    const record = await forwardRecord(db, version.id);
+    if (record.length === 0) continue;
     const strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
     const deps = dependencies(strategy);
+    let days: Map<TradingDate, StrategyDay>;
+    try {
+      const bars = barsOf(await loadRows(deps, record.at(-1)!.date));
+      days = new Map(evaluate(strategy, bars).map((d) => [d.date, d]));
+    } catch {
+      days = new Map();
+    }
     const seen = new Set(
       (await annotationsOf(db, version.id, 'recomputed')).map((a) => `${a.date} ${a.fingerprint}`),
     );
-    for (const e of await forwardRecord(db, version.id)) {
+    const explained = new Set(
+      (await annotationsOf(db, version.id, 'stand_in_corrected')).map((a) => a.date),
+    );
+    for (const e of record) {
       const recorded = JSON.parse(e.payload) as {
         signals?: Record<string, boolean | number> | null;
       };
-      const now = forwardDecision(
-        strategy,
-        e.date,
-        barsOf(await loadRows(deps, e.date)),
-        allGreen(deps),
-      );
+      if (e.safeStateApplied && !recorded.signals) continue;
+      if (explained.has(e.date)) continue;
       summary.checked++;
-      const signals = signalsDiffer(recorded.signals ?? null, now.signals);
+      const now = days.get(e.date);
+      const signals = signalsDiffer(recorded.signals ?? null, now?.signals ?? null);
+      const nowAllocation = now?.allocation ?? 'no decision';
       // A safe-state day records the normal allocation's signals but not its name.
-      const allocationDiffers = !e.safeStateApplied && now.allocation !== e.allocation;
+      const allocationDiffers = !e.safeStateApplied && nowAllocation !== e.allocation;
       if (!allocationDiffers && signals.length === 0) continue;
-      const fingerprint = `${now.allocation}|${signals.join(',')}`;
+      const values = Object.fromEntries(signals.map((id) => [id, now?.signals[id] ?? null]));
+      const fingerprint = sha256(canonicalJson({ allocation: nowAllocation, values })).slice(0, 16);
       if (seen.has(`${e.date} ${fingerprint}`)) continue;
       await annotate(db, {
         versionId: version.id,
@@ -250,7 +259,7 @@ export async function recompute(
           code: o.code,
           fingerprint,
           recordedAllocation: e.allocation,
-          recomputedAllocation: now.allocation,
+          recomputedAllocation: nowAllocation,
           signalsDiffer: signals,
         },
         runId: o.runId,
@@ -259,7 +268,7 @@ export async function recompute(
         version: version.name,
         date: e.date,
         recorded: e.allocation,
-        now: now.allocation,
+        now: nowAllocation,
       });
     }
   }
@@ -289,7 +298,7 @@ async function forwardEquity(
   version: Version,
   strategy: Strategy,
   bars: Record<string, RawBar[]>,
-  cashRate: (date: TradingDate) => number,
+  cashRate: (date: TradingDate) => number | undefined,
   today: StrategyDay,
 ): Promise<number | null> {
   const days: StrategyDay[] = (await forwardRecord(db, version.id)).map((e) => ({
