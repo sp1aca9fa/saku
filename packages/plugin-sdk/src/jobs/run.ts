@@ -23,6 +23,7 @@ import {
   sendDataHealthAdmin,
   sendIntegrityFailed,
   sendJobFailure,
+  sendParityFailed,
   sendRecomputeDiffers,
   sendRevisions,
   sendStrategyAlerts,
@@ -31,6 +32,7 @@ import { anchor } from './anchor';
 import { forward, recompute } from './forward';
 import { DAILY_OVERLAP, ingest, type SourceReport } from './ingest';
 import { integrity } from './integrity';
+import { parity } from './parity';
 import { storeRunChecks, verify } from './verify';
 
 export interface RunOptions {
@@ -48,6 +50,8 @@ export interface RunOptions {
   tsa: { authorities: string[]; caFile?: string };
   /** The checked-out commit (named in recompute annotations). */
   code: string;
+  /** The testfol parity cases (`plugins/test/testfol`); missing or empty: none run. */
+  parityDir?: string;
   /** Before the weekly refetch rewrites stored history (the backup); a throw fails the run. */
   beforeRefetch?: () => Promise<void>;
   /** After the steps of a daily run, complete or not (the backup); a throw fails the run. */
@@ -215,7 +219,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       }
     }
     if (job === 'weekly' || job === 'checks') {
-      // Layer E on the stored data: core vs reference, incremental vs full.
+      // Layer E on the stored data: core vs reference, incremental vs full, testfol parity.
       const results = await integrity(db, { to: target });
       await storeRunChecks(db, runId, results);
       for (const r of results) {
@@ -226,6 +230,21 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
           ...alerting,
           check: r.check,
           versionId: r.versionId,
+          detail: r.message ?? '',
+        });
+        if (sent.failed.length > 0) markIncomplete('alerts');
+      }
+      // External golden values: the testfol cases the owner exported (requirements 13).
+      const cases = await parity(db, { dir: o.parityDir, to: target });
+      if (cases.length === 0) log.info('testfol parity: no cases (none exported yet)');
+      await storeRunChecks(db, runId, cases);
+      for (const r of cases) {
+        log.info(`Layer E ${r.check}: ${r.status}`, { message: r.message });
+        if (r.status === 'green') continue;
+        failures.push(`${r.check} failed: ${r.message ?? ''}`);
+        const sent = await sendParityFailed(db, {
+          ...alerting,
+          caseName: r.caseName,
           detail: r.message ?? '',
         });
         if (sent.failed.length > 0) markIncomplete('alerts');

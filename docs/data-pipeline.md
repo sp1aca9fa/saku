@@ -121,7 +121,7 @@ Open (owner decision): a strategy's grade reads only the target day's bars. When
 - **`pnpm verify`** (any time, no fetching; `pnpm checks` is the same): layers A-C over the full history and layer E.
 - **Layer E** (`jobs/integrity.ts`), for each registered version over today's canonical bars of what it reads: core vs the reference implementation (same days, signals and allocations; equity within 1e-9 relative), and incremental vs full (the latest 20 decision days and one every 250 back, each decided and valued from the bars up to that day only, against the full pass: no look-ahead and no state that depends on later data). Stored as layer E check results (summary per check, red ones in full); a red one fails the run and alerts the admins.
 - Series and FX values a refetch changes are kept as new vintages (point in time, never overwritten) and counted per source in the run log; the summary to the admins covers bars.
-- testfol parity joins `pnpm verify` when its cases exist (`plugins/test/testfol/`).
+- **testfol parity** (`jobs/parity.ts`, layer E check `testfol_parity`): each case in `plugins/test/testfol/<case>/case.json` is backtested on the stored canonical bars (`same_close`, decisions from the whole stored history up to `to`, the curve from the first decision day on or after `from`) and its CAGR, max drawdown and switches compared with testfol's within the requirements' tolerances. One result per case, stored and alerted like the other layer E results; no cases folder means no results (a log line). Case format, tolerances and known differences: `docs/parity.md`.
 
 ## Attribution
 

@@ -333,6 +333,22 @@ export function sendIntegrityFailed(
   });
 }
 
+/** A testfol parity case outside a tolerance or unable to run (layer E, requirements 13). */
+export function sendParityFailed(
+  db: Db,
+  o: AlertOptions & { caseName: string; detail: string },
+): Promise<AlertSummary> {
+  return sendAdminAlert(db, {
+    ...o,
+    subject: `parity:${o.caseName}`,
+    type: 'integrity',
+    lines: (t) => [
+      t('alerts.parity.title', { name: o.caseName }),
+      t('alerts.parity.body', { detail: o.detail.slice(0, 500) }),
+    ],
+  });
+}
+
 /**
  * Recompute differences not yet told, one message per admin channel. Driven by the annotations
  * (one alert key each), so an undelivered alert is tried again at the next run.

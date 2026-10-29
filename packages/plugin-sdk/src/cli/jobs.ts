@@ -6,15 +6,17 @@
 //   pnpm daily --force     run again for the latest final day
 //   pnpm weekly            full-history refetch (revisions reported), checks, recompute, layer E
 //   pnpm verify            layers A-C over the full history and layer E (core vs reference,
-//                          incremental vs full) on the stored data, no fetching
+//                          incremental vs full, testfol parity cases in plugins/test/testfol)
+//                          on the stored data, no fetching
 //   pnpm checks            the same as pnpm verify (its A1 name)
 //   pnpm probe             A1: the last sessions of one ticker from every bar source, to a log
 //   pnpm spike             A1: the gate, day by day, from the daily runs
 import { Sessions } from '@saku/data';
 import { tradingDateOf } from '@saku/core';
+import { join } from 'node:path';
 import { activeSymbols, createDb } from '@saku/db';
 import { backupDatabase, backupDir, localDay, pruneBackups } from '@saku/db/backup';
-import { dbConfigFromEnv, loadRootEnv } from '@saku/db/env';
+import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { codeVersion } from '../code-version';
 import { PoliteHttp } from '../http';
@@ -113,6 +115,7 @@ try {
       ...(process.env.SAKU_TSA_CAFILE?.trim() && { caFile: process.env.SAKU_TSA_CAFILE.trim() }),
     },
     code: codeVersion(),
+    parityDir: join(findRepoRoot(), 'plugins', 'test', 'testfol'),
     beforeRefetch: backup,
     afterDaily: backup,
     onComplete: async () => {

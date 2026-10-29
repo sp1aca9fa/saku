@@ -80,6 +80,10 @@
       "title": "Saku: a calculation check failed ({check})",
       "body": "{detail}. The two calculations must agree; find the cause before trusting new signals."
     },
+    "parity": {
+      "title": "Saku: a testfol parity case failed ({name})",
+      "body": "{detail}. Saku's backtest must match testfol's within the documented tolerances; find the cause and record it in docs/parity.md before trusting backtests. Tolerances are never widened to pass."
+    },
     "healthDate": "(As of the last check, {date}.)"
   }
 }
