@@ -66,9 +66,23 @@ async function setup() {
     status: HealthStatus,
     reasons: string[],
   ) => db.insert(schema.dataHealth).values({ runId, date, symbolId: symbol, status, reasons });
-  /** A full-history pass that found every date up to `graded` green: the overall rows only. */
-  const full = async (jobType: JobType, target: string, graded = target) => {
+  /**
+   * A full-history pass that found every date up to `graded` green: the overall rows, and each
+   * symbol's graded range (from `cover[id]`, default the first date; none for `cover[id] = null`).
+   */
+  const full = async (
+    jobType: JobType,
+    target: string,
+    graded = target,
+    cover: Record<number, string | null> = {},
+  ) => {
     const id = await run(db, jobType, target);
+    for (const [symbol, from] of Object.values(ids).map((x) => [x, cover[x] ?? D[0]] as const)) {
+      if (cover[symbol] === null) continue;
+      await db
+        .insert(schema.healthCoverage)
+        .values({ runId: id, symbolId: symbol, fromDate: from, toDate: graded });
+    }
     for (const date of D.filter((d) => d <= graded)) await health(id, date, null, 'green', []);
     return id;
   };
@@ -161,13 +175,18 @@ describe('healthReport', () => {
     expect(inside).toMatchObject({ overall: { status: 'green' }, green: true });
   });
 
+  it('a run that failed before storing anything does not hide an older red', async () => {
+    const { db, daily } = await setup();
+    const red = await daily(D[3], { [D[3]]: 'red' });
+    await run(db, 'weekly', D[3], { error: 'Error: no primary bar source' });
+    await run(db, 'daily', D[3], { error: 'Error: database is locked' });
+    const [day] = await healthReport(db, { dates: [D[3]], sessions });
+    expect(day).toMatchObject({ overall: { status: 'red' }, green: false, run: { id: red } });
+  });
+
   it('a full-history run without the overall row is not graded, even with summaries', async () => {
     const { db, daily } = await setup();
     await daily(D[3]);
-    // It failed before grading: no rows at all.
-    await run(db, 'weekly', D[3], { error: 'Error: no primary bar source' });
-    const [day] = await healthReport(db, { dates: [D[3]], sessions });
-    expect(day).toMatchObject({ overall: { status: 'not_graded' }, green: false });
     // Its checks ran (a summary) but it graded no day (no primary bars): still not graded.
     const id = await run(db, 'checks', D[3]);
     await db
@@ -218,7 +237,7 @@ describe('healthReport', () => {
     const { db, ids, full } = await setup();
     await db.delete(schema.bars).where(eq(schema.bars.symbolId, ids.BBB));
     await db.insert(schema.bars).values({ symbolId: ids.BBB, date: D[3], close: 1, source: 'p' });
-    await full('weekly', D[3]);
+    await full('weekly', D[3], D[3], { [ids.BBB]: D[3] });
     const [day] = await healthReport(db, { dates: [D[1]], sessions });
     expect(day!.green).toBe(true);
     await db
@@ -239,6 +258,61 @@ describe('healthReport', () => {
     expect(day!.overall.status).toBe('green');
     expect(day!.symbols.map((s) => `${s.ticker} ${s.grade.status}`)).toEqual(['CCC not_graded']);
     expect(day!.green).toBe(false);
+  });
+
+  it('a symbol the full-history run did not grade is not graded (added later, or an old run)', async () => {
+    const { db, ids, full } = await setup();
+    await full('weekly', D[3], D[3], { [ids.BBB]: null });
+    // Added with its history after the run: canonical bars, but no range in that run.
+    await upsertSymbols(db, [{ ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    const ccc = (await symbolId(db, 'CCC'))!;
+    await db
+      .insert(schema.bars)
+      .values(D.map((date) => ({ symbolId: ccc, date, close: 1, source: 'p' })));
+    const [day] = await healthReport(db, { dates: [D[2]], sessions });
+    expect(day!.overall.status).toBe('green');
+    // BBB: no range in that run (as in a run from before the coverage was stored).
+    expect(day!.symbols.map((s) => `${s.ticker} ${s.grade.status}`)).toEqual([
+      'BBB not_graded',
+      'CCC not_graded',
+    ]);
+    expect(day!.green).toBe(false);
+  });
+
+  it('a symbol is green from a full-history run only inside its graded range', async () => {
+    const { db, ids, full } = await setup();
+    await full('weekly', D[3], D[3], { [ids.BBB]: D[2] });
+    const [d1, d2] = await healthReport(db, { dates: [D[1], D[2]], sessions });
+    expect(d1!.symbols).toEqual([{ ticker: 'BBB', grade: { status: 'not_graded', reasons: [] } }]);
+    expect(d2!.green).toBe(true);
+  });
+
+  it("a cash-red day stays red after a later run that did not grade that day's cash rate", async () => {
+    const { db, ids, health } = await setup();
+    const store = async (runId: string, date: string, status: HealthStatus, reasons: string[]) => {
+      await health(runId, date, ids.AAA, 'green', []);
+      await health(runId, date, ids.BBB, 'green', []);
+      await health(runId, date, null, status, reasons);
+    };
+    // Each run grades the cash rate on its own date only.
+    const stale = await run(db, 'daily', D[1]);
+    await store(stale, D[0], 'green', []);
+    await store(stale, D[1], 'yellow', ['DTB3:stale(3)@fred']);
+    const first = await run(db, 'daily', D[2]);
+    for (const d of [D[0], D[1]]) await store(first, d, 'green', []);
+    await store(first, D[2], 'red', ['DTB3:missing@fred']);
+    const next = await run(db, 'daily', D[3]);
+    for (const d of D) await store(next, d, 'green', []);
+    const [d0, d1, d2, d3] = await healthReport(db, { dates: [...D], sessions });
+    expect(d2).toMatchObject({
+      overall: { status: 'red', reasons: ['DTB3:missing@fred'] },
+      green: false,
+      run: { id: next },
+    });
+    // A stale rate keeps its own grade (3 business days behind: yellow).
+    expect(d1!.overall).toEqual({ status: 'yellow', reasons: ['DTB3:stale(3)@fred'] });
+    expect(d0!.green).toBe(true);
+    expect(d3!.green).toBe(true);
   });
 
   it('a run still going does not count; the header sees it', async () => {
@@ -308,7 +382,7 @@ describe('healthReport on what verify stores', () => {
     ]);
 
     // The secondary corrects its close (a revision); the weekly pass stores only green overall
-    // rows (no symbol row).
+    // rows (no symbol row) and AAA's graded range.
     await store('s', closes);
     const weekly = await run(db, 'weekly', D[3], { finished: false });
     await verify(db, { runId: weekly, sessions, mode: 'full', to: D[3] });
@@ -320,7 +394,65 @@ describe('healthReport on what verify stores', () => {
     expect(rows.map((r) => `${r.date} ${r.symbolId} ${r.status}`)).toEqual(
       D.map((d) => `${d} null green`),
     );
+    const coverage = await db
+      .select()
+      .from(schema.healthCoverage)
+      .where(eq(schema.healthCoverage.runId, weekly));
+    expect(coverage).toEqual([
+      { runId: weekly, symbolId: (await symbolId(db, 'AAA'))!, fromDate: D[0], toDate: D[3] },
+    ]);
     const second = await healthReport(db, { dates: [...D], sessions });
     expect(second.every((d) => d.green && d.run?.id === weekly)).toBe(true);
+  });
+
+  it('a symbol with canonical bars but no primary bar is red primary_missing, not left out', async () => {
+    const db = await testDb();
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
+      { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' },
+    ]);
+    await seedSourceRoles(db, [
+      { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },
+      { key: 's', dataKind: 'bars', suggestedRole: 'secondary' },
+    ]);
+    const aaa = (await symbolId(db, 'AAA'))!;
+    const bbb = (await symbolId(db, 'BBB'))!;
+    for (const source of ['p', 's']) {
+      await storeRawBars(db, {
+        symbolId: aaa,
+        source,
+        bars: closes.map((c, i) => bar(D[i]!, c)),
+        runId: null,
+        fetchedAt: 't',
+      });
+    }
+    // BBB's canonical history came from an earlier primary; the current one has none of it.
+    await db
+      .insert(schema.bars)
+      .values(D.slice(1).map((date) => ({ symbolId: bbb, date, close: 1, source: 'old' })));
+    await storeRawBars(db, {
+      symbolId: bbb,
+      source: 's',
+      bars: closes.map((c, i) => bar(D[i]!, c)),
+      runId: null,
+      fetchedAt: 't',
+    });
+    const weekly = await run(db, 'weekly', D[3], { finished: false });
+    await verify(db, { runId: weekly, sessions, mode: 'full', to: D[3] });
+    await finishRun(db, weekly, { ok: true, datesProcessed: [D[3]] });
+    const report = await healthReport(db, { dates: [...D], sessions });
+    // From its first canonical bar on: red, and the day overall with it.
+    expect(report[0]!.green).toBe(true);
+    for (const day of report.slice(1)) {
+      expect(day.overall).toEqual({ status: 'red', reasons: ['BBB'] });
+      expect(day.symbols).toEqual([
+        { ticker: 'BBB', grade: { status: 'red', reasons: ['primary_missing'] } },
+      ]);
+    }
+    const coverage = await db
+      .select()
+      .from(schema.healthCoverage)
+      .where(eq(schema.healthCoverage.symbolId, bbb));
+    expect(coverage).toMatchObject([{ fromDate: D[1], toDate: D[3] }]);
   });
 });

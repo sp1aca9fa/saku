@@ -30,8 +30,12 @@ export function seriesHealth(
 ): { status: HealthStatus; behind: number } {
   if (lastObservation === undefined) return { status: 'red', behind: Infinity };
   const behind = sessions.between(lastObservation, date).filter((d) => d > lastObservation).length;
-  const status = behind <= 1 ? 'green' : behind <= MAX_STALE_DAYS ? 'yellow' : 'red';
-  return { status, behind };
+  return { status: freshnessStatus(behind), behind };
+}
+
+/** The grade of a series `behind` business days behind (Infinity: no value at all). */
+export function freshnessStatus(behind: number): HealthStatus {
+  return behind <= 1 ? 'green' : behind <= MAX_STALE_DAYS ? 'yellow' : 'red';
 }
 
 /** At most this many stand-in days in a row per ticker; the next one is red (04). */

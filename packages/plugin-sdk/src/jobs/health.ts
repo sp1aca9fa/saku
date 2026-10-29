@@ -3,28 +3,36 @@
 // date graded it. Read-only.
 //
 // Which run decides a date (docs/data-pipeline.md "Data health"; what `verify` stores):
-// - Only finished runs that name their target (`dates_processed[0]`) count; a run still going
-//   (or interrupted) has not stored all its rows, and its window is not known.
+// - Only finished runs that name their target (`dates_processed[0]`) and stored something (a
+//   health row, a check result or a summary) count: a run still going has not stored all its
+//   rows and its window is not known; a run that failed before storing anything graded nothing
+//   and does not blank older grades.
 // - A daily run covers `DAILY_OVERLAP` sessions before its target through the target, and stores
 //   every row there: a stored row is the grade, no row is "not graded".
 // - A bootstrap, weekly or checks run (full history) covers every date up to its target. It stores
-//   the overall row of every date it graded (green included) and only the non-green symbol rows:
-//   no overall row is "not graded"; with the overall row, a missing symbol row is green, unless a
-//   non-green check result of that run for that symbol and day lacks its row (then verify did not
-//   grade the symbol). Verify stores the overall rows after every symbol row, so an overall row
-//   means the symbol rows were all stored. Full runs from before verify stored green overall rows
-//   read as "not graded" until the next one.
+//   the overall row of every date it graded (green included), only the non-green symbol rows, and
+//   each symbol's graded range (`health_coverage`): no overall row is "not graded"; a missing
+//   symbol row is green only inside that symbol's range for that run, and not graded outside it
+//   or when a non-green check result of that run for that symbol and day lacks its row. Verify
+//   stores the coverage, then the symbol rows, then the overall rows, so an overall row means the
+//   rest is stored. Full runs from before the coverage existed read "not graded" for every symbol
+//   without a row until the next full run.
 // - The latest such run (by start) decides the date, so a later full-history run that found a
 //   day green overrides an older daily yellow or red; an older grade is never shown over it.
+// - The cash rate's freshness is graded only on a run's own target. For a date the deciding run
+//   did not target, the cash reason of the latest counted run that targeted it is merged into the
+//   overall grade (its status from the reason), so a day graded red for the cash rate (what the
+//   forward record acted on) never reads green later.
 // - A symbol before its first canonical bar is not part of the day (verify grades from there),
 //   unless its inception date says it should have data: then it is "not graded". An active
-//   symbol with no canonical bar at all is "not graded".
+//   symbol with no canonical bar at all is "not graded" unless the run graded it.
 // Unknown stays unknown: nothing here turns a missing grade into green.
 import type { HealthStatus, JobType, TradingDate } from '@saku/core';
-import type { Sessions } from '@saku/data';
+import { type Sessions, freshnessStatus, worst } from '@saku/data';
 import { type Db, schema } from '@saku/db';
-import { and, desc, eq, inArray, isNotNull, min } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, min } from 'drizzle-orm';
 import { DAILY_OVERLAP } from './ingest';
+import { parseCashReason } from './verify';
 
 export type Grade =
   { status: HealthStatus; reasons: string[] } | { status: 'not_graded'; reasons: [] };
@@ -54,14 +62,30 @@ interface Covering extends ReportRun {
   from?: TradingDate;
 }
 
-/** Finished runs that graded a window, latest first. */
-async function coveringRuns(db: Db, sessions: Sessions): Promise<Covering[]> {
+/** Whether a run stored anything (a run that failed before storing graded nothing). */
+async function storedAny(db: Db, runId: string): Promise<boolean> {
+  for (const table of [schema.checkResults, schema.checkSummaries, schema.dataHealth]) {
+    const [row] = await db
+      .select({ runId: table.runId })
+      .from(table)
+      .where(eq(table.runId, runId))
+      .limit(1);
+    if (row) return true;
+  }
+  return false;
+}
+
+/**
+ * Finished runs with a target, latest first; each is checked for stored rows only when asked
+ * (`counts`), since only the latest few usually matter.
+ */
+async function finishedRuns(db: Db, sessions: Sessions) {
   const rows = await db
     .select()
     .from(schema.jobRuns)
     .where(isNotNull(schema.jobRuns.finishedAt))
     .orderBy(desc(schema.jobRuns.startedAt));
-  const out: Covering[] = [];
+  const runs: Covering[] = [];
   for (const r of rows) {
     const target = r.datesProcessed?.[0];
     if (!target) continue;
@@ -72,21 +96,41 @@ async function coveringRuns(db: Db, sessions: Sessions): Promise<Covering[]> {
       } catch {
         continue; // Outside the calendar: the run could not have graded its window either.
       }
-      out.push({ id: r.id, jobType: r.jobType, target, from });
+      runs.push({ id: r.id, jobType: r.jobType, target, from });
     } else if (FULL.includes(r.jobType)) {
-      out.push({ id: r.id, jobType: r.jobType, target });
+      runs.push({ id: r.id, jobType: r.jobType, target });
     }
   }
-  return out;
+  const known = new Map<string, boolean>();
+  const counts = async (run: Covering) => {
+    let stored = known.get(run.id);
+    if (stored === undefined) {
+      stored = await storedAny(db, run.id);
+      known.set(run.id, stored);
+    }
+    return stored;
+  };
+  /** The latest counted run matching `test`. */
+  const latest = async (test: (r: Covering) => boolean) => {
+    for (const r of runs) if (test(r) && (await counts(r))) return r;
+    return undefined;
+  };
+  return { latest };
 }
 
-/** The latest date a finished run graded (its target), or none. */
+/** The latest date a counted run graded (its target), or none. */
 export async function latestGradedDate(
   db: Db,
   sessions: Sessions,
 ): Promise<TradingDate | undefined> {
-  const runs = await coveringRuns(db, sessions);
-  return runs.map((r) => r.target).sort((a, b) => (a < b ? 1 : -1))[0];
+  const { latest } = await finishedRuns(db, sessions);
+  let best: TradingDate | undefined;
+  // Runs are by start; the targets need not be in order (a checks run for an older date).
+  while (true) {
+    const r = await latest((x) => best === undefined || x.target > best);
+    if (!r) return best;
+    best = r.target;
+  }
 }
 
 /** The latest run of any kind (also one still going), for the report's header. */
@@ -103,21 +147,40 @@ export async function healthReport(
   db: Db,
   o: { dates: TradingDate[]; sessions: Sessions },
 ): Promise<DayReport[]> {
-  const runs = await coveringRuns(db, o.sessions);
+  const { latest } = await finishedRuns(db, o.sessions);
   const symbols = await db.select().from(schema.symbols);
-  const ticker = new Map(symbols.map((s) => [s.id, s.ticker]));
+  const byId = new Map(symbols.map((s) => [s.id, s]));
   const firstBar = new Map(
     (
       await db
         .select({ symbolId: schema.bars.symbolId, first: min(schema.bars.date) })
         .from(schema.bars)
         .groupBy(schema.bars.symbolId)
-    ).map((r) => [r.symbolId, r.first!]),
+    ).flatMap((r) => (r.first ? [[r.symbolId, r.first] as const] : [])),
   );
+  const coverageOf = async (runId: string) =>
+    new Map(
+      (
+        await db.select().from(schema.healthCoverage).where(eq(schema.healthCoverage.runId, runId))
+      ).map((c) => [c.symbolId, c]),
+    );
+  const overallRowOf = async (runId: string, date: TradingDate) =>
+    (
+      await db
+        .select()
+        .from(schema.dataHealth)
+        .where(
+          and(
+            eq(schema.dataHealth.runId, runId),
+            eq(schema.dataHealth.date, date),
+            isNull(schema.dataHealth.symbolId),
+          ),
+        )
+    )[0];
 
   const out: DayReport[] = [];
   for (const date of o.dates) {
-    const run = runs.find((r) => (r.from === undefined || r.from <= date) && date <= r.target);
+    const run = await latest((r) => (r.from === undefined || r.from <= date) && date <= r.target);
     if (!run) {
       out.push({ date, overall: NOT_GRADED, symbols: [], green: false });
       continue;
@@ -142,37 +205,59 @@ export async function healthReport(
           )
       ).map((r) => r.symbolId),
     );
-    const grade = (row: (typeof rows)[number]): Grade => ({
+    const coverage = full ? await coverageOf(run.id) : new Map<number, never>();
+    const grade = (row: { status: HealthStatus; reasons: string[] }): Grade => ({
       status: row.status,
-      reasons: row.reasons,
+      reasons: [...row.reasons],
     });
 
     const overallRow = rows.find((r) => r.symbolId === null);
-    const overall = overallRow ? grade(overallRow) : NOT_GRADED;
-    // A full-history run's missing symbol row is green only on a date it graded.
-    const silentIsGreen = full && overallRow !== undefined;
+    let overall = overallRow ? grade(overallRow) : NOT_GRADED;
+    if (overall.status !== 'not_graded' && run.target !== date) {
+      // The cash rate as the run that targeted this date graded it (only that run did).
+      const own = await latest((r) => r.target === date);
+      const row = own && (await overallRowOf(own.id, date));
+      for (const code of row?.reasons ?? []) {
+        const cash = parseCashReason(code);
+        if (!cash || overall.reasons.includes(code)) continue;
+        overall = {
+          status: worst(overall.status, freshnessStatus(cash.behind ?? Infinity)),
+          reasons: [...overall.reasons, code],
+        };
+      }
+    }
 
     const listed: DayReport['symbols'] = [];
     const candidates = new Set([
       ...symbols.filter((s) => s.active).map((s) => s.id),
       ...rows.flatMap((r) => (r.symbolId === null ? [] : [r.symbolId])),
+      ...coverage.keys(),
     ]);
     for (const id of candidates) {
-      const s = symbols.find((x) => x.id === id)!;
+      const s = byId.get(id)!;
       const row = rows.find((r) => r.symbolId === id);
+      const range = coverage.get(id);
       let g: Grade;
       if (row) g = grade(row);
-      else {
+      else if (
+        full &&
+        overallRow &&
+        range &&
+        range.fromDate <= date &&
+        date <= range.toDate &&
+        !flagged.has(id)
+      ) {
+        g = { status: 'green', reasons: [] };
+      } else {
         const first = firstBar.get(id);
-        if (first !== undefined && date < first) {
-          // Not yet in its history; "not graded" when its inception says data should exist.
-          if (!s.inceptionDate || date < s.inceptionDate) continue;
-          g = NOT_GRADED;
-        } else if (first !== undefined && silentIsGreen && !flagged.has(id)) {
-          g = { status: 'green', reasons: [] };
-        } else g = NOT_GRADED;
+        // Not yet in its history: not part of the day, unless its inception says data should
+        // exist (then not graded).
+        if (first !== undefined && date < first && (!s.inceptionDate || date < s.inceptionDate)) {
+          continue;
+        }
+        g = NOT_GRADED;
       }
-      if (g.status !== 'green') listed.push({ ticker: ticker.get(id)!, grade: g });
+      if (g.status !== 'green') listed.push({ ticker: s.ticker, grade: g });
     }
     listed.sort((a, b) => (a.ticker < b.ticker ? -1 : a.ticker > b.ticker ? 1 : 0));
     out.push({

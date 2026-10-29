@@ -2,8 +2,10 @@
 // has none and the stand-in rule allows it), with our adjusted series, runs layers A-C over
 // stored data and grades each symbol and day (data health). Daily runs store every result and
 // health row in their window; full-history passes store one summary per check plus every
-// non-green result and symbol health row (requirements 04), and the overall health row of every
-// date they graded.
+// non-green result and symbol health row (requirements 04), the overall health row of every
+// date they graded and each symbol's graded date range (`health_coverage`). A symbol without any
+// primary bar is graded too: red `primary_missing` (04 severity rules: primary data missing with
+// no usable stand-in; a stand-in needs the primary's history around it).
 import type { HealthStatus, RawBar, TradingDate } from '@saku/core';
 import { totalReturnIndex } from '@saku/core';
 import {
@@ -25,7 +27,7 @@ import {
 } from '@saku/data';
 import { type Db, activeSymbols, getSetting, schema, seriesPointInTime } from '@saku/db';
 import { cashSeries } from './cash';
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, min, sql } from 'drizzle-orm';
 
 const CHUNK = 500;
 const sqlExcluded = (column: string) => sql.raw(`excluded.${column}`);
@@ -59,6 +61,48 @@ export interface VerifySummary {
 type CanonicalBar = RawBar & { source: string; standIn: boolean };
 
 type Stored = CheckResult & { symbolId: number | null };
+
+/** The cash series' freshness reason on a run's date: `<series>:missing@<source>` or `stale(n)`. */
+export function cashReason(
+  source: { series: string; source: string } | undefined,
+  behind: number | undefined,
+): string {
+  const what = behind === undefined ? 'missing' : `stale(${behind})`;
+  return `${source?.series ?? 'cash'}:${what}@${source?.source ?? 'none'}`;
+}
+
+/** The days behind in a cash freshness reason (undefined: missing), or null for another code. */
+export function parseCashReason(code: string): { behind: number | undefined } | null {
+  const m = /^[^:@\s]+:(missing|stale\((\d+)\))@[^@\s]+$/.exec(code);
+  if (!m) return null;
+  return { behind: m[2] === undefined ? undefined : Number(m[2]) };
+}
+
+/** The first canonical bar of each symbol (where its graded history starts). */
+async function firstCanonical(db: Db): Promise<Map<number, TradingDate>> {
+  const rows = await db
+    .select({ symbolId: schema.bars.symbolId, first: min(schema.bars.date) })
+    .from(schema.bars)
+    .groupBy(schema.bars.symbolId);
+  return new Map(rows.flatMap((r) => (r.first ? [[r.symbolId, r.first] as const] : [])));
+}
+
+/**
+ * The sessions a symbol without any primary bar is graded red on: from its first canonical bar,
+ * else its inception date, to the run's date (the later of that and the window's start); with
+ * neither known, the run's date only. Never before the calendar starts.
+ */
+function missingPrimaryDates(
+  sessions: Sessions,
+  start: TradingDate | undefined,
+  o: { from?: TradingDate; to: TradingDate },
+): TradingDate[] {
+  if (start === undefined) return sessions.isSession(o.to) ? [o.to] : [];
+  let from = start;
+  if (o.from && o.from > from) from = o.from;
+  if (sessions.calendar.validFrom > from) from = sessions.calendar.validFrom;
+  return from > o.to ? [] : sessions.between(from, o.to);
+}
 
 async function roles(db: Db, dataKind: string) {
   const rows = await db
@@ -250,6 +294,14 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   };
   let standInCount = 0;
   const standInsOff: VerifySummary['standInsOff'] = [];
+  const firstBars = await firstCanonical(db);
+  /** Full passes: the dates graded per symbol (a missing non-green row is green only inside). */
+  const coverage: { symbolId: number; fromDate: TradingDate; toDate: TradingDate }[] = [];
+  const covered = (symbolId: number, dates: TradingDate[]) => {
+    const inside = dates.filter((d) => d <= o.to && (!o.from || d >= o.from));
+    if (inside.length > 0)
+      coverage.push({ symbolId, fromDate: inside[0]!, toDate: inside.at(-1)! });
+  };
 
   const seriesRoles = await roles(db, 'series');
   for (const s of symbols) {
@@ -303,7 +355,25 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     }
     if (index) add(indexCheck(primary, index));
     results.push(...own.map((r) => ({ ...r, symbolId: s.id })));
-    if (primary.length === 0) continue;
+    if (primary.length === 0) {
+      // No primary bar at all (a new primary without this symbol's history, or none fetched yet):
+      // red on its dates, never left out (left out, the day would read green without it).
+      const missing = missingPrimaryDates(
+        o.sessions,
+        firstBars.get(s.id) ?? s.inceptionDate ?? undefined,
+        o,
+      );
+      for (const date of missing) {
+        healthRows.push({
+          symbolId: s.id,
+          date,
+          health: { status: 'red', reasons: ['primary_missing'] },
+        });
+        grade(date, 'red', s.ticker);
+      }
+      covered(s.id, missing);
+      continue;
+    }
 
     const si = standIns({
       primary,
@@ -337,6 +407,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       refused: si.refused,
     });
     await writeCanonical(db, s.id, merged, health);
+    covered(s.id, dates);
     for (const [date, h] of health) {
       healthRows.push({ symbolId: s.id, date, health: h });
       grade(date, h.status, s.ticker);
@@ -371,8 +442,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     const cash = source ? await seriesPointInTime(db, source.series, source.source) : undefined;
     const last = cash?.asOf(o.to, (o.now ?? new Date()).toISOString())?.date;
     const s = seriesHealth(o.seriesSessions, o.to, last);
-    const what = last === undefined ? 'missing' : `stale(${s.behind})`;
-    grade(o.to, s.status, `${source?.series ?? 'cash'}:${what}@${source?.source ?? 'none'}`);
+    grade(o.to, s.status, cashReason(source, last === undefined ? undefined : s.behind));
   }
   for (const [date, h] of overall) healthRows.push({ symbolId: null, date, health: h });
 
@@ -382,10 +452,18 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   for (const r of inWindow) byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;
   const keep = o.mode === 'daily' ? inWindow : inWindow.filter((r) => r.status !== 'green');
   await storeResults(db, o.runId, keep);
-  if (o.mode === 'full') await storeSummaries(db, o.runId, inWindow);
-  // Full passes also keep the overall row of every date they graded, green included, so a
-  // missing symbol row reads as green only where the overall row shows the date was graded (the
-  // health report). The overall rows go last: one stored means every symbol row was stored.
+  if (o.mode === 'full') {
+    await storeSummaries(db, o.runId, inWindow);
+    // Before the health rows, so an overall row stored means the coverage is stored too.
+    if (coverage.length > 0) {
+      await db
+        .insert(schema.healthCoverage)
+        .values(coverage.map((c) => ({ runId: o.runId, ...c })));
+    }
+  }
+  // Full passes also keep the overall row of every date they graded, green included (the health
+  // report reads a date without one as not graded). The overall rows go last: one stored means
+  // every symbol row was stored.
   await storeHealth(
     db,
     o.runId,

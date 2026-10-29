@@ -423,6 +423,26 @@ export const dataHealth = sqliteTable(
   ],
 );
 
+/**
+ * The dates a full-history pass graded for each symbol (both inclusive). Such a pass stores only
+ * non-green symbol rows, so a missing row is green only inside this range; outside it the symbol
+ * was not graded by that run.
+ */
+export const healthCoverage = sqliteTable(
+  'health_coverage',
+  {
+    runId: text('run_id')
+      .notNull()
+      .references(() => jobRuns.id),
+    symbolId: integer('symbol_id')
+      .notNull()
+      .references(() => symbols.id),
+    fromDate: text('from_date').notNull(),
+    toDate: text('to_date').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.runId, t.symbolId] })],
+);
+
 // ---------------------------------------------------------------------------------------------
 // Jobs and operations
 

@@ -135,7 +135,8 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `check_results` | id, run_id, layer, check_name, symbol_id, source, date, status, observed, expected, tolerance, message | Daily: all in the window; full-history passes (bootstrap, `checks`, weekly): non-green only |
 | `check_summaries` | run_id, layer, check_name, checked, passed, max_deviation | Full-history passes |
 | `stand_ins` | symbol_id, date, source, close, band, basis, run_id, created_at, primary_close, deviation, resolved_at, resolved_run_id; PK (symbol_id, date) | Secondary bars used for a missing primary day; resolved when the primary arrives |
-| `data_health` | id, run_id, date, symbol_id (null = overall), status, reasons | Daily: all in the window; full passes: non-green |
+| `data_health` | id, run_id, date, symbol_id (null = overall), status, reasons | Daily: all in the window; full passes: non-green symbol rows and every graded date's overall row |
+| `health_coverage` | run_id, symbol_id, from_date, to_date; PK (run_id, symbol_id) | Full passes: the dates graded per symbol (a missing non-green row is green only inside) |
 | `strategies` | id, owner_id, name, yaml, status (draft), updated_at | Drafts: no forward record |
 | `strategy_versions` | id, owner_id (null = library), strategy_id, name, canonical_json, registered_at, hash | Immutable |
 | `forward_annotations` | id, version_id, date, kind, detail, run_id, created_at | Append-only; corrections and recomputations |

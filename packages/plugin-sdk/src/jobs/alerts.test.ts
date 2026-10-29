@@ -5,8 +5,10 @@ import {
   channelsOf,
   createUser,
   registerVersion,
+  schema,
   setChannelEnabled,
   setSetting,
+  startRun,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
@@ -76,7 +78,6 @@ async function setup(language: string | null = null) {
     isAdmin: true,
   });
   if (language) {
-    const { schema } = await import('@saku/db');
     await db.update(schema.users).set({ language });
   }
   const version = await registerVersion(db, { ownerId: owner, name: 'Trend', strategy });
@@ -267,6 +268,37 @@ describe('admin alerts', () => {
     expect(sent[1]!.text).toContain('データ状態: 黄');
     // Only admin channels: the owner's ordinary channel got none of these.
     expect(sent.every((m) => m.target === 'ops')).toBe(true);
+  });
+
+  it("states the latest grade of the latest date: a weekly pass's green over an older daily red", async () => {
+    const { db, owner } = await setup();
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const T = '2026-01-06';
+    const daily = await startRun(db, 'daily', new Date('2026-01-07T01:00:00Z'));
+    await db.insert(schema.dataHealth).values([
+      { runId: daily, date: '2026-01-05', symbolId: null, status: 'green', reasons: [] },
+      { runId: daily, date: T, symbolId: null, status: 'red', reasons: ['AAA'] },
+    ]);
+    // The weekly refetch corrected the data: full passes store the overall row, green included.
+    const weekly = await startRun(db, 'weekly', new Date('2026-01-10T15:00:00Z'));
+    await db.insert(schema.dataHealth).values([
+      { runId: weekly, date: '2026-01-05', symbolId: null, status: 'green', reasons: [] },
+      { runId: weekly, date: T, symbolId: null, status: 'green', reasons: [] },
+    ]);
+    const { notifier, sent } = fakeNotifier();
+    const update = {
+      ...options(notifier, T),
+      from: 'abc1234',
+      to: 'def5678',
+      step: 'check',
+      stuck: false,
+    };
+    expect((await sendUpdateFailed(db, update)).sent).toBe(1);
+    const t = translator('en');
+    expect(sent[0]!.text.split('\n').at(-1)).toBe(
+      `${t('alerts.health.green')} ${t('alerts.healthDate', { date: T })}`,
+    );
   });
 
   it('goes to admin channels once per job and day', async () => {

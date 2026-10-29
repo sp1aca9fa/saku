@@ -263,4 +263,50 @@ describe('verify', () => {
       .where(and(eq(schema.bars.symbolId, aaa), eq(schema.bars.date, '2026-01-08')));
     expect(now).toMatchObject({ source: 'p', standIn: false, close: 100.5954 });
   });
+
+  it('grades a symbol with no primary bar red primary_missing on its dates', async () => {
+    const { db } = await setup();
+    await upsertSymbols(db, [{ ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    const ccc = (await symbolId(db, 'CCC'))!;
+    const graded = async (mode: 'daily' | 'full', from?: string) => {
+      const runId = await startRun(db, mode === 'daily' ? 'daily' : 'checks');
+      const summary = await verify(db, {
+        runId,
+        sessions,
+        mode,
+        ...(from && { from }),
+        to: '2026-01-08',
+      });
+      const rows = await db
+        .select()
+        .from(schema.dataHealth)
+        .where(and(eq(schema.dataHealth.runId, runId), eq(schema.dataHealth.symbolId, ccc)))
+        .orderBy(asc(schema.dataHealth.date));
+      expect(rows.every((r) => r.status === 'red' && r.reasons[0] === 'primary_missing')).toBe(
+        true,
+      );
+      return { dates: rows.map((r) => r.date), summary };
+    };
+    // Neither a canonical bar nor an inception date: the run's date only, in the overall grade.
+    const none = await graded('daily', '2026-01-06');
+    expect(none.dates).toEqual(['2026-01-08']);
+    expect(none.summary.reasons).toContain('CCC');
+    // From its inception date, within the window.
+    await db
+      .update(schema.symbols)
+      .set({ inceptionDate: '2026-01-05' })
+      .where(eq(schema.symbols.id, ccc));
+    expect((await graded('daily', '2026-01-07')).dates).toEqual(['2026-01-07', '2026-01-08']);
+    expect((await graded('full')).dates).toEqual([
+      '2026-01-05',
+      '2026-01-06',
+      '2026-01-07',
+      '2026-01-08',
+    ]);
+    // A first canonical bar is the start when there is one.
+    await db
+      .insert(schema.bars)
+      .values({ symbolId: ccc, date: '2026-01-07', close: 1, source: 'old' });
+    expect((await graded('full')).dates).toEqual(['2026-01-07', '2026-01-08']);
+  });
 });
