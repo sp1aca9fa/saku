@@ -35,4 +35,13 @@ describe('PointInTime', () => {
     });
     expect(pit.asOf('2026-01-02', '2026-02-01T00:00:00Z')).toBeUndefined();
   });
+
+  it('lists the observations known at a moment, each in its version known then', () => {
+    expect(pit.knownAt('2026-01-08T01:00:00Z')).toEqual([
+      { date: '2026-01-05', value: 4.0 },
+      { date: '2026-01-06', value: 4.1 },
+    ]);
+    expect(pit.knownAt('2026-01-10T00:00:00Z').map((p) => p.value)).toEqual([4.0, 4.15, 4.2]);
+    expect(pit.knownAt('2026-01-01T00:00:00Z')).toEqual([]);
+  });
 });

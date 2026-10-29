@@ -368,27 +368,38 @@ export function indexUnavailable(date: TradingDate, source?: string): CheckResul
   };
 }
 
-/** Layer B for FX: primary rate against a secondary's, on dates both have. */
+/**
+ * Layer B for FX: primary rate against a secondary's, on dates both have. From the primary's first
+ * rate on, a date the secondary has a rate and the primary none is yellow `fx_unavailable` (the
+ * cross-check could not run; 04 severity rules), unless the primary declares that day closed
+ * (`closed`: a known holiday of its calendar is an expected gap, green; 04 point-in-time series).
+ */
 export function fxCheck(
   primary: { date: TradingDate; rate: number }[],
   secondary: { date: TradingDate; rate: number }[],
   source: string,
+  o: { closed?: (date: TradingDate) => boolean } = {},
 ): CheckResult[] {
-  const other = new Map(secondary.map((r) => [r.date, r.rate]));
-  return primary.flatMap((p) => {
-    const s = other.get(p.date);
-    if (s === undefined) return [];
-    const dev = Math.abs(s / p.rate - 1);
+  const own = new Map(primary.map((r) => [r.date, r.rate]));
+  let first: TradingDate | undefined;
+  for (const r of primary) if (first === undefined || r.date < first) first = r.date;
+  return secondary.flatMap((r) => {
+    const p = own.get(r.date);
+    if (p === undefined) {
+      if (first === undefined || r.date < first || o.closed?.(r.date)) return [];
+      return [fxUnavailable(r.date, source)];
+    }
+    const dev = Math.abs(r.rate / p - 1);
     return [
       {
         layer: 'B' as const,
         check: 'fx_match',
         source,
-        date: p.date,
+        date: r.date,
         status: statusB(dev, TOLERANCE.fx),
         deviation: dev,
-        observed: s,
-        expected: p.rate,
+        observed: r.rate,
+        expected: p,
         tolerance: TOLERANCE.fx,
       },
     ];

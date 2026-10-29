@@ -67,4 +67,18 @@ export class PointInTime {
     const first = this.vintages[i]![0]!;
     return { date: first.date, value: first.value, knownAt: first.knownAt, firstKnown: true };
   }
+
+  /**
+   * Every observation known at `at`, each in its latest version known then, oldest first: the
+   * series as a run at `at` could have seen it (checks compare values on exact dates). An
+   * observation not yet published at `at` is absent, never filled in.
+   */
+  knownAt(at: string): { date: TradingDate; value: number }[] {
+    const out: { date: TradingDate; value: number }[] = [];
+    this.vintages.forEach((list, i) => {
+      const v = list.filter((x) => x.knownAt <= at).at(-1);
+      if (v) out.push({ date: this.dates[i]!, value: v.value });
+    });
+    return out;
+  }
 }

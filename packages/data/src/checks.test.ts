@@ -153,6 +153,32 @@ describe('layer B', () => {
       'yellow',
     );
   });
+
+  it('is yellow where only the secondary has a rate, unless the primary declares the day closed', () => {
+    const p = [
+      { date: '2026-01-05', rate: 150 },
+      { date: '2026-01-07', rate: 150 },
+    ];
+    const s = ['2026-01-02', '2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08'].map(
+      (date) => ({ date, rate: 150 }),
+    );
+    // 01-02: before the primary's history; 01-06 and 01-08: the cross-check could not run.
+    expect(fxCheck(p, s, 's').map((r) => `${r.date} ${r.check} ${r.status}`)).toEqual([
+      '2026-01-05 fx_match green',
+      '2026-01-06 fx_unavailable yellow',
+      '2026-01-07 fx_match green',
+      '2026-01-08 fx_unavailable yellow',
+    ]);
+    // A declared closing day of the primary is an expected gap.
+    const closed = (d: string) => d === '2026-01-06';
+    expect(fxCheck(p, s, 's', { closed }).map((r) => r.check)).toEqual([
+      'fx_match',
+      'fx_match',
+      'fx_unavailable',
+    ]);
+    // No primary rate at all: nothing here (the caller grades the run's date).
+    expect(fxCheck([], s, 's')).toEqual([]);
+  });
 });
 
 describe('layer C', () => {

@@ -6,7 +6,7 @@
 // the admins and sends no heartbeat. The CLI (`cli/jobs.ts`) adds the lock, backups and the
 // heartbeat through the hooks.
 import type { TradingDate } from '@saku/core';
-import type { Sessions } from '@saku/data';
+import { Sessions } from '@saku/data';
 import {
   type Db,
   activeSymbols,
@@ -76,7 +76,7 @@ export interface RunResult {
 
 export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Promise<RunResult> {
   const { job, target, sessions, log, alerting, now } = o;
-  const runId = await startRun(db, job, now);
+  const runId = await startRun(db, job, now, target);
   let ok = false;
   let error: string | undefined;
   let heartbeatSent = false;
@@ -113,6 +113,16 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       );
     }
     const used = assignedOnly(plugins, roles);
+    // The calendars sources declare (expected gaps); a declared one not loaded is warned about
+    // and counts no day as closed.
+    const loadedCalendars = plugins.calendars.flatMap((c) => c.calendars);
+    const sourceCalendars: Record<string, Sessions> = {};
+    for (const info of infos) {
+      if (!info.calendar || (info.kind !== 'fx' && info.kind !== 'series')) continue;
+      const calendar = loadedCalendars.find((c) => c.id === info.calendar);
+      if (calendar) sourceCalendars[info.key] = new Sessions(calendar);
+      else log.warn(`${info.key} declares calendar ${info.calendar}, which is not loaded`);
+    }
     log.info(`${job} for ${target}`, { runId });
 
     // Before any request: the cash series is checked on this calendar.
@@ -181,6 +191,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       seriesSessions: checkedSessions,
       now: o.clock?.() ?? new Date(),
       issuers,
+      sourceCalendars,
       ...(job === 'daily'
         ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
         : { mode: 'full' as const }),

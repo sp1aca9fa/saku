@@ -17,6 +17,7 @@ import {
   TOLERANCE,
   adjReturnCheck,
   fxCheck,
+  freshnessStatus,
   fxUnavailable,
   indexCheck,
   indexUnavailable,
@@ -65,6 +66,11 @@ export interface VerifyOptions {
    * never fresh for the funds it has records for. Not given (a direct call): not judged.
    */
   issuers?: IssuerAvailability[];
+  /**
+   * The calendars sources declare (`PluginInfo.calendar`), by source key: a missing FX rate on a
+   * day the primary's calendar is closed is an expected gap. None given: no day counts as closed.
+   */
+  sourceCalendars?: Record<string, Sessions>;
 }
 
 export interface IssuerAvailability {
@@ -116,6 +122,27 @@ export function parseFreshnessReason(code: string): { behind: number | undefined
   const m = /^[^:@\s]+:(missing|stale\((\d+)\))@[^@\s]+$/.exec(code);
   if (!m) return null;
   return { behind: m[2] === undefined ? undefined : Number(m[2]) };
+}
+
+/**
+ * The status a reason of the overall row carries on its own, for the reasons a later run's grade
+ * of the same date must not hide (the health report merges them from the run that targeted the
+ * date): series freshness (its status from the days behind) and an FX cross-check that could not
+ * run (`<pair>:B.fx_unavailable@<source>`, yellow). Null for any other code.
+ */
+export function carriedReasonStatus(code: string): HealthStatus | null {
+  const fresh = parseFreshnessReason(code);
+  if (fresh) return freshnessStatus(fresh.behind ?? Infinity);
+  return /^[^:@\s]+:B\.fx_unavailable@[^@\s]+$/.test(code) ? 'yellow' : null;
+}
+
+/** Whether a source's calendar is closed on `date`; outside the calendar: unknown, not closed. */
+function isClosed(calendar: Sessions, date: TradingDate): boolean {
+  try {
+    return !calendar.isSession(date);
+  } catch {
+    return false;
+  }
 }
 
 /** The first canonical bar of each symbol (where its graded history starts). */
@@ -181,35 +208,6 @@ async function rawBars(db: Db, symbolId: number): Promise<Map<string, RawBar[]>>
     bySource.set(r.source, list);
   }
   return bySource;
-}
-
-/** The latest known value per date of a series from one source. */
-async function latestSeries(db: Db, id: string, source: string) {
-  const rows = await db
-    .select()
-    .from(schema.series)
-    .where(and(eq(schema.series.series, id), eq(schema.series.source, source)))
-    .orderBy(asc(schema.series.date), asc(schema.series.knownAt), asc(schema.series.fetchedAt));
-  const latest = new Map<string, number>();
-  for (const r of rows) latest.set(r.date, r.value);
-  return [...latest].map(([date, value]) => ({ date, value }));
-}
-
-async function latestFx(db: Db, pair: string, source: string) {
-  const rows = await db
-    .select()
-    .from(schema.fxRates)
-    .where(
-      and(
-        eq(schema.fxRates.pair, pair),
-        eq(schema.fxRates.source, source),
-        eq(schema.fxRates.kind, 'valuation'),
-      ),
-    )
-    .orderBy(asc(schema.fxRates.date), asc(schema.fxRates.knownAt), asc(schema.fxRates.fetchedAt));
-  const latest = new Map<string, number>();
-  for (const r of rows) latest.set(r.date, r.rate);
-  return [...latest].map(([date, rate]) => ({ date, rate }));
 }
 
 /** Writes the canonical bars (primary or stand-in) with our adjusted series and health status. */
@@ -363,6 +361,8 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   };
 
   const seriesRoles = await roles(db, 'series');
+  /** When the run looks: series and FX values published later are not known to it. */
+  const at = (o.now ?? new Date()).toISOString();
   /** The index series of the symbols graded (their freshness grades the day overall). */
   const indexes = new Set<string>();
   // Layer D: every issuer source with a role (they are all check sources).
@@ -381,11 +381,12 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     const primary = unsplit((bySource.get(bars.primary) ?? []).filter((b) => b.date <= o.to));
     const own: CheckResult[] = [];
     const add = (rs: CheckResult[]) => own.push(...rs);
-    // The fund's index (layer C), from the series primary; no primary or no value: empty, and
-    // graded below (never skipped as if the check had passed).
+    // The fund's index (layer C), from the series primary, as known at the run (point in time:
+    // a value published after the run is not used); no primary or no value: empty, and graded
+    // below (never skipped as if the check had passed).
     const index = s.indexSeries
       ? seriesRoles.primary
-        ? await latestSeries(db, s.indexSeries, seriesRoles.primary)
+        ? (await seriesPointInTime(db, s.indexSeries, seriesRoles.primary)).knownAt(at)
         : []
       : undefined;
 
@@ -529,16 +530,24 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
 
   const base = await getSetting(db, 'base_currency');
   const fx = await roles(db, 'fx');
-  const at = (o.now ?? new Date()).toISOString();
   if (base && base !== 'USD') {
     const pair = `USD${base}`;
-    const primary = fx.primary ? await latestFx(db, pair, fx.primary) : [];
+    // Rates as known at the run (point in time), like the freshness read below.
+    const pit = fx.primary ? await fxPointInTime(db, pair, fx.primary) : undefined;
+    const primary = (pit?.knownAt(at) ?? []).map((r) => ({ date: r.date, rate: r.value }));
+    // The primary's declared closing days are expected gaps (04 point-in-time series).
+    const calendar = fx.primary ? o.sourceCalendars?.[fx.primary] : undefined;
+    const closed = calendar && ((d: TradingDate) => isClosed(calendar, d));
     for (const source of fx.secondaries) {
-      const rs = fxCheck(primary, await latestFx(db, pair, source), source);
-      // The cross-check cannot run on the run's date without the primary's rate for it.
-      if (overall.has(o.to) && !primary.some((r) => r.date === o.to)) {
-        rs.push(fxUnavailable(o.to, source));
-      }
+      const other = (await fxPointInTime(db, pair, source))
+        .knownAt(at)
+        .map((r) => ({ date: r.date, rate: r.value }));
+      // Only the dates this run grades (a secondary may publish on days that are no session).
+      const rs = fxCheck(primary, other, source, closed ? { closed } : {}).filter(
+        (r) => r.check !== 'fx_unavailable' || overall.has(r.date),
+      );
+      // No primary rate at all: no history to compare within, so the run's date only.
+      if (primary.length === 0 && overall.has(o.to)) rs.push(fxUnavailable(o.to, source));
       results.push(...rs.map((r) => ({ ...r, symbolId: null })));
       for (const r of rs) {
         if (overall.has(r.date)) grade(r.date, r.status, `${pair}:${r.layer}.${r.check}@${source}`);
@@ -548,7 +557,6 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     // series), on the trading calendar: it grades the day overall, never a symbol, so it never
     // changes a signal computed in USD (04). No FX primary: missing, red.
     if (overall.has(o.to)) {
-      const pit = fx.primary ? await fxPointInTime(db, pair, fx.primary) : undefined;
       const last = pit?.asOf(o.to, at)?.date;
       const h = seriesHealth(o.sessions, o.to, last);
       const behind = last === undefined ? undefined : h.behind;

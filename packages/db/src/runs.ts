@@ -3,10 +3,24 @@ import { and, asc, eq, sql } from 'drizzle-orm';
 import type { Db } from './client';
 import { activityLog, jobRuns, sourceRoles } from './schema';
 
-export async function startRun(db: Db, jobType: JobType, now = new Date()): Promise<string> {
+/**
+ * Records a run as started. `target`: the date it works for, stored from the start so a run that
+ * never finishes still names its date (the A1 gate counts such a session as having no run).
+ */
+export async function startRun(
+  db: Db,
+  jobType: JobType,
+  now = new Date(),
+  target?: string,
+): Promise<string> {
   const [row] = await db
     .insert(jobRuns)
-    .values({ jobType, startedAt: now.toISOString(), status: 'running' })
+    .values({
+      jobType,
+      startedAt: now.toISOString(),
+      status: 'running',
+      ...(target !== undefined && { datesProcessed: [target] }),
+    })
     .returning({ id: jobRuns.id });
   return row!.id;
 }

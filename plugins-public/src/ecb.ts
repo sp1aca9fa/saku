@@ -76,6 +76,8 @@ export const ecb: FxSource = {
     suggestedRole: 'primary',
     limits: { perMinute: 30 },
     termsUrl: 'https://www.ecb.europa.eu/services/using-our-site/disclaimer/html/index.en.html',
+    // No reference rates on TARGET closing days (the calendars plug-in's `ecb-target`).
+    calendar: 'ecb-target',
   },
 
   supports: (pair) => /^[A-Z]{6}$/.test(pair) && pair.slice(0, 3) !== pair.slice(3),

@@ -51,6 +51,12 @@ export interface PluginInfo {
   noAiItems?: string[];
   /** Not an official API. */
   unofficial?: boolean;
+  /**
+   * The calendar (a loaded calendar plug-in's id) of the days the source publishes on: a missing
+   * value on a day it is closed is an expected gap (green), not an unavailable cross-check.
+   * Not declared, or not loaded: no day counts as closed.
+   */
+  calendar?: string;
 }
 
 export interface Logger {

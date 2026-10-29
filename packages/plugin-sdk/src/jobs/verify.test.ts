@@ -18,7 +18,7 @@ import { and, asc, eq, isNull } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { savePluginInfos } from '../registry';
 import { issuerStats } from './issuer';
-import { verify } from './verify';
+import { carriedReasonStatus, verify } from './verify';
 
 const sessions = new Sessions({
   id: 't',
@@ -310,6 +310,149 @@ describe('verify', () => {
     await fx('fx1', 4);
     const fresh = await overallOn('2026-01-08');
     expect(fresh.overall.reasons.some((r) => r.startsWith('USDXXX'))).toBe(false);
+  });
+
+  it('uses only index values known at the run (a later publication is neither used nor fresh)', async () => {
+    const { db } = await setup();
+    // 01-07 and 01-08 are published only on 01-09 evening.
+    await db.delete(schema.series).where(eq(schema.series.date, '2026-01-07'));
+    await db.delete(schema.series).where(eq(schema.series.date, '2026-01-08'));
+    await storeSeries(db, {
+      series: 'IDX',
+      source: 'idx',
+      points: [
+        { date: '2026-01-07', value: 101.51 * 50, publishedAt: '2026-01-09T23:00:00Z' },
+        { date: '2026-01-08', value: 100.4949 * 50, publishedAt: '2026-01-09T23:00:00Z' },
+      ],
+      fetchedAt: '2026-01-09T23:30:00Z',
+    });
+    const at = async (now: string) => {
+      const runId = await startRun(db, 'daily');
+      await verify(db, {
+        runId,
+        sessions,
+        mode: 'daily',
+        from: '2026-01-06',
+        to: '2026-01-08',
+        now: new Date(now),
+      });
+      const results = await db
+        .select()
+        .from(schema.checkResults)
+        .where(eq(schema.checkResults.runId, runId));
+      const [overall] = await db
+        .select()
+        .from(schema.dataHealth)
+        .where(
+          and(
+            eq(schema.dataHealth.runId, runId),
+            isNull(schema.dataHealth.symbolId),
+            eq(schema.dataHealth.date, '2026-01-08'),
+          ),
+        );
+      return {
+        index: results
+          .filter((r) => r.checkName.startsWith('index_'))
+          .map((r) => `${r.date} ${r.checkName}`),
+        reasons: overall!.reasons,
+      };
+    };
+    const before = await at('2026-01-09T01:00:00Z');
+    expect(before.index).toEqual([
+      '2026-01-06 index_match',
+      '2026-01-07 index_unavailable',
+      '2026-01-08 index_unavailable',
+    ]);
+    expect(before.reasons).toContain('IDX:stale(2)@idx');
+    const after = await at('2026-01-10T00:00:00Z');
+    expect(after.index).toEqual([
+      '2026-01-06 index_match',
+      '2026-01-07 index_match',
+      '2026-01-08 index_match',
+    ]);
+    expect(after.reasons.some((r) => r.startsWith('IDX:'))).toBe(false);
+  });
+
+  it('grades FX gaps on every graded date, as known at the run; declared closed days are expected', async () => {
+    const { db } = await setup();
+    await setSetting(db, 'base_currency', 'XXX');
+    await seedSourceRoles(db, [
+      { key: 'fx1', dataKind: 'fx', suggestedRole: 'primary' },
+      { key: 'fx2', dataKind: 'fx', suggestedRole: 'secondary' },
+    ]);
+    const rate = (date: string, publishedAt = `${date}T16:00:00Z`) => ({
+      pair: 'USDXXX',
+      date,
+      rate: 150,
+      publishedAt,
+    });
+    // The primary lacks 01-06; its 01-08 rate is published only after the run.
+    await storeFx(db, {
+      source: 'fx1',
+      kind: 'valuation',
+      rates: [rate('2026-01-05'), rate('2026-01-07'), rate('2026-01-08', '2026-01-09T16:00:00Z')],
+      fetchedAt: '2026-01-09T17:00:00Z',
+    });
+    await storeFx(db, {
+      source: 'fx2',
+      kind: 'valuation',
+      rates: dates.map((d) => rate(d)),
+      fetchedAt: '2026-01-09T17:00:00Z',
+    });
+    const run = async (o: { sourceCalendars?: Record<string, Sessions> } = {}) => {
+      const runId = await startRun(db, 'daily');
+      await verify(db, {
+        runId,
+        sessions,
+        mode: 'daily',
+        from: '2026-01-06',
+        to: '2026-01-08',
+        now: new Date('2026-01-09T01:00:00Z'),
+        ...o,
+      });
+      const rows = await db
+        .select()
+        .from(schema.dataHealth)
+        .where(and(eq(schema.dataHealth.runId, runId), isNull(schema.dataHealth.symbolId)));
+      const fx = (
+        await db.select().from(schema.checkResults).where(eq(schema.checkResults.runId, runId))
+      )
+        .filter((r) => r.checkName.startsWith('fx_'))
+        .map((r) => `${r.date} ${r.checkName} ${r.status}`)
+        .sort();
+      return { rows, fx };
+    };
+    const plain = await run();
+    expect(plain.fx).toEqual([
+      '2026-01-06 fx_unavailable yellow',
+      '2026-01-07 fx_match green',
+      '2026-01-08 fx_unavailable yellow',
+    ]);
+    const on = (date: string) => plain.rows.find((r) => r.date === date)!.reasons;
+    expect(on('2026-01-06')).toContain('USDXXX:B.fx_unavailable@fx2');
+    // 01-08 not known at the run: one session behind (the lag) is green, the cross-check is not.
+    expect(on('2026-01-08')).toContain('USDXXX:B.fx_unavailable@fx2');
+    expect(on('2026-01-08').some((r) => r.startsWith('USDXXX:stale'))).toBe(false);
+
+    // The primary declares 01-06 a closing day: an expected gap, green.
+    const closed = new Sessions({
+      id: 'c',
+      version: 'c',
+      validFrom: '2026-01-01',
+      validTo: '2026-12-31',
+      holidays: ['2026-01-06'],
+    });
+    const declared = await run({ sourceCalendars: { fx1: closed } });
+    expect(declared.fx).toEqual(['2026-01-07 fx_match green', '2026-01-08 fx_unavailable yellow']);
+  });
+
+  it('carries freshness and FX cross-check reasons with their status (the health merge)', () => {
+    expect(carriedReasonStatus('USDXXX:B.fx_unavailable@fx2')).toBe('yellow');
+    expect(carriedReasonStatus('IDX:stale(2)@idx')).toBe('yellow');
+    expect(carriedReasonStatus('IDX:stale(6)@idx')).toBe('red');
+    expect(carriedReasonStatus('DTB3:missing@none')).toBe('red');
+    expect(carriedReasonStatus('USDXXX:B.fx_match@fx2')).toBeNull();
+    expect(carriedReasonStatus('SPY')).toBeNull();
   });
 
   it('stands a secondary bar in for a missing primary day, then resolves it', async () => {

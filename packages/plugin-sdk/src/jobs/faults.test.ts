@@ -20,7 +20,7 @@ import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { BlockedError } from '../http';
 import { emptyPlugins } from '../registry';
-import type { BarSource, FxSource, IssuerSource, SeriesSource } from '../types';
+import type { BarSource, CalendarSource, FxSource, IssuerSource, SeriesSource } from '../types';
 import { runJob } from './run';
 import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
 
@@ -137,21 +137,40 @@ const rates = seriesSource();
 
 /**
  * An FX source for `USDJPY` (rate 150, published 16:00 UTC the same day); `primary` suggests
- * itself as the primary; nothing after `until`; every call failing once `to` reaches `downFrom`.
+ * itself as the primary; nothing after `until`; every call failing once `to` reaches `downFrom`;
+ * no rate on the `closed` days, declared as its calendar `fx-cal` when `declared`.
  */
-function fxSource(key: string, o: { primary?: boolean; until?: string; downFrom?: string } = {}) {
+function fxSource(
+  key: string,
+  o: {
+    primary?: boolean;
+    until?: string;
+    downFrom?: string;
+    closed?: string[];
+    declared?: boolean;
+  } = {},
+) {
   const s: FxSource = {
-    info: testInfo(key, 'fx', { suggestedRole: o.primary ? 'primary' : 'secondary' }),
+    info: testInfo(key, 'fx', {
+      suggestedRole: o.primary ? 'primary' : 'secondary',
+      ...(o.declared && { calendar: 'fx-cal' }),
+    }),
     supports: (pair) => pair === 'USDJPY',
     async fetchRates(pair, from, to) {
       if (o.downFrom && to >= o.downFrom) throw new Error(`${key}: HTTP 503`);
-      return DATES.filter((d) => d >= from && d <= to && (!o.until || d <= o.until)).map(
-        (date) => ({ pair, date, rate: 150, publishedAt: `${date}T16:00:00Z` }),
-      );
+      return DATES.filter(
+        (d) => d >= from && d <= to && (!o.until || d <= o.until) && !o.closed?.includes(d),
+      ).map((date) => ({ pair, date, rate: 150, publishedAt: `${date}T16:00:00Z` }));
     },
   };
   return s;
 }
+
+/** The calendars plug-in with `fx-cal`: the test sessions, `closed` days added as holidays. */
+const fxCalendar = (closed: string[]): CalendarSource => ({
+  info: testInfo('cal', 'calendar', { suggestedRole: 'primary' }),
+  calendars: [{ ...sessions.calendar, id: 'fx-cal', holidays: closed }],
+});
 
 /** A corruption of the issuer's records for a ticker. */
 type IssuerFault = (ticker: Ticker, records: IssuerRecord[]) => IssuerRecord[];
@@ -204,7 +223,7 @@ async function run(
   // `dailyMissing`: the plug-in is loaded for the bootstrap (its role is seeded), not the daily run.
   issuer?: { source: IssuerSource; tolerances?: string; dailyMissing?: boolean },
   // A base currency other than USD, with its FX sources.
-  fx?: { base: string; sources: FxSource[] },
+  fx?: { base: string; sources: FxSource[]; calendars?: CalendarSource[] },
 ) {
   const db = await testDb();
   await upsertSymbols(db, [
@@ -266,6 +285,7 @@ async function run(
         bars: list,
         series: [series],
         fx: fx?.sources ?? [],
+        calendars: fx?.calendars ?? [],
         issuers: issuer && !(job === 'daily' && issuer.dailyMissing) ? [issuer.source] : [],
       },
       {
@@ -410,13 +430,13 @@ const FAULTS: { name: string; fault: Fault; on?: Source; expect: 'red'; caught: 
     caught: 'SPY:B.close_match@s1',
   },
   {
-    // The primary lacks the target day: SPY's stand-in fails the index check against the shifted
-    // day before (the primary's), so SPY is red. The shifted days before are red on their own
-    // dates.
+    // The primary lacks the target day: SPY's stand-in passes (the index for the target is not
+    // published by the run, so it cannot check it), SSO's fails layer C against the shifted
+    // underlying. The shifted days before are red on their own dates.
     name: 'timezone shift (each bar a session early)',
     fault: (_t, bars) => bars.slice(1).map((b, i) => ({ ...b, date: bars[i]!.date })),
     expect: 'red',
-    caught: 'SPY:stand_in_refused:index',
+    caught: 'SSO:stand_in_refused:layer_c',
   },
 ];
 
@@ -664,4 +684,27 @@ describe('fault injection (layer F)', () => {
       status: 'green',
     });
   });
+
+  for (const declared of [true, false]) {
+    it(`an FX primary closed on a day it ${declared ? 'declares (expected gap): green' : 'does not declare: yellow for that day'}`, async () => {
+      const closed = [sessions.before(TARGET, 2)];
+      const { result, today, db } = await run(sources(), rates, undefined, {
+        base: 'JPY',
+        sources: [fxSource('fxp', { primary: true, closed, declared }), fxSource('fxs')],
+        calendars: [fxCalendar(closed)],
+      });
+      expect(result.ok).toBe(true);
+      expect(today).toMatchObject({ dataStatus: 'green', allocation: 'Risk on' });
+      const [day] = await db
+        .select()
+        .from(schema.dataHealth)
+        .where(eq(schema.dataHealth.runId, result.runId))
+        .then((rows) => rows.filter((r) => r.symbolId === null && r.date === closed[0]));
+      expect(day).toMatchObject(
+        declared
+          ? { status: 'green' }
+          : { status: 'yellow', reasons: ['USDJPY:B.fx_unavailable@fxs'] },
+      );
+    });
+  }
 });

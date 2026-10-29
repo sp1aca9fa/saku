@@ -160,6 +160,7 @@ interface PluginInfo {
   key: string; kind: PluginKind; name: string; provides: unknown; suggestedRole: 'primary' | 'secondary' | 'check';
   limits?: { perMinute?: number; perHour?: number; perDay?: number; symbolsPerMonth?: number };
   keyEnv?: string; termsUrl: string; noAi?: boolean; unofficial?: boolean;
+  calendar?: string; // series and FX: the calendar it publishes on (a missing value on a closed day is an expected gap)
 }
 interface PluginContext { http: PoliteHttp; now: Date; log: Logger; }
 interface BarSource { info: PluginInfo; fetchBars(ticker: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<RawBar[]>; } // RawBar flags split-adjusted closes

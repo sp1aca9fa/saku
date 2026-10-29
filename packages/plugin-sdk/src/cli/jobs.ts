@@ -11,7 +11,8 @@
 //   pnpm checks            the same as pnpm verify (its A1 name)
 //   pnpm probe             A1: the last sessions of one ticker from every bar source, to a log
 //   pnpm spike             A1: the gate, every NYSE session from the first daily run to the
-//                          latest final day (a session without a run fails)
+//                          latest final day (a session without a run fails; the latest one is
+//                          pending until its run finishes)
 import { Sessions } from '@saku/data';
 import { tradingDateOf } from '@saku/core';
 import { join } from 'node:path';
@@ -62,8 +63,9 @@ const now = new Date();
 const target = dailyTarget(sessions, now, process.env.SAKU_DAILY_AFTER || undefined);
 
 if (job === 'spike') {
-  // Through the latest session that should have a daily run by now: a missing one counts.
-  console.log(spikeMarkdown(await spikeReport(db, { sessions, to: target })));
+  // Through the current daily target: a session without a run fails, except the target while its
+  // run window is open (pending).
+  console.log(spikeMarkdown(await spikeReport(db, { sessions, to: target, open: target })));
   held.release();
   process.exit(0);
 }
@@ -161,10 +163,10 @@ function spikeMarkdown(r: SpikeReport): string {
     `|---|---|${sources.map(() => '---|').join('')}---|---|---|`,
     ...r.days.map(
       (d) =>
-        `| ${d.date} | ${d.primaryOk ? 'ok' : d.reason === 'no_run' ? 'FAILED (no run)' : 'FAILED'} | ${sources.map((s) => (d.available[s] ? 'yes' : 'no')).join(' | ')} | ${d.layerBPass ? 'pass' : 'fail'} | ${d.layerCPass ? 'pass' : 'fail'} | ${d.nonGreen.length} |`,
+        `| ${d.date} | ${d.reason === 'pending' ? 'pending' : d.primaryOk ? 'ok' : d.reason === 'no_run' ? 'FAILED (no run)' : 'FAILED'} | ${sources.map((s) => (d.available[s] ? 'yes' : 'no')).join(' | ')} | ${d.reason === 'pending' ? 'pending' : d.layerBPass ? 'pass' : 'fail'} | ${d.reason === 'pending' || d.layerCPending ? 'pending' : d.layerCPass ? 'pass' : 'fail'} | ${d.nonGreen.length} |`,
     ),
     '',
-    `Days: ${r.days.length}. Primary ok: ${r.primaryOkDays}. Without a finished daily run: ${r.days.filter((d) => d.reason === 'no_run').length}.`,
+    `Days: ${r.days.length}. Primary ok: ${r.primaryOkDays}. Without a finished daily run: ${r.days.filter((d) => d.reason === 'no_run').length}. Pending (not counted yet): ${r.pending}.`,
     `Secondary availability (gate: one >= ${pct(GATE.secondaryAvailability)}): ${sources.map((s) => `${s} ${pct(r.availability[s] ?? 0)}`).join(', ')}.`,
     `Layer B (gate >= ${pct(GATE.layerB)}): ${r.layerB.passed}/${r.layerB.days}. Layer C (gate >= ${pct(GATE.layerC)}): ${r.layerC.passed}/${r.layerC.days}.`,
     `Numeric gate: ${r.passed ? 'passed' : 'not passed'} (every failure must still be explained).`,
