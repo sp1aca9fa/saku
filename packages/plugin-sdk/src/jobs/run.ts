@@ -1,0 +1,214 @@
+// A job that records a run (requirements 04, 05, 11, 12): bootstrap, daily or checks. Ingest,
+// checks, then for the daily run the forward records, alerts, recompute and timestamp. The run
+// is complete only when every step finished for every item; an incomplete or failed run alerts
+// the admins and sends no heartbeat. The CLI (`cli/jobs.ts`) adds the lock, backups and the
+// heartbeat through the hooks.
+import type { TradingDate } from '@saku/core';
+import type { Sessions } from '@saku/data';
+import { type Db, finishRun, seedSourceRoles, startRun } from '@saku/db';
+import { type LoadedPlugins, allInfos, savePluginInfos } from '../registry';
+import type { Logger, PluginContext, PluginInfo } from '../types';
+import {
+  type AlertOptions,
+  sendDataHealthAdmin,
+  sendJobFailure,
+  sendRecomputeDiffers,
+  sendStrategyAlerts,
+} from './alerts';
+import { anchor } from './anchor';
+import { forward, recompute } from './forward';
+import { DAILY_OVERLAP, ingest, type SourceReport } from './ingest';
+import { verify } from './verify';
+
+const DATA_KIND = { bar: 'bars', series: 'series', fx: 'fx' } as const;
+
+export interface RunOptions {
+  job: 'bootstrap' | 'daily' | 'checks';
+  target: TradingDate;
+  sessions: Sessions;
+  /** The cash series' business days; a run without it fails before any request. */
+  seriesSessions: Sessions | undefined;
+  now: Date;
+  log: Logger;
+  context: (info: PluginInfo) => PluginContext;
+  alerting: AlertOptions;
+  tsa: { authorities: string[]; caFile?: string };
+  /** The checked-out commit (named in recompute annotations). */
+  code: string;
+  /** After the steps of a daily run, complete or not (the backup); a throw fails the run. */
+  afterDaily?: () => Promise<void>;
+  /** On a complete daily run (stamp, heartbeat); returns whether the heartbeat was sent. */
+  onComplete?: () => Promise<boolean>;
+}
+
+export interface RunResult {
+  runId: string;
+  ok: boolean;
+  error?: string;
+}
+
+export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Promise<RunResult> {
+  const { job, target, sessions, log, alerting, now } = o;
+  const run = job;
+  const runId = await startRun(db, run, now);
+  let ok = false;
+  let error: string | undefined;
+  let heartbeatSent = false;
+  let health: string | undefined;
+  try {
+    const infos = allInfos(plugins);
+    await savePluginInfos(db, infos, now);
+    await seedSourceRoles(
+      db,
+      infos.flatMap((i) =>
+        i.kind in DATA_KIND
+          ? [
+              {
+                key: i.key,
+                dataKind: DATA_KIND[i.kind as keyof typeof DATA_KIND],
+                suggestedRole: i.suggestedRole,
+              },
+            ]
+          : [],
+      ),
+    );
+    if (plugins.missing.length > 0) log.info(`Not present: ${plugins.missing.join(', ')}`);
+    log.info(`${job} for ${target}`, { runId });
+
+    // Before any request: the cash series is checked on this calendar.
+    const checkedSessions =
+      o.seriesSessions ??
+      fail('No us-fed calendar plug-in is loaded (the cash series is checked on it).');
+    let incomplete: string[] = [];
+    const markIncomplete = (what: string) => {
+      if (!incomplete.includes(what)) incomplete.push(what);
+    };
+    if (run !== 'checks') {
+      const reports = await ingest(db, plugins, {
+        mode: run,
+        to: target,
+        sessions,
+        runId,
+        log,
+        context: o.context,
+      });
+      for (const r of reports) {
+        log.info(summary(r), { source: r.source, failed: r.failed, missing: r.missing });
+      }
+      incomplete = reports.filter((r) => r.stopped || r.failed.length > 0).map((r) => r.source);
+    }
+
+    // Checks run whatever the sources did: a missing source is itself a finding.
+    const checked = await verify(db, {
+      runId,
+      sessions,
+      to: target,
+      seriesSessions: checkedSessions,
+      now,
+      ...(job === 'daily'
+        ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
+        : { mode: 'full' as const }),
+    });
+    log.info(`Checks: ${checked.results} results`, {
+      byStatus: checked.byStatus,
+      stored: checked.stored,
+    });
+    health = checked.health;
+    log.info(`Data health on ${target}: ${checked.health}`, { standIns: checked.standIns });
+    for (const s of checked.standInsOff) {
+      log.warn(
+        `${s.ticker} ${s.date}: the stand-in was off the primary by ${(100 * s.deviation).toFixed(3)}%`,
+      );
+    }
+
+    // Forward records (A2; nothing before forward_records_from is set, the A1 gate).
+    if (run === 'daily') {
+      const f = await forward(db, {
+        runId,
+        sessions,
+        to: target,
+        standInsOff: checked.standInsOff,
+      });
+      if (f.skipped) log.info(`Forward records: ${f.skipped}`);
+      else {
+        log.info(
+          `Forward records: ${f.appended} new entries, ${f.safeStateDays} on the safe state`,
+          {
+            annotations: f.annotations,
+          },
+        );
+        for (const t of f.today) log.info(`${t.version}: ${t.allocation} (${t.dataStatus})`, t);
+        // Undelivered alerts are retried at the next check (sent ones are not repeated).
+        const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
+        log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
+        if (sent.failed.length > 0) markIncomplete('alerts');
+        // The current engine must reproduce the record, or each difference is annotated.
+        const r = await recompute(db, { runId, code: o.code });
+        log.info(`Recomputed ${r.checked} recorded days: ${r.differences.length} new differences`);
+        if (r.differences.length > 0) {
+          log.warn('The engine decides recorded days differently', { differences: r.differences });
+        }
+        if (r.errors.length > 0) {
+          log.warn('Recompute could not evaluate', { errors: r.errors });
+          markIncomplete('recompute');
+        }
+        // Every annotated difference not yet told (also those found by `pnpm strategy recompute`).
+        const told = await sendRecomputeDiffers(db, alerting);
+        if (told.failed.length > 0) markIncomplete('alerts');
+        const a = await anchor(db, { date: target, ...o.tsa });
+        if (a.status === 'anchored') log.info(`Chain heads timestamped by ${a.authority}`);
+        else if (a.status === 'skipped') log.warn(`Chain heads not timestamped: ${a.reason}`);
+        else {
+          log.warn('Timestamping failed', { errors: a.errors });
+          markIncomplete('timestamp');
+        }
+      }
+      if (checked.health !== 'green') {
+        const sent = await sendDataHealthAdmin(db, {
+          ...alerting,
+          health: checked.health,
+          reasons: checked.reasons,
+        });
+        if (sent.failed.length > 0) markIncomplete('alerts');
+      }
+    }
+
+    // The run is done when every source answered for every item.
+    ok = incomplete.length === 0;
+    if (!ok) error = `incomplete: ${incomplete.join(', ')}`;
+    if (run === 'daily') await o.afterDaily?.();
+    if (ok && run === 'daily') heartbeatSent = (await o.onComplete?.()) ?? false;
+  } catch (e) {
+    error = e instanceof Error ? (e.stack ?? e.message) : String(e);
+    log.warn('Run failed', { error });
+  } finally {
+    await finishRun(db, runId, { ok, error, datesProcessed: [target], heartbeatSent });
+    if (!ok) {
+      try {
+        const sent = await sendJobFailure(db, {
+          ...alerting,
+          job,
+          error: error ?? 'unknown',
+          ...(health && { health }),
+        });
+        if (sent.failed.length) log.warn('Admin alert not delivered', { failed: sent.failed });
+      } catch (e) {
+        log.warn('Admin alert failed', { error: String(e) });
+      }
+    }
+  }
+  log.info(ok ? `${job} done` : `${job} not complete: ${error}`);
+  return { runId, ok, ...(error && { error }) };
+}
+
+function summary(r: SourceReport): string {
+  const parts = [`${r.kind} ${r.source}: ${r.ok.length} ok`];
+  if (r.failed.length) parts.push(`${r.failed.length} failed`);
+  if (r.stopped) parts.push(`stopped (${r.stopped})`);
+  parts.push(`${r.inserted} new, ${r.revised} revised, ${r.readjustments} re-adjustments`);
+  return parts.join(', ');
+}
+
+function fail(message: string): never {
+  throw new Error(message);
+}

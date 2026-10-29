@@ -1,0 +1,223 @@
+// A whole daily run with in-memory plug-ins (no network): ingest, checks, forward record,
+// alerts, and how an incomplete run is reported.
+import { type RawBar, zonedInstant } from '@saku/core';
+import { Sessions } from '@saku/data';
+import {
+  addChannel,
+  createUser,
+  forwardRecord,
+  registerVersion,
+  schema,
+  setSetting,
+  upsertSymbols,
+} from '@saku/db';
+import { testDb } from '@saku/db/testing';
+import { describe, expect, it } from 'vitest';
+import { emptyPlugins } from '../registry';
+import type { BarSource, Notifier, PluginInfo, SeriesSource } from '../types';
+import { type RunOptions, runJob } from './run';
+
+const sessions = new Sessions({
+  id: 't',
+  version: 't',
+  validFrom: '2025-12-01',
+  validTo: '2026-12-31',
+  holidays: [],
+});
+const TARGET = '2026-01-16';
+const DATES = sessions.between('2025-12-29', TARGET);
+const SECRET = 'r'.repeat(32);
+const quiet = { info() {}, warn() {} };
+const info = (key: string, kind: PluginInfo['kind'], extra: Partial<PluginInfo> = {}) =>
+  ({
+    key,
+    kind,
+    name: key,
+    provides: {},
+    suggestedRole: key === 'p' ? 'primary' : 'secondary',
+    termsUrl: 'https://example.test',
+    ...extra,
+  }) as PluginInfo;
+
+const closes = DATES.map((_, i) => 100 * 1.002 ** i);
+const barSource = (key: string, broken = false): BarSource & { calls: number } => {
+  const s = {
+    info: info(key, 'bar'),
+    calls: 0,
+    async fetchBars(_ticker: string, from: string, to: string): Promise<RawBar[]> {
+      s.calls++;
+      if (broken) throw new Error(`${key}: HTTP 500`);
+      return DATES.flatMap((date, i) =>
+        date >= from && date <= to
+          ? [
+              {
+                date,
+                open: closes[i]!,
+                high: closes[i]!,
+                low: closes[i]!,
+                close: closes[i]!,
+                closeIsSplitAdjusted: false,
+                volume: 1000,
+                divCash: 0,
+                splitFactor: 1,
+              },
+            ]
+          : [],
+      );
+    },
+  };
+  return s;
+};
+// The cash rate: each value published at 18:00 New York the next session.
+const rates: SeriesSource = {
+  info: info('rates', 'series', {
+    suggestedRole: 'primary',
+    provides: { series: ['CASH'], cashRates: { USD: 'CASH' } },
+  }),
+  async fetchSeries(_id, from, to) {
+    return DATES.filter((d) => d >= from && d <= to && d < TARGET).map((date) => ({
+      date,
+      value: 4,
+      publishedAt: zonedInstant(sessions.after(date), '18:00', 'America/New_York'),
+    }));
+  },
+};
+
+function fakeNotifier() {
+  const sent: { target: string; text: string }[] = [];
+  const notifier: Notifier = {
+    info: { key: 'fake', kind: 'notifier', name: 'Fake', termsUrl: 'x', maxLength: 2000 },
+    validTarget: () => true,
+    send: async (target, text) => void sent.push({ target, text }),
+  };
+  return { notifier, sent };
+}
+
+async function setup() {
+  const db = await testDb();
+  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  const owner = await createUser(db, {
+    username: 'alex',
+    passwordHash: 'x',
+    totpSecretEnc: 'x',
+    totpLastStep: 1,
+    backupCodeHashes: ['a'],
+    isAdmin: true,
+  });
+  await setSetting(db, 'forward_records_from', '2026-01-02');
+  const version = await registerVersion(db, {
+    ownerId: owner,
+    name: 'Trend',
+    at: new Date('2026-01-14T22:00:00Z'),
+    strategy: {
+      name: 'Trend',
+      account: 'taxable',
+      safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+      evaluation: { frequency: 'daily' },
+      signals: [
+        {
+          id: 'A',
+          type: 'compare',
+          left: { indicator: 'price', ticker: 'AAA' },
+          op: '>',
+          right: { indicator: 'sma', ticker: 'AAA', length: 3 },
+        },
+      ],
+      allocations: [
+        { name: 'Risk on', when: { all: ['A'] }, holdings: [{ ticker: 'AAA', weight: 100 }] },
+        { name: 'Calm', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+      ],
+    },
+  });
+  await addChannel(db, owner, { type: 'fake', target: 'me', authSecret: SECRET });
+  await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+  return { db, version };
+}
+
+function options(
+  notifier: Notifier,
+  over: Partial<RunOptions> = {},
+): RunOptions & {
+  hooks: string[];
+} {
+  const hooks: string[] = [];
+  return {
+    job: 'daily',
+    target: TARGET,
+    sessions,
+    seriesSessions: sessions,
+    now: new Date('2026-01-17T01:30:00Z'),
+    log: quiet,
+    context: () => ({ http: null as never, now: new Date(), log: quiet }),
+    alerting: {
+      date: TARGET,
+      notifiers: [notifier],
+      authSecret: SECRET,
+      context: () => ({ http: null as never, now: new Date(), log: quiet }),
+      log: quiet,
+    },
+    tsa: { authorities: [] },
+    code: 'test',
+    afterDaily: async () => void hooks.push('backup'),
+    onComplete: async () => {
+      hooks.push('heartbeat');
+      return true;
+    },
+    hooks,
+    ...over,
+  };
+}
+
+const plugins = (bars: BarSource[]) => ({ ...emptyPlugins(), bars, series: [rates] });
+
+describe('a daily run', () => {
+  it('completes: records the days since registration and tells the owner', async () => {
+    const { db, version } = await setup();
+    const { notifier, sent } = fakeNotifier();
+    const o = options(notifier);
+    const r = await runJob(db, plugins([barSource('p'), barSource('s')]), o);
+    expect(r).toMatchObject({ ok: true });
+    expect(o.hooks).toEqual(['backup', 'heartbeat']);
+    const record = await forwardRecord(db, version.id);
+    expect(record.map((e) => [e.date, e.allocation, e.dataStatus])).toEqual([
+      ['2026-01-15', 'Risk on', 'green'],
+      ['2026-01-16', 'Risk on', 'green'],
+    ]);
+    expect(record.every((e) => e.equity !== null)).toBe(true);
+    // Both of the owner's channels (the admin one also gets operational alerts).
+    expect(sent.map((m) => m.target)).toEqual(['me', 'ops']);
+    expect(sent[0]!.text).toContain('First recorded allocation: Risk on (signal of 2026-01-16).');
+    const [run] = await db.select().from(schema.jobRuns);
+    expect(run).toMatchObject({ status: 'success', heartbeatSent: true });
+  });
+
+  it('a failing source leaves it incomplete: no heartbeat, the admins are told', async () => {
+    const { db } = await setup();
+    const { notifier, sent } = fakeNotifier();
+    const o = options(notifier);
+    const r = await runJob(db, plugins([barSource('p'), barSource('s', true)]), o);
+    expect(r).toMatchObject({ ok: false, error: 'incomplete: s' });
+    expect(o.hooks).toEqual(['backup']);
+    const ops = sent.filter((m) => m.target === 'ops').map((m) => m.text);
+    expect(ops.some((t) => t.startsWith('Saku: data for 2026-01-16 is not green'))).toBe(true);
+    expect(ops.some((t) => t.startsWith('Saku: the daily run for 2026-01-16 did not finish'))).toBe(
+      true,
+    );
+    const [run] = await db.select().from(schema.jobRuns);
+    expect(run).toMatchObject({ status: 'failed', heartbeatSent: false });
+  });
+
+  it('without the cash calendar it fails before any request', async () => {
+    const { db } = await setup();
+    const { notifier } = fakeNotifier();
+    const primary = barSource('p');
+    const r = await runJob(
+      db,
+      plugins([primary, barSource('s')]),
+      options(notifier, { seriesSessions: undefined }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('No us-fed calendar');
+    expect(primary.calls).toBe(0);
+  });
+});
