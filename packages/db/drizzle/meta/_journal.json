@@ -43,6 +43,13 @@
       "when": 1793293397268,
       "tag": "0005_health_coverage",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1793294499831,
+      "tag": "0006_issuer_records",
+      "breakpoints": true
     }
   ]
 }

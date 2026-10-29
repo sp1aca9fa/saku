@@ -5,6 +5,8 @@ import {
   seedSourceRoles,
   setSourceRole,
   startRun,
+  setSetting,
+  storeIssuerRecords,
   storeRawBars,
   storeSeries,
   symbolId,
@@ -14,6 +16,7 @@ import { testDb } from '@saku/db/testing';
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { savePluginInfos } from '../registry';
+import { issuerStats } from './issuer';
 import { verify } from './verify';
 
 const sessions = new Sessions({
@@ -343,5 +346,67 @@ describe('verify', () => {
     expect(after.map(({ status: _, ...values }) => values)).toEqual(
       before.map(({ status: _, ...values }) => values),
     );
+  });
+
+  it('runs layer D for issuer sources with a role, advisory: yellow at most', async () => {
+    const { db } = await setup();
+    await seedSourceRoles(db, [{ key: 'iss', dataKind: 'issuer', suggestedRole: 'check' }]);
+    const aaa = (await symbolId(db, 'AAA'))!;
+    const closes = [100, 101, 101.51, 100.4949];
+    const issue = (source: string, nav: (close: number, i: number) => number) =>
+      storeIssuerRecords(db, {
+        symbolId: aaa,
+        source,
+        records: closes.map((close, i) => ({
+          date: dates[i]!,
+          nav: nav(close, i),
+          ...(i === 2 && { distribution: 0.5 }),
+        })),
+        fetchedAt: 't',
+      });
+    // The NAV is 10% off on the 7th; a source without a role is far off every day.
+    await issue('iss', (close, i) => (i === 2 ? close * 1.1 : close));
+    await issue('other', (close) => close * 2);
+    await setSetting(db, 'issuer_nav_tolerance', '{"AAA":0.01}');
+    const runId = await startRun(db, 'daily');
+    await verify(db, { runId, sessions, mode: 'daily', from: '2026-01-06', to: '2026-01-08' });
+    const d = await db
+      .select()
+      .from(schema.checkResults)
+      .where(eq(schema.checkResults.layer, 'D'))
+      .orderBy(asc(schema.checkResults.date));
+    expect(d.every((r) => r.source === 'iss' && r.symbolId === aaa)).toBe(true);
+    expect(d.every((r) => r.status !== 'red')).toBe(true);
+    expect(d.filter((r) => r.status !== 'green').map((r) => `${r.checkName} ${r.date}`)).toEqual([
+      'nav_premium 2026-01-07',
+    ]);
+    expect(d.map((r) => r.checkName)).toEqual(
+      expect.arrayContaining(['distribution_match', 'issuer_stale']),
+    );
+    const health = await db
+      .select()
+      .from(schema.dataHealth)
+      .where(and(eq(schema.dataHealth.symbolId, aaa), eq(schema.dataHealth.date, '2026-01-07')));
+    expect(health[0]).toMatchObject({ status: 'yellow' });
+    expect(health[0]!.reasons).toContain('D.nav_premium@iss');
+
+    // The observed premium per fund and issuer source (every source with records).
+    const stats = await issuerStats(db, { from: '2026-01-01', to: '2026-01-08' });
+    expect(stats.map((r) => `${r.ticker} ${r.source} ${r.days}`)).toEqual([
+      'AAA iss 4',
+      'AAA other 4',
+    ]);
+    expect(stats[0]!.max).toBeCloseTo(1 - 1 / 1.1, 12);
+    expect(stats[0]!.median).toBe(0);
+    expect(stats[0]!.tolerance).toBe(0.01);
+    expect(stats[1]!.median).toBeCloseTo(0.5, 12);
+    expect(await issuerStats(db, { from: '2026-01-08', to: '2026-01-08' })).toMatchObject([
+      { days: 1 },
+      { days: 1 },
+    ]);
+    expect(await issuerStats(db, { from: '2026-02-01', to: '2026-02-08' })).toEqual([
+      { ticker: 'AAA', source: 'iss', days: 0, tolerance: 0.01 },
+      { ticker: 'AAA', source: 'other', days: 0, tolerance: 0.01 },
+    ]);
   });
 });

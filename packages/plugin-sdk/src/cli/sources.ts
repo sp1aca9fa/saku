@@ -6,11 +6,15 @@
 //   pnpm sources set <bars|series|fx|issuer> <key> <primary|secondary|check>
 //   pnpm sources remove <kind> <key>                      stop using it (its data stays; the
 //                                                         primary stays until another is set)
+//   pnpm sources issuer-stats [--years N]                 per fund and issuer source, the
+//                                                         observed |close / NAV - 1| over the
+//                                                         last N years (default 2), to set
+//                                                         issuer_nav_tolerance from
 //   pnpm csv import <file> --ticker <TICKER> --prices raw|split-adjusted [--source csv-<name>]
 //                                                         validated daily bars, stored as their
 //                                                         own source (default `csv`); give it a
 //                                                         role to use it
-import { SOURCE_ROLES, type SourceRole } from '@saku/core';
+import { SOURCE_ROLES, type SourceRole, tradingDateOf } from '@saku/core';
 import { Sessions, parseBarsCsv } from '@saku/data';
 import {
   activeSymbols,
@@ -26,6 +30,7 @@ import { exitIfUnmigrated } from '@saku/db/migrate';
 import { eq } from 'drizzle-orm';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
+import { issuerStats } from '../jobs/issuer';
 import { lock } from '../jobs/lock';
 import { allInfos, loadPlugins } from '../registry';
 import { DATA_KIND, dataKindOf, unassigned } from '../roles';
@@ -105,6 +110,34 @@ if (tool === 'sources' && command === 'list') {
   } catch (e) {
     fail(e instanceof Error ? e.message : String(e));
   }
+} else if (tool === 'sources' && command === 'issuer-stats') {
+  const yearsArg = flag('years');
+  const years = yearsArg === undefined ? 2 : Number(yearsArg);
+  if (!Number.isInteger(years) || years < 1 || years > 50) {
+    fail('--years is a whole number from 1 to 50.');
+  }
+  const to = tradingDateOf(new Date());
+  const start = new Date(`${to}T00:00:00Z`);
+  start.setUTCFullYear(start.getUTCFullYear() - years);
+  const from = start.toISOString().slice(0, 10);
+  const rows = await issuerStats(db, { from, to });
+  if (rows.length === 0) {
+    console.log('No issuer records stored (an issuer plug-in with a role fetches them).');
+  } else {
+    const pct = (v: number | undefined) => (v === undefined ? '-' : `${(100 * v).toFixed(3)}%`);
+    console.log(`|close / NAV - 1| from ${from} to ${to} (primary closes, stand-in days left out)`);
+    console.log('ticker  source  days  median  p99  max  tolerance set');
+    for (const r of rows) {
+      console.log(
+        `${r.ticker}  ${r.source}  ${r.days}  ${pct(r.median)}  ${pct(r.p99)}  ${pct(r.max)}  ` +
+          `${r.tolerance === undefined ? 'none (observed only)' : pct(r.tolerance)}`,
+      );
+    }
+    console.log(
+      'Set: pnpm settings set issuer_nav_tolerance \'{"<TICKER>":0.005}\' (a fraction, ' +
+        'above 0, at most 0.2; every fund in one map).',
+    );
+  }
 } else if (tool === 'csv' && command === 'import') {
   const file = rest[0] && !rest[0].startsWith('--') ? rest[0] : fail('Name the CSV file.');
   const ticker = flag('ticker') ?? fail('Name the ticker: --ticker <TICKER>.');
@@ -173,6 +206,7 @@ if (tool === 'sources' && command === 'list') {
 } else {
   fail(
     'Usage: pnpm sources list | set <kind> <key> <role> | remove <kind> <key> | ' +
+      'issuer-stats [--years N] | ' +
       'pnpm csv import <file> --ticker <TICKER> --prices raw|split-adjusted [--source csv-<name>]',
   );
 }

@@ -1,21 +1,25 @@
 // Layer F (requirements 04, A3): every material corruption of a source's data, injected into a
 // whole daily run with all sources available, is detected (never green) and never produces a
 // normal signal on red: the forward record and the alert carry the strategy's safe state.
-// Separately, a day with a single source is never green. Synthetic data, no network.
-import { type RawBar, totalReturnIndex } from '@saku/core';
+// Separately, a day with a single source is never green. Layer D (issuer data) faults are
+// advisory: yellow with the reason, never red, never a change of the normal signal. Synthetic
+// data, no network.
+import { type IssuerRecord, type RawBar, totalReturnIndex } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   addChannel,
   createUser,
   forwardRecord,
   registerVersion,
+  schema,
   setSetting,
   upsertSymbols,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
+import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { emptyPlugins } from '../registry';
-import type { BarSource, SeriesSource } from '../types';
+import type { BarSource, IssuerSource, SeriesSource } from '../types';
 import { runJob } from './run';
 import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
 
@@ -102,11 +106,51 @@ function source(key: string, o: { fault?: Fault; down?: boolean; adjusted?: bool
 
 const rates = cashRates(sessions, DATES, TARGET);
 
+/** A corruption of the issuer's records for a ticker. */
+type IssuerFault = (ticker: Ticker, records: IssuerRecord[]) => IssuerRecord[];
+
+/**
+ * An issuer publishing the clean history (NAV = the close, SPY's distribution, SSO's split),
+ * corrupted by `fault`; nothing after `until`; every call failing once `to` reaches `downFrom`.
+ */
+function issuerSource(o: { fault?: IssuerFault; until?: string; downFrom?: string } = {}) {
+  const data = clean();
+  const s: IssuerSource = {
+    info: testInfo('iss', 'issuer', { suggestedRole: 'check' }),
+    supports: (ticker) => ticker === 'SPY' || ticker === 'SSO',
+    async fetchRecords(ticker, from, to) {
+      if (o.downFrom && to >= o.downFrom) throw new Error('iss: HTTP 503');
+      const t = ticker as Ticker;
+      let records: IssuerRecord[] = data[t].map((b) => ({
+        date: b.date,
+        nav: b.close,
+        ...(b.divCash > 0 && { distribution: b.divCash }),
+        ...(b.splitFactor !== 1 && { split: b.splitFactor }),
+      }));
+      if (o.fault) records = o.fault(t, records);
+      return records.filter(
+        (r) => r.date >= from && r.date <= to && (!o.until || r.date <= o.until),
+      );
+    },
+  };
+  return s;
+}
+const onIssuerTarget =
+  (ticker: Ticker, f: (r: IssuerRecord) => IssuerRecord): IssuerFault =>
+  (t, records) =>
+    t !== ticker ? records : records.map((r) => (r.date === TARGET ? f(r) : r));
+/** Both funds' normal premium set (1%), so a NAV fault is graded, not only observed. */
+const TOLERANCES = '{"SPY":0.01,"SSO":0.01}';
+
 /**
  * A clean bootstrap up to the day before (the history the server holds), then the daily job for
  * the target day with these sources; returns the run, the day's forward entry and the alerts.
  */
-async function run(bars: BarSource[], series: SeriesSource = rates) {
+async function run(
+  bars: BarSource[],
+  series: SeriesSource = rates,
+  issuer?: { source: IssuerSource; tolerances?: string },
+) {
   const db = await testDb();
   await upsertSymbols(db, [
     { ticker: 'SPY', tier: 0, assetClass: 'equity', currency: 'USD' },
@@ -128,6 +172,7 @@ async function run(bars: BarSource[], series: SeriesSource = rates) {
     isAdmin: true,
   });
   await setSetting(db, 'forward_records_from', '2026-01-02');
+  if (issuer?.tolerances) await setSetting(db, 'issuer_nav_tolerance', issuer.tolerances);
   const version = await registerVersion(db, {
     ownerId: owner,
     name: 'Trend 2x',
@@ -159,7 +204,7 @@ async function run(bars: BarSource[], series: SeriesSource = rates) {
     const ctx = () => ({ http: null as never, now: new Date(now), log: quiet });
     return runJob(
       db,
-      { ...emptyPlugins(), bars: list, series: [series] },
+      { ...emptyPlugins(), bars: list, series: [series], issuers: issuer ? [issuer.source] : [] },
       {
         job,
         target,
@@ -192,6 +237,7 @@ async function run(bars: BarSource[], series: SeriesSource = rates) {
   const result = await job('daily', TARGET, '2026-01-17T01:30:00Z', bars);
   const today = (await forwardRecord(db, version.id)).find((e) => e.date === TARGET)!;
   return {
+    db,
     result,
     today,
     reasons: (JSON.parse(today.payload) as { reasons: string[] }).reasons,
@@ -373,6 +419,78 @@ describe('fault injection (layer F)', () => {
     expect(today).toMatchObject({ dataStatus: 'yellow', safeStateApplied: false });
     expect(reasons).toContain('SPY:single_source');
     expect(alert).toContain('Data health: yellow (computed with a warning).');
+  });
+
+  describe('layer D (issuer data, advisory)', () => {
+    /** The daily run's layer D results (the bootstrap's are stored by its own run). */
+    const layerD = async (db: Awaited<ReturnType<typeof run>>['db'], runId: string) =>
+      db.select().from(schema.checkResults).where(eq(schema.checkResults.runId, runId));
+
+    it('clean issuer data stays green (the control)', async () => {
+      const { db, result, today } = await run(sources(), rates, {
+        source: issuerSource(),
+        tolerances: TOLERANCES,
+      });
+      expect(result.ok).toBe(true);
+      expect(today).toMatchObject({
+        dataStatus: 'green',
+        safeStateApplied: false,
+        allocation: 'Risk on',
+      });
+      const d = (await layerD(db, result.runId)).filter((r) => r.layer === 'D');
+      // Every check ran on the target day, all green.
+      const onTarget = d.filter((r) => r.date === TARGET).map((r) => r.checkName);
+      expect(onTarget).toEqual(
+        expect.arrayContaining([
+          'nav_premium',
+          'distribution_match',
+          'split_match',
+          'issuer_stale',
+        ]),
+      );
+      expect(d.every((r) => r.status === 'green')).toBe(true);
+    });
+
+    for (const c of [
+      {
+        name: 'NAV off by 10% with a tolerance set',
+        source: () =>
+          issuerSource({ fault: onIssuerTarget('SPY', (r) => ({ ...r, nav: r.nav! * 1.1 })) }),
+        caught: 'SPY:D.nav_premium@iss',
+      },
+      {
+        name: "a missed distribution in the issuer's data",
+        source: () =>
+          issuerSource({
+            fault: onIssuerTarget('SPY', ({ distribution: _d, ...r }) => r),
+          }),
+        caught: 'SPY:D.distribution_match@iss',
+      },
+      {
+        name: 'the issuer source down for days',
+        source: () => issuerSource({ until: sessions.before(TARGET, 3), downFrom: TARGET }),
+        caught: 'SPY:D.issuer_stale@iss',
+      },
+    ]) {
+      it(`${c.name}: yellow with the reason, never red, the normal signal kept`, async () => {
+        const { db, result, today, reasons, alert } = await run(sources(), rates, {
+          source: c.source(),
+          tolerances: TOLERANCES,
+        });
+        // Best effort: an issuer failure never makes the run incomplete.
+        expect(result.ok).toBe(true);
+        expect(today).toMatchObject({
+          dataStatus: 'yellow',
+          safeStateApplied: false,
+          allocation: 'Risk on',
+        });
+        expect(reasons).toContain(c.caught);
+        expect(alert).toContain('Data health: yellow (computed with a warning).');
+        const d = (await layerD(db, result.runId)).filter((r) => r.layer === 'D');
+        expect(d.some((r) => r.status === 'yellow')).toBe(true);
+        expect(d.every((r) => r.status !== 'red')).toBe(true);
+      });
+    }
   });
 
   it('a stale cash rate is red for the day overall and tells the admins', async () => {

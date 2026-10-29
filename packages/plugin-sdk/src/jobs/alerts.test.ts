@@ -27,14 +27,17 @@ import {
 
 // Every check id in packages/data, read from its source so a new check needs a text.
 const dataSrc = join(dirname(fileURLToPath(import.meta.url)), '../../../data/src');
-const CHECKS = [
+/** The check names in the data package's files (`issuer.ts`: layer D, with texts of its own). */
+const checksIn = (keep: (file: string) => boolean) => [
   ...new Set(
     readdirSync(dataSrc)
-      .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+      .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts') && keep(f))
       .flatMap((f) => [...readFileSync(join(dataSrc, f), 'utf8').matchAll(/check: '(\w+)'/g)])
       .map((m) => m[1]!),
   ),
 ];
+const CHECKS = checksIn((f) => f !== 'issuer.ts');
+const ISSUER_CHECKS = checksIn((f) => f === 'issuer.ts');
 
 const sessions = new Sessions({
   id: 't',
@@ -353,5 +356,34 @@ describe('reason codes in words', () => {
     const { hasText } = await import('@saku/content');
     expect(CHECKS.length).toBeGreaterThan(5);
     for (const check of CHECKS) expect(hasText(`alerts.reason.check.${check}`), check).toBe(true);
+    expect(ISSUER_CHECKS.sort()).toEqual([
+      'distribution_match',
+      'issuer_stale',
+      'nav_premium',
+      'split_match',
+    ]);
+    for (const check of ISSUER_CHECKS) {
+      expect(hasText(`alerts.reason.issuer.${check}`), check).toBe(true);
+    }
+  });
+
+  it('words layer D (issuer data) reasons as issuer checks', () => {
+    expect(describeReason(t, 'SPY:D.nav_premium@iss')).toBe(
+      "SPY: the market close is further from the issuer's NAV than usual (iss)",
+    );
+    expect(describeReason(t, 'SSO:D.split_match@iss')).toBe(
+      "SSO: splits differ from the issuer's records (iss)",
+    );
+    expect(describeReason(t, 'SPY:D.issuer_stale@iss')).toBe(
+      "SPY: the issuer's NAV is more than one trading day old (iss)",
+    );
+    // Layer B keeps its own text for the same check name; an unknown layer D check stays a code.
+    expect(describeReason(t, 'SSO:B.split_match@s1')).toBe(
+      'SSO: splits differ between sources (s1)',
+    );
+    expect(describeReason(t, 'SPY:D.close_match@iss')).toBe('SPY:D.close_match@iss');
+    expect(describeReason(translator('ja'), 'SPY:D.distribution_match@iss')).toBe(
+      'SPY: 分配金が発行体の記録と異なります(iss)',
+    );
   });
 });

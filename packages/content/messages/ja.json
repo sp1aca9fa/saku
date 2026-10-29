@@ -56,6 +56,12 @@
         "index_match": "ファンドが指数に連動していません({source})",
         "fx_match": "ソース間で為替レートが異なります({source})"
       },
+      "issuer": {
+        "nav_premium": "市場の終値が発行体の基準価額から通常より離れています({source})",
+        "distribution_match": "分配金が発行体の記録と異なります({source})",
+        "split_match": "分割が発行体の記録と異なります({source})",
+        "issuer_stale": "発行体の基準価額が1取引日より古くなっています({source})"
+      },
       "single_source": "データがあるのは1つのソースだけです",
       "primary_missing": "主ソースにデータがなく、代替値も検証を通りませんでした",
       "no_data": "その日のデータがありません",

@@ -29,5 +29,6 @@ export function assignedOnly(plugins: LoadedPlugins, roles: Role[]): LoadedPlugi
     bars: keep(plugins.bars),
     series: keep(plugins.series),
     fx: keep(plugins.fx),
+    issuers: keep(plugins.issuers),
   };
 }

@@ -30,7 +30,7 @@ import {
 } from './alerts';
 import { anchor } from './anchor';
 import { forward, recompute } from './forward';
-import { DAILY_OVERLAP, ingest, type SourceReport } from './ingest';
+import { DAILY_OVERLAP, countsForRun, ingest, type SourceReport } from './ingest';
 import { integrity } from './integrity';
 import { parity } from './parity';
 import { storeRunChecks, verify } from './verify';
@@ -133,7 +133,15 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       for (const r of reports) {
         log.info(summary(r), { source: r.source, failed: r.failed, missing: r.missing });
       }
-      incomplete = reports.filter((r) => r.stopped || r.failed.length > 0).map((r) => r.source);
+      const failing = reports.filter((r) => r.stopped || r.failed.length > 0);
+      incomplete = failing.filter(countsForRun).map((r) => r.source);
+      // Best effort (issuer data): logged, graded by its staleness, the run still complete.
+      for (const r of failing.filter((x) => !countsForRun(x))) {
+        log.warn(`${r.kind} ${r.source} incomplete (best effort; staleness grades the day)`, {
+          failed: r.failed,
+          ...(r.stopped && { stopped: r.stopped }),
+        });
+      }
     }
 
     // Checks run whatever the sources did: a missing source is itself a finding.
@@ -251,7 +259,8 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       }
     }
 
-    // The run is done when every source answered for every item and the backup was made.
+    // The run is done when every source answered for every item (issuer sources aside) and the
+    // backup was made.
     if (job === 'daily') await o.afterDaily?.();
     ok = incomplete.length === 0 && failures.length === 0;
     if (!ok) {

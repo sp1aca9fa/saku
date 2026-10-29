@@ -2,7 +2,9 @@ import type { RawBar } from '@saku/core';
 import { describe, expect, it } from 'vitest';
 import {
   groupFactors,
+  issuerRecordsOf,
   storeFx,
+  storeIssuerRecords,
   storeRawBars,
   seriesPointInTime,
   fxPointInTime,
@@ -10,7 +12,15 @@ import {
   symbolId,
   upsertSymbols,
 } from './market';
-import { barRevisions, barsRaw, fxRates, readjustments, series, symbols } from './schema';
+import {
+  barRevisions,
+  barsRaw,
+  fxRates,
+  issuerRecords,
+  readjustments,
+  series,
+  symbols,
+} from './schema';
 import { testDb } from './testing';
 
 const bar = (date: string, close: number, extra: Partial<RawBar> = {}): RawBar => ({
@@ -209,5 +219,65 @@ describe('vintages', () => {
     ]);
     const pit = await fxPointInTime(db, 'USDXXX', 'x');
     expect(pit.asOf('2026-01-02', 't3x')!.value).toBe(101);
+  });
+});
+
+describe('issuer records', () => {
+  it('adds a row only for new or changed values; reads take the latest per date', async () => {
+    const { db, id } = await setup();
+    const store = (records: Parameters<typeof storeIssuerRecords>[1]['records'], at: string) =>
+      storeIssuerRecords(db, { symbolId: id, source: 'iss', records, fetchedAt: at });
+    expect(
+      await store(
+        [
+          { date: '2026-01-02', nav: 100 },
+          { date: '2026-01-05', nav: 101, distribution: 0.5 },
+        ],
+        't1',
+      ),
+    ).toBe(2);
+    // Same values again: nothing new. A changed NAV and a removed distribution: new rows.
+    expect(
+      await store(
+        [
+          { date: '2026-01-02', nav: 100 },
+          { date: '2026-01-05', nav: 101 },
+        ],
+        't2',
+      ),
+    ).toBe(1);
+    expect(await store([{ date: '2026-01-02', nav: 100.5 }], 't3')).toBe(1);
+    expect(await db.select().from(issuerRecords)).toHaveLength(4);
+    const read = await issuerRecordsOf(db, id);
+    expect(read.get('iss')).toEqual([
+      { date: '2026-01-02', nav: 100.5 },
+      { date: '2026-01-05', nav: 101 },
+    ]);
+    // Back to an earlier value is a change from the latest: stored again, never overwritten.
+    expect(await store([{ date: '2026-01-02', nav: 100 }], 't4')).toBe(1);
+    expect((await issuerRecordsOf(db, id)).get('iss')![0]).toEqual({
+      date: '2026-01-02',
+      nav: 100,
+    });
+    expect((await issuerRecordsOf(db, id, ['other'])).size).toBe(0);
+  });
+
+  it('refuses a response with a date twice, a bad date or a value that is not a number', async () => {
+    const { db, id } = await setup();
+    const store = (records: Parameters<typeof storeIssuerRecords>[1]['records']) =>
+      storeIssuerRecords(db, { symbolId: id, source: 'iss', records, fetchedAt: 't' });
+    await expect(
+      store([
+        { date: '2026-01-02', nav: 1 },
+        { date: '2026-01-02', nav: 2 },
+      ]),
+    ).rejects.toThrow(/same date twice/);
+    await expect(store([{ date: '01/02/2026', nav: 1 }])).rejects.toThrow(/YYYY-MM-DD/);
+    await expect(store([{ date: '2026-01-02', nav: NaN }])).rejects.toThrow(/nav/);
+    await expect(store([{ date: '2026-01-02', split: '2' as unknown as number }])).rejects.toThrow(
+      /split/,
+    );
+    expect(await db.select().from(issuerRecords)).toHaveLength(0);
+    expect(await store([])).toBe(0);
   });
 });

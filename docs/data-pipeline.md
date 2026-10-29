@@ -1,15 +1,15 @@
 # Data pipeline
 
-How data gets from the sources into Saku and how it is checked. Requirements: `docs/requirements/04-data-pipeline.md`. Status: Stage A1 (ingestion, adjusted series, layers A-C) and the first A2 parts (health status, the stand-in rule; the decision-margin test comes with the strategy engine); the fault-injection suite, the weekly run and layer E on stored data (A3); source roles and the CSV fallback (A3); issuer data (layer D) follows in A3.
+How data gets from the sources into Saku and how it is checked. Requirements: `docs/requirements/04-data-pipeline.md`. Status: Stage A1 (ingestion, adjusted series, layers A-C) and the first A2 parts (health status, the stand-in rule; the decision-margin test comes with the strategy engine); the fault-injection suite, the weekly run and layer E on stored data (A3); source roles and the CSV fallback (A3); issuer data (layer D, advisory) in A3.
 
 ## Flow
 
 1. **Hourly check** (`saku-daily.timer`, :20): `pnpm probe`, then `pnpm daily`.
 2. **Daily job**, once per trading day: the target date is the latest NYSE session past 20:00 New York time (`SAKU_DAILY_AFTER`). Already stamped: exit.
-3. **Ingest** (`plugin-sdk/jobs/ingest.ts`): every bar source in turn, for every active symbol, the last 10 sessions up to the target; then series (FRED `DTB3`, `SP500`) and FX (`USD` + base currency) from every source that supports the pair.
+3. **Ingest** (`plugin-sdk/jobs/ingest.ts`): every bar source in turn, for every active symbol, the last 10 sessions up to the target; then series (FRED `DTB3`, `SP500`) and FX (`USD` + base currency) from every source that supports the pair; then issuer data (layer D) from every issuer source with a role, for each active symbol it supports.
 4. **Store** (`db/market.ts`): see Storage below.
-5. **Verify** (`plugin-sdk/jobs/verify.ts`): canonical bars from the primary with our adjusted series; layers A-C; results stored.
-6. **Backup**, then the stamp and the healthchecks.io ping, only when every source answered for every item.
+5. **Verify** (`plugin-sdk/jobs/verify.ts`): canonical bars from the primary with our adjusted series; layers A-D; results stored.
+6. **Backup**, then the stamp and the healthchecks.io ping, only when every source answered for every item (issuer sources aside: best effort, below).
 
 `pnpm bootstrap` fetches full history (from each symbol's inception, within each plan's history limit) and checks it; `pnpm checks` reruns the checks over full history.
 
@@ -29,6 +29,7 @@ A source that refuses (403, 429, a challenge page) or would pass 80% of a declar
 - **Raw bars** (`bars_raw`): every bar as each source sent it, keyed by symbol, date and source. Never deleted. A changed raw field (open, high, low, close, split-adjusted flag, volume, dividend, split) is logged in `bar_revisions` (old, new, when, run) before the row is updated. A date a source stops returning is kept and reported.
 - **Provider adjusted closes** keep the latest snapshot. A rewrite of past values (after a dividend or split) is one `readjustments` event per factor (consecutive dates with the same ratio within 1e-9), not one revision per day.
 - **Series and FX** keep every vintage: a value is stored only when it is new for its date and publication time. `known_at` is the publication time as UTC ISO text, or the fetch time when the source gives none; a publication date without a time of day is refused (read as midnight it would make a value known hours early). FRED gives only the vintage day: assumption, known from 18:00 New York that day (the H.15 and H.10 releases come out in the afternoon). ECB: 16:00 Frankfurt. `asOf` (A2) reads `known_at`.
+- **Issuer records** (`issuer_records`): NAV, distribution and split per symbol, issuer source and date. A row is added only when the values for that date differ from the latest stored (a vintage, never an overwrite); reads take the latest. A response with a date twice or a value that is not a number is refused whole. For checks only: never a value used in calculations.
 - **Canonical bars** (`bars`): the primary's values with our adjusted series, rebuilt by each verification run (they are derived; the raw data and its revisions are the record).
 
 ## Our adjusted series
@@ -64,6 +65,24 @@ Notes and assumptions:
 - **`unchanged_close`** flags a close equal to the previous session's (two days with the same close).
 - Gate counting (`pnpm spike`): a day's "pass" is all of its results for that layer green.
 
+## Issuer reconciliation (layer D)
+
+Requirements 04: market close vs issuer NAV within the fund's normal premium/discount, and distributions and splits matching the issuer's records; best effort, a check and not a gate. Issuer sites publish files, not official APIs, so issuer plug-ins (`IssuerSource`) are private; none is public. An issuer plug-in's roles are under the data kind `issuer` (`pnpm sources set issuer <key> check`); a source without a role is neither fetched nor checked.
+
+- **Fetching:** each issuer source with a role, for every active symbol it `supports`, in the daily window (10 sessions) or the full history like the other sources. A failure is logged and reported per symbol but does **not** make the run incomplete (an issuer site down is yellow under the severity rules, and would otherwise stop the heartbeat on every flaky site); its staleness grades the day instead.
+- **Checks** (`packages/data/src/issuer.ts`), for each symbol with records from an issuer source that has a role, one result per check and date:
+
+| Check | Rule | Tolerance | Status |
+|---|---|---|---|
+| `nav_premium` | \|close / NAV - 1\|, the primary's close (as traded) vs the issuer's NAV on the same date; a NAV not positive is a mismatch | the fund's `issuer_nav_tolerance`; none set: green, the deviation recorded (observed only) | green / <= 2x yellow / red, capped |
+| `distribution_match`, `split_match` | the issuer's events vs the primary's on the same dates, within the dates both cover (the issuer's first to last record) | 1% relative (layer B's event tolerance) | an event on one side only is a mismatch; capped |
+| `issuer_stale` | on the run's date, the latest NAV more than 1 session behind (only for a source that publishes NAV for the fund) | 1 session | yellow |
+
+- **Advisory cap:** every layer D result is at most yellow (`LAYER_D_MAX_STATUS`) until the owner has set each fund's tolerance from observed data and decides that layer D may turn a day red (a decisions-log entry). So layer D warns, never applies a safe state. Results feed the symbol's health like the other layers (reasons such as `D.nav_premium@<source>`).
+- **Assumption:** an issuer source reports every distribution and split in the dates it covers (first to last record); one it leaves out reads as a mismatch.
+- **Setting** `issuer_nav_tolerance`: a JSON map of ticker to a fraction, each above 0 and at most 0.2 (20%; wider would not catch a decimal error), e.g. `pnpm settings set issuer_nav_tolerance '{"<TICKER>":0.005}'` (the whole map each time).
+- **Stats** to set it from: `pnpm sources issuer-stats [--years N]` (default 2) prints, per fund and issuer source with stored records, the days with both a primary close and a NAV over the last N years, the median, 99th percentile (linear interpolation between ranks) and largest \|close / NAV - 1\|, and the tolerance set. Closes are the canonical bars from the primary (stand-in days left out).
+
 ## Data health
 
 Each run grades every symbol and trading day (`data_health`, and `bars.status` on the canonical bar), and the day overall:
@@ -89,12 +108,12 @@ Stand-ins are kept in `stand_ins`. When the primary's bar arrives, the canonical
 
 ## Source roles and the CSV fallback
 
-- **Roles** are seeded from the plug-ins' suggestions on the first run of each data kind (one primary). After that the admin decides: `pnpm sources list` (roles in order, and loaded plug-ins that have none), `pnpm sources set <bars|series|fx> <key> <primary|secondary|check>` (a new primary turns the old one into a secondary), `pnpm sources remove <kind> <key>` (its stored data stays). The primary is never demoted or removed by itself: name its successor first, so each data kind keeps exactly one. A source without a role is neither fetched from nor checked. Role changes and imports are refused while a job runs (try again after it). Every run logs loaded plug-ins without a role. Each change is in the activity log. The Settings page replaces this with D1.
+- **Roles** are seeded from the plug-ins' suggestions on the first run of each data kind (one primary). After that the admin decides: `pnpm sources list` (roles in order, and loaded plug-ins that have none), `pnpm sources set <bars|series|fx|issuer> <key> <primary|secondary|check>` (a new primary turns the old one into a secondary), `pnpm sources remove <kind> <key>` (its stored data stays). The primary is never demoted or removed by itself: name its successor first, so each data kind keeps exactly one. A source without a role is neither fetched from nor checked. Role changes and imports are refused while a job runs (try again after it). Every run logs loaded plug-ins without a role. Each change is in the activity log. The Settings page replaces this with D1.
 - **CSV fallback** (`pnpm csv import <file> --ticker SPY --prices raw|split-adjusted [--source csv-<name>]`): columns `date,open,high,low,close,volume,dividend,split` (only `date` and `close` required; dividend 0 and split 1 when empty). The admin states whether the prices are as traded or split-adjusted (many exports give split-adjusted closes); split-adjusted ones are put back on the traded basis with the file's own split column, like any split-adjusted source. Validated before anything is stored: plain decimal numbers, `YYYY-MM-DD` trading days inside the calendar, in order, each once, and layer A's structure checks on every bar (missing trading days in the file's range are listed as a warning, since a fallback may cover some days only); unknown columns (an adjusted close, for example) refuse the file, since derived values are never imported. One bad row refuses the whole file. The bars are stored as raw data of their own source (`csv` by default, never a plug-in's key) through the revision log, and are used once that source has a role, like any source: as a secondary to cross-check, or as the primary while the main source is down (then `pnpm sources set bars <main> primary` again). The next run's checks grade them.
 
 ## Fault injection (layer F)
 
-`packages/plugin-sdk/src/jobs/faults.test.ts` runs in CI on synthetic data: a clean bootstrap, then a whole daily run (ingest, checks, forward record, alerts) with one material fault in one source's response, all sources available (a primary and two secondaries, one sending adjusted closes). A clean run is green (the control). Each case asserts the grade, the check that caught it (a reason on the strategy's record) and, on red, the safe state in the record and the alert:
+`packages/plugin-sdk/src/jobs/faults.test.ts` runs in CI on synthetic data: a clean bootstrap, then a whole daily run (ingest, checks, forward record, alerts) with one material fault in one source's response, all sources available (a primary and two secondaries, one sending adjusted closes). A clean run is green (the control), also with clean issuer data. Each case asserts the grade, the check that caught it (a reason on the strategy's record) and, on red, the safe state in the record and the alert:
 
 | Fault | Injected into | Grade | Caught by |
 |---|---|---|---|
@@ -109,6 +128,7 @@ Stand-ins are kept in `stand_ins`. When the primary's bar arrives, the canonical
 | Timezone shift, each bar a session late | primary | red, safe state | B close |
 | Timezone shift, each bar a session early (the target day is missing) | primary | red, safe state | the 2x fund's stand-in refused (layer C) |
 | Missing day; the same day sent twice (the response is refused, the run incomplete) | primary | yellow (`stand_in`) | A missing day, the stand-in rule |
+| Issuer NAV off by 10% (tolerance set); a distribution missing in the issuer's data; the issuer down for days | the issuer source | yellow, the normal signal kept (layer D is advisory); the run complete | D `nav_premium`, `distribution_match`, `issuer_stale` |
 | Cash rate a week stale | the cash series | red for the day overall, admin alert; the strategy's own grade stays green (by design, above) | series freshness |
 
 A day only one source had is never green (`single_source`, yellow). New data paths add their cases here.
@@ -118,7 +138,7 @@ Open (owner decision): a strategy's grade reads only the target day's bars. When
 ## Weekly run and `pnpm verify` (layers E and G)
 
 - **`pnpm weekly`** (Sundays, `saku-weekly.timer`): refetches the full history from every source. Changed raw values go to the revision log (`bar_revisions`, old and new value) and the admins get one summary per run (ticker, field, source, count, dates), after the recompute of every recorded day (differences annotated and told, as in the daily run). A checked backup is made first. Then the checks over the full history, a data-health alert if the day turned non-green, and layer E.
-- **`pnpm verify`** (any time, no fetching; `pnpm checks` is the same): layers A-C over the full history and layer E.
+- **`pnpm verify`** (any time, no fetching; `pnpm checks` is the same): layers A-D over the full history and layer E.
 - **Layer E** (`jobs/integrity.ts`), for each registered version over today's canonical bars of what it reads: core vs the reference implementation (same days, signals and allocations; equity within 1e-9 relative), and incremental vs full (the latest 20 decision days and one every 250 back, each decided and valued from the bars up to that day only, against the full pass: no look-ahead and no state that depends on later data). Stored as layer E check results (summary per check, red ones in full); a red one fails the run and alerts the admins.
 - Series and FX values a refetch changes are kept as new vintages (point in time, never overwritten) and counted per source in the run log; the summary to the admins covers bars.
 - **testfol parity** (`jobs/parity.ts`, layer E check `testfol_parity`): each case in `plugins/test/testfol/<case>/case.json` is backtested on the stored canonical bars (`same_close`, decisions from the whole stored history up to `to`, the curve from the first decision day on or after `from`) and its CAGR, max drawdown and switches compared with testfol's within the requirements' tolerances. One result per case, stored and alerted like the other layer E results; no cases folder means no results (a log line). Case format, tolerances and known differences: `docs/parity.md`.

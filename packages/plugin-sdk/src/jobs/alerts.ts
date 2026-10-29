@@ -475,6 +475,14 @@ export function describeReasons(t: Translate, codes: string[]): string {
   return codes.map((code) => describeReason(t, code)).join('; ');
 }
 
+/** A check's text: layer D (issuer data) has its own, other layers share them by check name. */
+function checkText(layer: string, check: string): string | undefined {
+  const issuer = `alerts.reason.issuer.${check}`;
+  if (layer === 'D' && hasText(issuer)) return issuer;
+  const shared = `alerts.reason.check.${check}`;
+  return layer !== 'D' && hasText(shared) ? shared : undefined;
+}
+
 export function describeReason(t: Translate, code: string): string {
   const i = code.indexOf(':');
   const hasSubject = i > 0 && !code.startsWith('stand_in_refused:');
@@ -483,8 +491,8 @@ export function describeReason(t: Translate, code: string): string {
   let m: RegExpExecArray | null;
   let text: string | undefined;
   if (subject === 'evaluation') text = `${t('alerts.reason.evaluation')} (${rest})`;
-  else if ((m = /^[A-E]\.(\w+)@(.+)$/.exec(rest)) && hasText(`alerts.reason.check.${m[1]}`)) {
-    text = t(`alerts.reason.check.${m[1]}`, { source: m[2]! });
+  else if ((m = /^([A-E])\.(\w+)@(.+)$/.exec(rest)) && checkText(m[1]!, m[2]!)) {
+    text = t(checkText(m[1]!, m[2]!)!, { source: m[3]! });
   } else if ((m = /^stand_in@(.+)$/.exec(rest))) {
     text = t('alerts.reason.standIn', { source: m[1]! });
   } else if (rest.startsWith('stand_in_refused:')) text = t('alerts.reason.standInRefused');

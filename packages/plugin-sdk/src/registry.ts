@@ -27,7 +27,7 @@ export interface LoadedPlugins extends Required<PluginModule> {
 }
 
 export function emptyPlugins(): LoadedPlugins {
-  return { bars: [], series: [], fx: [], calendars: [], notifiers: [], missing: [] };
+  return { bars: [], series: [], fx: [], issuers: [], calendars: [], notifiers: [], missing: [] };
 }
 
 export async function loadPlugins(root: string = findRepoRoot()): Promise<LoadedPlugins> {
@@ -42,6 +42,7 @@ export async function loadPlugins(root: string = findRepoRoot()): Promise<Loaded
     loaded.bars.push(...(mod.bars ?? []));
     loaded.series.push(...(mod.series ?? []));
     loaded.fx.push(...(mod.fx ?? []));
+    loaded.issuers.push(...(mod.issuers ?? []));
     loaded.calendars.push(...(mod.calendars ?? []));
     loaded.notifiers.push(...(mod.notifiers ?? []));
   }
@@ -54,6 +55,7 @@ export function allInfos(plugins: PluginModule): PluginInfo[] {
     ...(plugins.bars ?? []),
     ...(plugins.series ?? []),
     ...(plugins.fx ?? []),
+    ...(plugins.issuers ?? []),
     ...(plugins.calendars ?? []),
   ].map((p) => p.info);
 }

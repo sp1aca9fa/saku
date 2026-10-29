@@ -3,6 +3,7 @@
 import type {
   Calendar,
   FxRate,
+  IssuerRecord,
   PluginKind,
   RawBar,
   SeriesPoint,
@@ -11,7 +12,7 @@ import type {
 } from '@saku/core';
 import type { PoliteHttp } from './http';
 
-export type { Calendar, FxRate, RawBar, SeriesPoint };
+export type { Calendar, FxRate, IssuerRecord, RawBar, SeriesPoint };
 
 /** A provider's limits as its terms state them. The HTTP client stays under 80% of each. */
 export interface ProviderLimits {
@@ -109,6 +110,19 @@ export interface FxSource {
   ): Promise<FxRate[]>;
 }
 
+/** A fund issuer's published data (layer D, best effort): checks only, never a value used. */
+export interface IssuerSource {
+  info: PluginInfo;
+  /** Whether the source publishes records for this fund. */
+  supports(ticker: string): boolean;
+  fetchRecords(
+    ticker: string,
+    from: TradingDate,
+    to: TradingDate,
+    ctx: PluginContext,
+  ): Promise<IssuerRecord[]>;
+}
+
 export interface CalendarSource {
   info: PluginInfo;
   calendars: Calendar[];
@@ -141,6 +155,7 @@ export interface PluginModule {
   bars?: BarSource[];
   series?: SeriesSource[];
   fx?: FxSource[];
+  issuers?: IssuerSource[];
   calendars?: CalendarSource[];
   notifiers?: Notifier[];
 }

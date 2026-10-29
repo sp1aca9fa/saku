@@ -1,11 +1,13 @@
 // Builds canonical bars from the primary source (a secondary's bar standing in where the primary
 // has none and the stand-in rule allows it), with our adjusted series, runs layers A-C over
-// stored data and grades each symbol and day (data health). Daily runs store every result and
-// health row in their window; full-history passes store one summary per check plus every
-// non-green result and symbol health row (requirements 04), the overall health row of every
-// date they graded and each symbol's graded date range (`health_coverage`). A symbol without any
-// primary bar is graded too: red `primary_missing` (04 severity rules: primary data missing with
-// no usable stand-in; a stand-in needs the primary's history around it).
+// stored data, layer D (issuer reconciliation, advisory: yellow at most) for every symbol with
+// records from an issuer source that has a role, and grades each symbol and day (data health).
+// Daily runs store every result and health row in their window; full-history passes store one
+// summary per check plus every non-green result and symbol health row (requirements 04), the
+// overall health row of every date they graded and each symbol's graded date range
+// (`health_coverage`). A symbol without any primary bar is graded too: red `primary_missing`
+// (04 severity rules: primary data missing with no usable stand-in; a stand-in needs the
+// primary's history around it).
 import type { HealthStatus, RawBar, TradingDate } from '@saku/core';
 import { totalReturnIndex } from '@saku/core';
 import {
@@ -18,6 +20,7 @@ import {
   indexCheck,
   layerA,
   layerB,
+  layerD,
   leverageCheck,
   seriesHealth,
   standIns,
@@ -25,7 +28,15 @@ import {
   unsplit,
   worst,
 } from '@saku/data';
-import { type Db, activeSymbols, getSetting, schema, seriesPointInTime } from '@saku/db';
+import {
+  type Db,
+  activeSymbols,
+  getSetting,
+  issuerRecordsOf,
+  navTolerances,
+  schema,
+  seriesPointInTime,
+} from '@saku/db';
 import { cashSeries } from './cash';
 import { and, asc, eq, gte, isNull, lte, min, sql } from 'drizzle-orm';
 
@@ -323,6 +334,14 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   };
 
   const seriesRoles = await roles(db, 'series');
+  // Layer D: every issuer source with a role (they are all check sources).
+  const issuer = await roles(db, 'issuer');
+  const issuerSources = [
+    ...(issuer.primary ? [issuer.primary] : []),
+    ...issuer.secondaries,
+    ...issuer.checks,
+  ];
+  const navTolerance = issuerSources.length > 0 ? await navTolerances(db) : {};
   for (const s of symbols) {
     const bySource = raw.get(s.id)!;
     // A primary that delivers split-adjusted closes is put back on the raw basis too.
@@ -373,6 +392,19 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       add(leverageCheck(primary, u, s.leverageFactor));
     }
     if (index) add(indexCheck(primary, index));
+    if (issuerSources.length > 0) {
+      const tolerance = Object.hasOwn(navTolerance, s.ticker) ? navTolerance[s.ticker] : undefined;
+      for (const [source, records] of await issuerRecordsOf(db, s.id, issuerSources)) {
+        add(
+          layerD(primary, records, {
+            source,
+            sessions: o.sessions,
+            to: o.to,
+            ...(tolerance !== undefined && { tolerance }),
+          }),
+        );
+      }
+    }
     results.push(...own.map((r) => ({ ...r, symbolId: s.id })));
     if (primary.length === 0) {
       // No primary bar at all (a new primary without this symbol's history, or none fetched yet):

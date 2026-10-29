@@ -327,6 +327,26 @@ export const series = sqliteTable(
   (t) => [primaryKey({ columns: [t.series, t.date, t.source, t.knownAt, t.fetchedAt] })],
 );
 
+/**
+ * What fund issuers publish (layer D, best effort): NAV, distributions and splits per date. A
+ * changed value is a new row (the latest fetch counts), never an overwrite.
+ */
+export const issuerRecords = sqliteTable(
+  'issuer_records',
+  {
+    symbolId: integer('symbol_id')
+      .notNull()
+      .references(() => symbols.id),
+    source: text('source').notNull(),
+    date: text('date').notNull(),
+    nav: real('nav'),
+    distribution: real('distribution'),
+    split: real('split'),
+    fetchedAt: text('fetched_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.symbolId, t.source, t.date, t.fetchedAt] })],
+);
+
 // ---------------------------------------------------------------------------------------------
 // Checks and health
 

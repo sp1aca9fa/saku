@@ -56,6 +56,12 @@
         "index_match": "the fund does not track its index ({source})",
         "fx_match": "exchange rates differ between sources ({source})"
       },
+      "issuer": {
+        "nav_premium": "the market close is further from the issuer's NAV than usual ({source})",
+        "distribution_match": "distributions differ from the issuer's records ({source})",
+        "split_match": "splits differ from the issuer's records ({source})",
+        "issuer_stale": "the issuer's NAV is more than one trading day old ({source})"
+      },
       "single_source": "only one source had data",
       "primary_missing": "the main source has no data and no stand-in passed",
       "no_data": "no data for the day",

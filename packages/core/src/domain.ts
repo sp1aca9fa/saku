@@ -85,6 +85,20 @@ export interface SeriesPoint {
   publishedAt?: string;
 }
 
+/**
+ * What a fund issuer publishes for one date (layer D, best effort; for checks only, never a value
+ * used in calculations): the NAV per share, and on an ex-date the distribution per share or the
+ * split ratio (new shares per old share, 2 for a 2-for-1 split). Over the dates a source returns
+ * (its first to its last record), every distribution and split it does not report reads as a
+ * mismatch, so a source reports all of them in that range.
+ */
+export interface IssuerRecord {
+  date: TradingDate;
+  nav?: number;
+  distribution?: number;
+  split?: number;
+}
+
 export interface FxRate {
   /** Base then quote currency, e.g. `USDXXX` = units of XXX per USD. */
   pair: string;

@@ -1,7 +1,8 @@
 // Fetching from every source and storing what arrives (requirements 04: bootstrap and daily
 // imports). Sources run one after another, each with its own HTTP client. A source that refuses
 // (403, 429) or would pass its quota stops for the run; any other failure is recorded for that
-// ticker and the run goes on.
+// ticker and the run goes on. Issuer sources (layer D) are best effort: what they did is reported
+// like the others, but the caller does not count it against the run (`countsForRun`).
 import type { TradingDate } from '@saku/core';
 import {
   type Db,
@@ -9,6 +10,7 @@ import {
   fillSymbolMeta,
   getSetting,
   storeFx,
+  storeIssuerRecords,
   storeRawBars,
   storeSeries,
 } from '@saku/db';
@@ -24,7 +26,7 @@ export const DAILY_OVERLAP = 10;
 
 export interface SourceReport {
   source: string;
-  kind: 'bar' | 'series' | 'fx';
+  kind: 'bar' | 'series' | 'fx' | 'issuer';
   ok: string[];
   failed: { item: string; error: string }[];
   /** Why the source stopped for the run, or was skipped. */
@@ -111,6 +113,13 @@ function contextOrSkip(r: SourceReport, info: PluginInfo, o: IngestOptions) {
   }
 }
 
+/**
+ * Whether a source's failures make the run incomplete. Issuer data is a best-effort check
+ * (requirements 04: an issuer site unavailable is yellow), graded by its staleness
+ * (`D.issuer_stale`), so a flaky issuer site never stops the heartbeat.
+ */
+export const countsForRun = (r: SourceReport): boolean => r.kind !== 'issuer';
+
 export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
   const now = o.now ?? (() => new Date());
   const reports: SourceReport[] = [];
@@ -193,6 +202,39 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
         fetchedAt: now().toISOString(),
       });
     });
+  }
+
+  // Issuer data (layer D, best effort), for each active symbol a source supports.
+  for (const source of plugins.issuers) {
+    const r = report(source.info.key, 'issuer');
+    reports.push(r);
+    let supported: typeof symbols;
+    try {
+      supported = symbols.filter((s) => source.supports(s.ticker));
+    } catch (e) {
+      r.stopped = message(e);
+      o.log.warn(`${source.info.key} skipped`, { reason: r.stopped });
+      continue;
+    }
+    if (supported.length === 0) continue;
+    const ctx = contextOrSkip(r, source.info, o);
+    if (!ctx) continue;
+    await perItem(
+      r,
+      supported.map((s) => s.ticker),
+      o.log,
+      async (ticker) => {
+        const symbol = supported.find((s) => s.ticker === ticker)!;
+        const from = windowStart(source.info, wanted(symbol.inceptionDate), o.to);
+        const records = await source.fetchRecords(ticker, from, o.to, ctx);
+        r.inserted += await storeIssuerRecords(db, {
+          symbolId: symbol.id,
+          source: source.info.key,
+          records,
+          fetchedAt: now().toISOString(),
+        });
+      },
+    );
   }
   return reports;
 }

@@ -1,11 +1,11 @@
 import type { RawBar } from '@saku/core';
-import { schema, setSetting, upsertSymbols } from '@saku/db';
+import { issuerRecordsOf, schema, setSetting, symbolId, upsertSymbols } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { Sessions } from '@saku/data';
 import { describe, expect, it } from 'vitest';
 import { BlockedError } from '../http';
 import { emptyPlugins } from '../registry';
-import type { BarSource, FxSource, PluginInfo } from '../types';
+import type { BarSource, FxSource, IssuerSource, PluginInfo } from '../types';
 import { ingest, windowStart } from './ingest';
 
 const sessions = new Sessions({
@@ -142,6 +142,55 @@ describe('ingest', () => {
     const reports = await ingest(db, { ...emptyPlugins(), fx: [fx] }, options('daily'));
     expect(asked).toEqual(['USDXXX']);
     expect(reports[0]).toMatchObject({ ok: ['USDXXX'], inserted: 1 });
+  });
+
+  it('fetches issuer records for the symbols a source supports, in the daily window', async () => {
+    const db = await setup();
+    const asked: string[] = [];
+    const iss: IssuerSource = {
+      info: info('iss', 'issuer'),
+      supports: (ticker) => ticker === 'BBB',
+      async fetchRecords(ticker, from, to) {
+        asked.push(`${ticker} ${from} ${to}`);
+        return [{ date: to, nav: 20, distribution: 0.1 }];
+      },
+    };
+    const reports = await ingest(db, { ...emptyPlugins(), issuers: [iss] }, options('daily'));
+    expect(asked).toEqual(['BBB 2026-01-02 2026-01-16']);
+    expect(reports[0]).toMatchObject({ kind: 'issuer', ok: ['BBB'], inserted: 1 });
+    const stored = await issuerRecordsOf(db, (await symbolId(db, 'BBB'))!);
+    expect(stored.get('iss')).toEqual([{ date: '2026-01-16', nav: 20, distribution: 0.1 }]);
+    // A full fetch asks from the symbol's inception (or the earliest date) to the target.
+    await ingest(db, { ...emptyPlugins(), issuers: [iss] }, options('bootstrap'));
+    expect(asked[1]).toBe('BBB 1990-01-01 2026-01-16');
+  });
+
+  it('records an issuer failure per symbol and a refused response, and goes on', async () => {
+    const db = await setup();
+    const iss: IssuerSource = {
+      info: info('iss', 'issuer'),
+      supports: () => true,
+      async fetchRecords(ticker, _from, to) {
+        if (ticker === 'AAA') throw new Error('iss: HTTP 503');
+        return [
+          { date: to, nav: 1 },
+          { date: to, nav: 2 },
+        ];
+      },
+    };
+    const [r] = await ingest(db, { ...emptyPlugins(), issuers: [iss] }, options('daily'));
+    expect(r!.ok).toEqual([]);
+    expect(r!.failed.map((f) => f.item)).toEqual(['AAA', 'BBB']);
+    expect(r!.failed[1]!.error).toMatch(/same date twice/);
+    expect(await db.select().from(schema.issuerRecords)).toEqual([]);
+    const broken: IssuerSource = {
+      ...iss,
+      supports: () => {
+        throw new Error('bad list');
+      },
+    };
+    const [b] = await ingest(db, { ...emptyPlugins(), issuers: [broken] }, options('daily'));
+    expect(b!.stopped).toBe('bad list');
   });
 });
 

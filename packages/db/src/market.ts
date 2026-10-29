@@ -1,9 +1,10 @@
 // Storing what sources deliver. Nothing stored is silently overwritten: changed raw bar fields go
 // to `bar_revisions`, a provider's rewrite of its adjusted values becomes `readjustments` events,
-// and series and FX values keep every vintage.
+// and series, FX and issuer values keep every vintage.
 import {
   type FxKind,
   type FxRate,
+  type IssuerRecord,
   PointInTime,
   type RawBar,
   type RawBarField,
@@ -19,6 +20,7 @@ import {
   barsRaw,
   dataHealth,
   fxRates,
+  issuerRecords,
   readjustments,
   series,
   standIns,
@@ -372,6 +374,94 @@ export async function storeFx(
     count += rows.length;
   }
   return count;
+}
+
+const ISSUER_FIELDS = ['nav', 'distribution', 'split'] as const;
+
+/**
+ * Stores one issuer source's records for one symbol (layer D): a row is added only when the
+ * values for (symbol, source, date) differ from the latest stored, so a changed value is a new
+ * row and nothing stored is overwritten. A response with the same date twice, or a value that is
+ * not a finite number, is refused whole (nothing stored; the caller reports it).
+ */
+export async function storeIssuerRecords(
+  db: Db,
+  input: { symbolId: number; source: string; records: IssuerRecord[]; fetchedAt: string },
+): Promise<number> {
+  if (input.records.length === 0) return 0;
+  const dates = input.records.map((r) => r.date).sort();
+  if (new Set(dates).size !== dates.length) {
+    throw new Error(`${input.source} sent the same date twice for symbol ${input.symbolId}`);
+  }
+  for (const r of input.records) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(r.date)) {
+      throw new Error(`${input.source} sent a date that is not YYYY-MM-DD: "${r.date}"`);
+    }
+    for (const f of ISSUER_FIELDS) {
+      const v = r[f];
+      if (v !== undefined && !(typeof v === 'number' && Number.isFinite(v))) {
+        throw new Error(`${input.source} sent a ${f} that is not a number on ${r.date}`);
+      }
+    }
+  }
+  const key = and(
+    eq(issuerRecords.symbolId, input.symbolId),
+    eq(issuerRecords.source, input.source),
+  );
+  const stored = await db
+    .select()
+    .from(issuerRecords)
+    .where(and(key, between(issuerRecords.date, dates[0]!, dates.at(-1)!)))
+    .orderBy(asc(issuerRecords.fetchedAt));
+  const latest = new Map<string, (typeof stored)[number]>();
+  for (const row of stored) latest.set(row.date, row);
+  const rows = input.records
+    .map((r) => ({
+      symbolId: input.symbolId,
+      source: input.source,
+      date: r.date,
+      nav: r.nav ?? null,
+      distribution: r.distribution ?? null,
+      split: r.split ?? null,
+      fetchedAt: input.fetchedAt,
+    }))
+    .filter((row) => {
+      const prev = latest.get(row.date);
+      return !prev || ISSUER_FIELDS.some((f) => prev[f] !== row[f]);
+    });
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    await db.insert(issuerRecords).values(rows.slice(i, i + CHUNK));
+  }
+  return rows.length;
+}
+
+/**
+ * A symbol's issuer records per source, the latest stored values per date, oldest date first
+ * (`sources`: only these, e.g. the issuer sources that have a role).
+ */
+export async function issuerRecordsOf(
+  db: Db,
+  symbolId: number,
+  sources?: string[],
+): Promise<Map<string, IssuerRecord[]>> {
+  const rows = await db
+    .select()
+    .from(issuerRecords)
+    .where(eq(issuerRecords.symbolId, symbolId))
+    .orderBy(asc(issuerRecords.date), asc(issuerRecords.fetchedAt));
+  const latest = new Map<string, Map<string, IssuerRecord>>();
+  for (const r of rows) {
+    if (sources && !sources.includes(r.source)) continue;
+    const bySource = latest.get(r.source) ?? new Map<string, IssuerRecord>();
+    bySource.set(r.date, {
+      date: r.date,
+      ...(r.nav !== null && { nav: r.nav }),
+      ...(r.distribution !== null && { distribution: r.distribution }),
+      ...(r.split !== null && { split: r.split }),
+    });
+    latest.set(r.source, bySource);
+  }
+  return new Map([...latest].map(([source, byDate]) => [source, [...byDate.values()]]));
 }
 
 /** Every vintage of a series from one source, for point-in-time reads (`asOf`). */
