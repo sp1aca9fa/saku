@@ -128,7 +128,7 @@ export interface AlertOptions {
   date: TradingDate;
   notifiers: Notifier[];
   authSecret: string;
-  context: (notifier: Notifier) => PluginContext;
+  context: (notifier: Notifier, channelId: string) => PluginContext;
   log: Logger;
 }
 
@@ -199,11 +199,15 @@ export async function sendAdminAlert(
 ): Promise<AlertSummary> {
   const summary: AlertSummary = { sent: 0, failed: [] };
   if (!(await getSetting(db, 'forward_records_from'))) return summary;
-  const health = o.health ?? (await latestOverallHealth(db)) ?? 'unknown';
+  const latest = o.health ? undefined : await latestOverallHealth(db);
+  const health = o.health ?? latest?.status ?? 'unknown';
   const admins = await db.select().from(schema.users).where(eq(schema.users.isAdmin, true));
   for (const admin of admins) {
     const t = translator(await languageOf(db, admin.id));
-    const text = [...o.lines(t), t(`alerts.health.${health}`)].join('\n');
+    const healthLine = latest
+      ? `${t(`alerts.health.${health}`)} ${t('alerts.healthDate', { date: latest.date })}`
+      : t(`alerts.health.${health}`);
+    const text = [...o.lines(t), healthLine].join('\n');
     for (const channel of await deliveryTargets(db, admin.id, o.authSecret)) {
       if (!channel.admin) continue;
       const key = { subject: o.subject, date: o.date, type: o.type };
@@ -246,7 +250,7 @@ export function sendDataHealthAdmin(
   });
 }
 
-/** A self-update that failed, once per target version. */
+/** A self-update that failed, once per target version and day. */
 export function sendUpdateFailed(
   db: Db,
   o: AlertOptions & { from: string; to: string; step: string; stuck: boolean },
@@ -279,14 +283,14 @@ export function sendRecomputeDiffers(
   });
 }
 
-async function latestOverallHealth(db: Db): Promise<string | undefined> {
+async function latestOverallHealth(db: Db) {
   const [row] = await db
-    .select({ status: schema.dataHealth.status })
+    .select({ status: schema.dataHealth.status, date: schema.dataHealth.date })
     .from(schema.dataHealth)
     .where(isNull(schema.dataHealth.symbolId))
     .orderBy(desc(schema.dataHealth.date), desc(schema.dataHealth.id))
     .limit(1);
-  return row?.status;
+  return row;
 }
 
 async function deliver(
@@ -310,7 +314,7 @@ async function deliver(
   const max = notifier.info.maxLength;
   const text = alert.text.length > max ? `${alert.text.slice(0, max - 1)}…` : alert.text;
   try {
-    await notifier.send(channel.target, text, o.context(notifier));
+    await notifier.send(channel.target, text, o.context(notifier, channel.id));
     await recordAlertSent(db, channel, alert.key, alert.allocation);
     summary.sent++;
   } catch (e) {
@@ -354,7 +358,7 @@ export function describeReason(t: Translate, code: string): string {
   } else if ((m = /^missing@(.+)$/.exec(rest))) {
     text = t('alerts.reason.seriesMissing', { source: m[1]! });
   } else if (SIMPLE_REASONS.includes(rest)) text = t(`alerts.reason.${rest}`);
-  else if (!subject && /^[A-Z0-9][A-Z0-9.^=?&-]*$/.test(rest)) {
+  else if (!subject && /^[^:@\s]+$/.test(rest)) {
     return `${rest}: ${t('alerts.reason.notGreen')}`;
   }
   if (text === undefined) return code;

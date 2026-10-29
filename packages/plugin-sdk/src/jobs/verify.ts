@@ -357,7 +357,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       const rs = fxCheck(primary, await latestFx(db, pair, source), source);
       results.push(...rs.map((r) => ({ ...r, symbolId: null })));
       for (const r of rs) {
-        if (overall.has(r.date)) grade(r.date, r.status, `${r.layer}.${r.check}@${source}`);
+        if (overall.has(r.date)) grade(r.date, r.status, `${pair}:${r.layer}.${r.check}@${source}`);
       }
     }
   }
@@ -391,7 +391,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     stored: keep.length,
     byStatus,
     health: overall.get(o.to)?.status ?? 'red',
-    reasons: overall.has(o.to) ? overall.get(o.to)!.reasons : ['no data'],
+    reasons: overall.has(o.to) ? overall.get(o.to)!.reasons : ['no_data'],
     standIns: standInCount,
     standInsOff,
   };

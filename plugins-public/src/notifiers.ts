@@ -13,9 +13,10 @@ async function post(
   url: string,
   body: unknown,
   service: string,
-  secret: string,
+  /** A secret that is part of the URL (the webhook address); keys are masked already. */
+  secret?: string,
 ) {
-  ctx.http.addSecret(secret);
+  if (secret) ctx.http.addSecret(secret);
   try {
     await ctx.http.post(url, json(body), { 'Content-Type': 'application/json' });
   } catch (e) {
@@ -58,6 +59,5 @@ export const telegram: Notifier = {
       `https://api.telegram.org/bot${ctx.apiKey}/sendMessage`,
       { chat_id: target, text, link_preview_options: { is_disabled: true } },
       'Telegram',
-      ctx.apiKey ?? '',
     ),
 };

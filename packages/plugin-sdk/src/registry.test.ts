@@ -4,7 +4,13 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadPlugins, pluginContext, savePluginInfos, validateInfos } from './registry';
+import {
+  loadPlugins,
+  notifierContexts,
+  pluginContext,
+  savePluginInfos,
+  validateInfos,
+} from './registry';
 import type { PluginInfo } from './types';
 
 const info: PluginInfo = {
@@ -54,5 +60,20 @@ describe('plug-in registry', () => {
     expect(() => pluginContext(two, log, { env: { EXAMPLE_ID: 'i' } })).toThrow(/EXAMPLE_SECRET/);
     const ctx = pluginContext(two, log, { env: { EXAMPLE_ID: 'i', EXAMPLE_SECRET: 's' } });
     expect(ctx.keys).toEqual({ EXAMPLE_ID: 'i', EXAMPLE_SECRET: 's' });
+  });
+});
+
+describe('notifierContexts', () => {
+  it('keeps one client per channel for the run, without retries', () => {
+    const notifier = {
+      info: { key: 'fake', kind: 'notifier' as const, name: 'Fake', termsUrl: 'x', maxLength: 10 },
+      validTarget: () => true,
+      send: async () => {},
+    };
+    const contexts = notifierContexts({ info() {}, warn() {} });
+    const a = contexts(notifier, 'c1');
+    expect(contexts(notifier, 'c1')).toBe(a);
+    // A channel the service refuses blocks only its own client.
+    expect(contexts(notifier, 'c2').http).not.toBe(a.http);
   });
 });

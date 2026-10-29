@@ -111,17 +111,21 @@ export function pluginContext(
 }
 
 /**
- * Contexts for notifiers in one run: one client per service, so its pace and limits apply across
- * messages, and no automatic retry, since a resent POST could deliver an alert twice (what failed
- * is tried again at the next check).
+ * Contexts for notifiers in one run: one client per channel, so the service's pace and limits
+ * apply across that channel's messages and a channel the service refuses (403, 429) stops only
+ * itself; no automatic retry, since a resent POST could deliver an alert twice (what failed is
+ * tried again at the next check).
  */
-export function notifierContexts(log: Logger): (notifier: Notifier) => PluginContext {
+export function notifierContexts(
+  log: Logger,
+): (notifier: Notifier, channelId: string) => PluginContext {
   const made = new Map<string, PluginContext>();
-  return (notifier) => {
-    let ctx = made.get(notifier.info.key);
+  return (notifier, channelId) => {
+    const key = `${notifier.info.key} ${channelId}`;
+    let ctx = made.get(key);
     if (!ctx) {
       ctx = pluginContext(notifier.info, log, { http: { retries: 0 } });
-      made.set(notifier.info.key, ctx);
+      made.set(key, ctx);
     }
     return ctx;
   };

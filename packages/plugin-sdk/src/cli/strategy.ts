@@ -209,14 +209,14 @@ if (tool === 'strategy' && command === 'check') {
     const channel =
       (await deliveryTargets(db, owner, authSecret)).find((c) => c.id === rest[0]) ??
       fail('No enabled channel with that id.');
-    if (channel.target === null)
-      fail('The target does not decrypt: is AUTH_SECRET the one used to add it?');
+    const target =
+      channel.target ?? fail('The target does not decrypt: is AUTH_SECRET the one used to add it?');
     const notifier =
       notifiers.find((n) => n.info.key === channel.type) ?? fail(`No ${channel.type} plug-in.`);
     const user = await getUserByUsername(db, flag('user')!);
     const t = translator(user?.language ?? (await getSetting(db, 'primary_language')) ?? 'en');
     const log = { info: () => {}, warn: () => {} };
-    await notifier.send(channel.target!, t('alerts.test'), notifierContexts(log)(notifier));
+    await notifier.send(target, t('alerts.test'), notifierContexts(log)(notifier, channel.id));
     console.log('Sent.');
   } else fail('pnpm channel add|list|disable|enable|test');
 } else if (tool === 'alert' && command === 'update-failed') {

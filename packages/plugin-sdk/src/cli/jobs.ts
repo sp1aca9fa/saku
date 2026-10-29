@@ -69,9 +69,7 @@ if (!calendar) throw new Error('No xnys calendar plug-in is loaded.');
 const sessions = new Sessions(calendar);
 // Business days of the cash series (FRED's DTB3 follows the Federal Reserve holidays).
 const fed = plugins.calendars.flatMap((c) => c.calendars).find((c) => c.id === 'us-fed');
-if (!fed)
-  throw new Error('No us-fed calendar plug-in is loaded (the cash series is checked on it).');
-const seriesSessions = new Sessions(fed);
+const seriesSessions = fed ? new Sessions(fed) : undefined;
 const now = new Date();
 const target = dailyTarget(sessions, now, process.env.SAKU_DAILY_AFTER || undefined);
 
@@ -136,6 +134,9 @@ try {
   log.info(`${job} for ${target}`, { runId });
 
   let incomplete: string[] = [];
+  const markIncomplete = (what: string) => {
+    if (!incomplete.includes(what)) incomplete.push(what);
+  };
   if (run !== 'checks') {
     const reports = await ingest(db, plugins, {
       mode: run,
@@ -156,7 +157,9 @@ try {
     runId,
     sessions,
     to: target,
-    seriesSessions,
+    seriesSessions:
+      seriesSessions ??
+      fail('No us-fed calendar plug-in is loaded (the cash series is checked on it).'),
     ...(job === 'daily'
       ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
       : { mode: 'full' as const }),
@@ -190,14 +193,14 @@ try {
       // Undelivered alerts are retried at the next check (sent ones are not repeated).
       const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
       log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
-      if (sent.failed.length > 0) incomplete.push('alerts');
+      if (sent.failed.length > 0) markIncomplete('alerts');
       // The current engine must reproduce the record, or each difference is annotated.
       const r = await recompute(db, { runId, code: codeVersion() });
       log.info(`Recomputed ${r.checked} recorded days: ${r.differences.length} new differences`);
       if (r.differences.length > 0) {
         log.warn('The engine decides recorded days differently', { differences: r.differences });
         const sent = await sendRecomputeDiffers(db, { ...alerting, differences: r.differences });
-        if (sent.failed.length > 0) incomplete.push('alerts');
+        if (sent.failed.length > 0) markIncomplete('alerts');
       }
       const a = await anchor(db, {
         date: target,
@@ -220,7 +223,7 @@ try {
         health: checked.health,
         reasons: checked.reasons,
       });
-      if (sent.failed.length > 0) incomplete.push('alerts');
+      if (sent.failed.length > 0) markIncomplete('alerts');
     }
   }
 
@@ -265,6 +268,10 @@ function summary(r: SourceReport): string {
   if (r.stopped) parts.push(`stopped (${r.stopped})`);
   parts.push(`${r.inserted} new, ${r.revised} revised, ${r.readjustments} re-adjustments`);
   return parts.join(', ');
+}
+
+function fail(message: string): never {
+  throw new Error(message);
 }
 
 /** The checked-out commit, named in recompute annotations. */

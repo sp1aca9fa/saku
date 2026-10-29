@@ -141,6 +141,12 @@ main() {
   pnpm --silent update:log --from "$before" --to "$target" --failed "$step" || true
   # shellcheck disable=SC2086
   pnpm --silent alert update-failed --from "$before" --to "$target" --step "$step" $stuck || true
+  # Stuck, the alert above probably could not run either: report a failure to healthchecks.io.
+  if [ -n "$stuck" ]; then
+    local hc
+    hc="$(sed -n 's/^HEALTHCHECK_URL=//p' .env 2>/dev/null | tail -n 1)"
+    [ -n "$hc" ] && curl -fsS -m 10 --retry 2 "$hc/fail" >/dev/null || true
+  fi
   return 1
 }
 
