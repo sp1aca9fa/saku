@@ -111,9 +111,10 @@ Open (owner decision): a strategy's grade reads only the target day's bars. When
 
 ## Weekly run and `pnpm verify` (layers E and G)
 
-- **`pnpm weekly`** (Sundays, `saku-weekly.timer`): refetches the full history from every source. Changed raw values go to the revision log (`bar_revisions`, old and new value) and the admins get one summary per run (ticker, field, source, count). Then the checks over the full history, the recompute of every recorded day (differences annotated and told, as in the daily run) and layer E.
+- **`pnpm weekly`** (Sundays, `saku-weekly.timer`): refetches the full history from every source. Changed raw values go to the revision log (`bar_revisions`, old and new value) and the admins get one summary per run (ticker, field, source, count, dates), after the recompute of every recorded day (differences annotated and told, as in the daily run). A checked backup is made first. Then the checks over the full history, a data-health alert if the day turned non-green, and layer E.
 - **`pnpm verify`** (any time, no fetching; `pnpm checks` is the same): layers A-C over the full history and layer E.
 - **Layer E** (`jobs/integrity.ts`), for each registered version over today's canonical bars of what it reads: core vs the reference implementation (same days, signals and allocations; equity within 1e-9 relative), and incremental vs full (the latest 20 decision days and one every 250 back, each decided and valued from the bars up to that day only, against the full pass: no look-ahead and no state that depends on later data). Stored as layer E check results (summary per check, red ones in full); a red one fails the run and alerts the admins.
+- Series and FX values a refetch changes are kept as new vintages (point in time, never overwritten) and counted per source in the run log; the summary to the admins covers bars.
 - testfol parity joins `pnpm verify` when its cases exist (`plugins/test/testfol/`).
 
 ## Attribution

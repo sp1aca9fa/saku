@@ -1,0 +1,1 @@
+CREATE INDEX `bar_revisions_run_idx` ON `bar_revisions` (`run_id`);

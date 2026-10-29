@@ -286,13 +286,23 @@ export function sendRevisions(
   db: Db,
   o: AlertOptions & {
     runId: string;
-    revisions: { ticker: string; source: string; field: string; count: number }[];
+    revisions: {
+      ticker: string;
+      source: string;
+      field: string;
+      count: number;
+      from: string;
+      to: string;
+    }[];
   },
 ): Promise<AlertSummary> {
   const count = o.revisions.reduce((n, r) => n + r.count, 0);
   const items = o.revisions
     .slice(0, 8)
-    .map((r) => `${r.ticker} ${r.field}@${r.source} ${r.count}`)
+    .map(
+      (r) =>
+        `${r.ticker} ${r.field}@${r.source} ${r.count} (${r.from === r.to ? r.from : `${r.from}..${r.to}`})`,
+    )
     .join(', ');
   return sendAdminAlert(db, {
     ...o,
@@ -307,14 +317,14 @@ export function sendRevisions(
   });
 }
 
-/** A failed layer E check (core vs reference, incremental vs full), once per check and day. */
+/** A failed layer E check (core vs reference, incremental vs full), once per version, check and day. */
 export function sendIntegrityFailed(
   db: Db,
-  o: AlertOptions & { check: string; detail: string },
+  o: AlertOptions & { check: string; versionId: string; detail: string },
 ): Promise<AlertSummary> {
   return sendAdminAlert(db, {
     ...o,
-    subject: `integrity:${o.check}`,
+    subject: `integrity:${o.check}:${o.versionId}`,
     type: 'integrity',
     lines: (t) => [
       t('alerts.integrity.title', { check: o.check }),

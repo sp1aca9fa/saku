@@ -42,6 +42,8 @@ export interface RunOptions {
   tsa: { authorities: string[]; caFile?: string };
   /** The checked-out commit (named in recompute annotations). */
   code: string;
+  /** Before the weekly refetch rewrites stored history (the backup); a throw fails the run. */
+  beforeRefetch?: () => Promise<void>;
   /** After the steps of a daily run, complete or not (the backup); a throw fails the run. */
   afterDaily?: () => Promise<void>;
   /** On a complete daily run (stamp, heartbeat); returns whether the heartbeat was sent. */
@@ -105,6 +107,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       const told = await sendRecomputeDiffers(db, alerting);
       if (told.failed.length > 0) markIncomplete('alerts');
     };
+    if (job === 'weekly') await o.beforeRefetch?.();
     if (job !== 'checks') {
       const reports = await ingest(db, plugins, {
         // The weekly run refetches the full history; changes go to the revision log.
@@ -185,14 +188,23 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     }
 
     if (job === 'weekly') {
-      // Layer G: what the full refetch changed, then the record against the corrected data.
+      // Layer G: the record against the corrected data, then what the full refetch changed.
+      await recomputeAndTell();
       const revisions = await revisionsOfRun(db, runId);
       log.info(`Revisions: ${revisions.reduce((n, r) => n + r.count, 0)}`, { revisions });
       if (revisions.length > 0) {
         const sent = await sendRevisions(db, { ...alerting, runId, revisions });
         if (sent.failed.length > 0) markIncomplete('alerts');
       }
-      await recomputeAndTell();
+      // A day the refetch turned non-green (told once per day, as the daily run tells it).
+      if (checked.health !== 'green') {
+        const sent = await sendDataHealthAdmin(db, {
+          ...alerting,
+          health: checked.health,
+          reasons: checked.reasons,
+        });
+        if (sent.failed.length > 0) markIncomplete('alerts');
+      }
     }
     if (job === 'weekly' || job === 'checks') {
       // Layer E on the stored data: core vs reference, incremental vs full.
@@ -205,6 +217,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         const sent = await sendIntegrityFailed(db, {
           ...alerting,
           check: r.check,
+          versionId: r.versionId,
           detail: r.message ?? '',
         });
         if (sent.failed.length > 0) markIncomplete('alerts');

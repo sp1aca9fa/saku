@@ -113,11 +113,8 @@ try {
       ...(process.env.SAKU_TSA_CAFILE?.trim() && { caFile: process.env.SAKU_TSA_CAFILE.trim() }),
     },
     code: codeVersion(),
-    afterDaily: async () => {
-      const backup = await backupDatabase(dbConfigFromEnv().url, backupDir(), localDay(now));
-      await pruneBackups(backupDir());
-      log.info(`Backup ${backup.file} (${(backup.bytes / 1e6).toFixed(1)} MB)`);
-    },
+    beforeRefetch: backup,
+    afterDaily: backup,
     onComplete: async () => {
       writeStamp('daily', target);
       const sent = await heartbeat();
@@ -131,6 +128,13 @@ try {
   held.release();
 }
 process.exit(result?.ok ? 0 : 1);
+/** A checked copy of the database, before the weekly refetch and after the daily steps. */
+async function backup() {
+  const b = await backupDatabase(dbConfigFromEnv().url, backupDir(), localDay(now));
+  await pruneBackups(backupDir());
+  log.info(`Backup ${b.file} (${(b.bytes / 1e6).toFixed(1)} MB)`);
+}
+
 /** Pings healthchecks.io after a full success; the missing ping is what raises the alarm. */
 async function heartbeat(): Promise<boolean> {
   const url = process.env.HEALTHCHECK_URL?.trim();

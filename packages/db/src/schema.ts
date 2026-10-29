@@ -266,6 +266,7 @@ export const barRevisions = sqliteTable(
   },
   (t) => [
     index('bar_revisions_symbol_idx').on(t.symbolId, t.date),
+    index('bar_revisions_run_idx').on(t.runId),
     check('bar_revisions_field_check', oneOf(t.field, RAW_BAR_FIELDS)),
   ],
 );

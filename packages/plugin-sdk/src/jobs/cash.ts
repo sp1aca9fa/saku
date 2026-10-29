@@ -2,7 +2,8 @@
 // `provides.cashRates.USD`, from the first source in role order that declares one, among the
 // plug-ins the latest run loaded (a removed plug-in keeps its old row). No provider's series id is
 // named in core.
-import { type Db, schema } from '@saku/db';
+import { type TradingDate, zonedInstant } from '@saku/core';
+import { type Db, schema, seriesPointInTime } from '@saku/db';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import type { PluginInfo } from '../types';
 
@@ -30,4 +31,14 @@ export async function cashSeries(
     if (series) return { series, source: role.pluginKey };
   }
   return undefined;
+}
+
+/**
+ * The USD cash rate in percent a year for a trading date, as known before its session opens (no
+ * look-ahead). Unknown stays undefined: a day that needs it then has no equity, never 0%.
+ */
+export async function cashRateReader(db: Db): Promise<(date: TradingDate) => number | undefined> {
+  const source = await cashSeries(db);
+  const cash = source ? await seriesPointInTime(db, source.series, source.source) : null;
+  return (date) => cash?.asOf(date, zonedInstant(date, '09:30', 'America/New_York'))?.value;
 }

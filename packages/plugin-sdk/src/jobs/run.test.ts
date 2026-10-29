@@ -245,7 +245,7 @@ describe('a daily run', () => {
     const ops = sent.filter((m) => m.target === 'ops').map((m) => m.text);
     expect(
       ops.find((t) => t.startsWith('Saku: the weekly refetch changed 8 stored values')),
-    ).toContain('AAA close@p 1, AAA high@p 1');
+    ).toContain('AAA close@p 1 (2026-01-05), AAA high@p 1 (2026-01-05)');
     const e = await db.select().from(schema.checkSummaries);
     expect(e.filter((x) => x.layer === 'E').map((x) => [x.checkName, x.passed])).toEqual([
       ['core_vs_reference', 1],

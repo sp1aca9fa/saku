@@ -12,12 +12,11 @@ import {
   backtest,
   dependencies,
   evaluate,
-  zonedInstant,
 } from '@saku/core';
 import type { CheckResult } from '@saku/data';
-import { type Db, allVersions, seriesPointInTime } from '@saku/db';
+import { type Db, allVersions } from '@saku/db';
 import { type RefStrategy, refBacktest, refEvaluate } from '@saku/reference';
-import { cashSeries } from './cash';
+import { cashRateReader } from './cash';
 import { reader, signalsDiffer } from './forward';
 
 export const INTEGRITY_TOLERANCE = 1e-9;
@@ -28,18 +27,19 @@ const EVERY = 250;
 const relative = (a: number, b: number) =>
   Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), Number.MIN_VALUE);
 
-export async function integrity(db: Db, o: { to: TradingDate }): Promise<CheckResult[]> {
-  const out: CheckResult[] = [];
+export const INTEGRITY_CHECKS = ['core_vs_reference', 'incremental_vs_full'] as const;
+
+/** A layer E result, for one registered version. */
+export type IntegrityResult = CheckResult & { versionId: string };
+
+export async function integrity(db: Db, o: { to: TradingDate }): Promise<IntegrityResult[]> {
+  const out: IntegrityResult[] = [];
   const { loadRows, barsOf } = await reader(db);
-  const source = await cashSeries(db);
-  const cash = source ? await seriesPointInTime(db, source.series, source.source) : null;
-  const cashRate = (date: TradingDate) =>
-    cash?.asOf(date, zonedInstant(date, '09:30', 'America/New_York'))?.value;
+  const cashRate = await cashRateReader(db);
 
   for (const version of await allVersions(db)) {
-    const strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
-    const bars = barsOf(await loadRows(dependencies(strategy), o.to));
-    const result = (check: string, problems: string[], deviation = 0): CheckResult => ({
+    const result = (check: string, problems: string[], deviation = 0): IntegrityResult => ({
+      versionId: version.id,
       layer: 'E',
       check,
       date: o.to,
@@ -48,13 +48,20 @@ export async function integrity(db: Db, o: { to: TradingDate }): Promise<CheckRe
       tolerance: INTEGRITY_TOLERANCE,
       message: `${version.name} (${version.id})${problems.length ? `: ${problems.slice(0, 3).join('; ')}` : ''}`,
     });
+    let strategy: Strategy;
+    let bars: Bars;
     let core: StrategyDay[];
     let equity: number[];
     try {
+      strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
+      bars = barsOf(await loadRows(dependencies(strategy), o.to));
       core = evaluate(strategy, bars);
       equity = backtest({ strategy, days: core, bars, cashRate }).points.map((p) => p.equity);
     } catch (e) {
-      out.push(result('core_vs_reference', [`core could not evaluate: ${String(e)}`]));
+      // Neither check can run: both are red, and the other versions are still checked.
+      for (const check of INTEGRITY_CHECKS) {
+        out.push(result(check, [`core could not evaluate: ${String(e)}`]));
+      }
       continue;
     }
     out.push(compareReference(strategy, core, equity, bars, cashRate, result));
@@ -63,7 +70,7 @@ export async function integrity(db: Db, o: { to: TradingDate }): Promise<CheckRe
   return out;
 }
 
-type Result = (check: string, problems: string[], deviation?: number) => CheckResult;
+type Result = (check: string, problems: string[], deviation?: number) => IntegrityResult;
 type Bars = Parameters<typeof evaluate>[1];
 
 function compareReference(
@@ -73,7 +80,7 @@ function compareReference(
   bars: Bars,
   cashRate: (date: TradingDate) => number | undefined,
   result: Result,
-): CheckResult {
+): IntegrityResult {
   const problems: string[] = [];
   let worst = 0;
   try {
@@ -90,7 +97,9 @@ function compareReference(
         const signals = signalsDiffer(d.signals, r.signals);
         if (signals.length) problems.push(`${d.date}: signals ${signals.join(', ')}`);
       });
-      const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? Number.NaN).equity;
+      // Core succeeded, so no day it valued needed an unknown rate; the reference reads the rate
+      // on every day (times a zero weight where unused), so an unknown one is passed as 0 there.
+      const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? 0).equity;
       equity.forEach((e, i) => {
         const dev = relative(e, b[i]!);
         if (!(dev <= INTEGRITY_TOLERANCE))
@@ -111,7 +120,7 @@ function compareIncremental(
   bars: Bars,
   cashRate: (date: TradingDate) => number | undefined,
   result: Result,
-): CheckResult {
+): IntegrityResult {
   const problems: string[] = [];
   let worst = 0;
   const sample = new Set<number>();
@@ -120,7 +129,7 @@ function compareIncremental(
   for (const i of [...sample].sort((a, b) => a - b)) {
     const date = core[i]!.date;
     const upTo = Object.fromEntries(
-      Object.entries(bars).map(([t, list]) => [t, list.filter((b) => b.date <= date)]),
+      Object.entries(bars).map(([t, list]) => [t, list.slice(0, upperBound(list, date))]),
     );
     try {
       const days = evaluate(strategy, upTo);
@@ -143,4 +152,16 @@ function compareIncremental(
     }
   }
   return result('incremental_vs_full', problems, worst);
+}
+
+/** The number of bars dated on or before `date` (bars are sorted by date). */
+function upperBound(list: { date: TradingDate }[], date: TradingDate): number {
+  let lo = 0;
+  let hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (list[mid]!.date <= date) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }

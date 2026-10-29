@@ -30,11 +30,10 @@ import {
   getSetting,
   lastEntry,
   latestHealth,
-  seriesPointInTime,
   sha256,
   standInOn,
 } from '@saku/db';
-import { cashSeries } from './cash';
+import { cashRateReader } from './cash';
 import type { VerifySummary } from './verify';
 
 export interface ForwardOptions {
@@ -71,12 +70,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   if (!from) return { ...summary, skipped: 'forward records not started (forward_records_from)' };
 
   const { symbolIds, loadRows, barsOf } = await reader(db);
-  const source = await cashSeries(db);
-  const cash = source ? await seriesPointInTime(db, source.series, source.source) : null;
-  // Known before the session opens (no look-ahead). Unknown stays unknown: the equity of a day
-  // that needs it is then null, never computed with a guessed 0%.
-  const cashRate = (date: TradingDate) =>
-    cash?.asOf(date, zonedInstant(date, '09:30', 'America/New_York'))?.value;
+  const cashRate = await cashRateReader(db);
 
   /** Each ticker's grade on the date: the canonical bar's status (set by every verify run). */
   const healthOn = async (rows: Rows, date: TradingDate) => {

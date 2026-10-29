@@ -60,7 +60,7 @@ const source = (key: string): BarSource => ({
   },
 });
 
-async function setup() {
+async function setup(o: { cash?: boolean } = {}) {
   const db = await testDb();
   await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
   const owner = await createUser(db, {
@@ -102,7 +102,7 @@ async function setup() {
     {
       ...emptyPlugins(),
       bars: [source('p'), source('s')],
-      series: [cashRates(sessions, DATES, TARGET)],
+      series: o.cash === false ? [] : [cashRates(sessions, DATES, TARGET)],
     },
     {
       job: 'bootstrap',
@@ -123,13 +123,13 @@ async function setup() {
       code: 'test',
     },
   );
-  expect(r.ok).toBe(true);
-  return db;
+  return { db, ok: r.ok, owner };
 }
 
 describe('integrity (layer E)', () => {
   it('core and reference agree, and each sampled day equals the full pass', async () => {
-    const db = await setup();
+    const { db, ok } = await setup();
+    expect(ok).toBe(true);
     const results = await integrity(db, { to: TARGET });
     expect(results.map((r) => [r.check, r.status])).toEqual([
       ['core_vs_reference', 'green'],
@@ -139,10 +139,45 @@ describe('integrity (layer E)', () => {
   });
 
   it('a disagreement is red and names the day', async () => {
-    const db = await setup();
+    const { db } = await setup();
     reference.flip = true;
     const [ref] = await integrity(db, { to: TARGET });
     expect(ref).toMatchObject({ check: 'core_vs_reference', status: 'red' });
     expect(ref!.message).toMatch(/allocation .* vs Flipped/);
+  });
+
+  it('without a cash rate: a 1x strategy still agrees; one that needs cash is red alone', async () => {
+    const { db, owner } = await setup({ cash: false });
+    await registerVersion(db, {
+      ownerId: owner,
+      name: 'Always in',
+      strategy: {
+        name: 'Always in',
+        account: 'taxable',
+        safeState: { holdings: [{ ticker: 'AAA', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [
+          {
+            id: 'A',
+            type: 'compare',
+            left: { indicator: 'price', ticker: 'AAA' },
+            op: '>',
+            right: { indicator: 'sma', ticker: 'AAA', length: 20 },
+          },
+        ],
+        allocations: [
+          { name: 'Up', when: { all: ['A'] }, holdings: [{ ticker: 'AAA', weight: 100 }] },
+          { name: 'Down', holdings: [{ ticker: 'AAA', weight: 100 }] },
+        ],
+      },
+    });
+    const results = await integrity(db, { to: TARGET });
+    expect(results.map((r) => [r.message!.split(' (')[0], r.check, r.status])).toEqual([
+      ['Trend', 'core_vs_reference', 'red'],
+      ['Trend', 'incremental_vs_full', 'red'],
+      ['Always in', 'core_vs_reference', 'green'],
+      ['Always in', 'incremental_vs_full', 'green'],
+    ]);
+    expect(results[0]!.message).toMatch(/core could not evaluate/);
   });
 });
