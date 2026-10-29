@@ -12,7 +12,8 @@
     "jobs": "tsx src/cli/jobs.ts",
     "plugins": "tsx src/cli/plugins.ts",
     "cli": "tsx src/cli/strategy.ts",
-    "sources": "tsx src/cli/sources.ts"
+    "sources": "tsx src/cli/sources.ts",
+    "health": "tsx src/cli/health.ts"
   },
   "dependencies": {
     "@saku/content": "workspace:*",

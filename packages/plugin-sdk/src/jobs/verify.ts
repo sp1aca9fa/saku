@@ -2,7 +2,8 @@
 // has none and the stand-in rule allows it), with our adjusted series, runs layers A-C over
 // stored data and grades each symbol and day (data health). Daily runs store every result and
 // health row in their window; full-history passes store one summary per check plus every
-// non-green result and health row (requirements 04).
+// non-green result and symbol health row (requirements 04), and the overall health row of every
+// date they graded.
 import type { HealthStatus, RawBar, TradingDate } from '@saku/core';
 import { totalReturnIndex } from '@saku/core';
 import {
@@ -382,11 +383,16 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   const keep = o.mode === 'daily' ? inWindow : inWindow.filter((r) => r.status !== 'green');
   await storeResults(db, o.runId, keep);
   if (o.mode === 'full') await storeSummaries(db, o.runId, inWindow);
+  // Full passes also keep the overall row of every date they graded, green included, so a
+  // missing symbol row reads as green only where the overall row shows the date was graded (the
+  // health report). The overall rows go last: one stored means every symbol row was stored.
   await storeHealth(
     db,
     o.runId,
     healthRows.filter(
-      (h) => inRange(h.date) && (o.mode === 'daily' || h.health.status !== 'green'),
+      (h) =>
+        inRange(h.date) &&
+        (o.mode === 'daily' || h.symbolId === null || h.health.status !== 'green'),
     ),
   );
   return {

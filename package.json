@@ -29,6 +29,7 @@
     "verify": "pnpm --silent --filter @saku/plugin-sdk jobs verify",
     "checks": "pnpm --silent --filter @saku/plugin-sdk jobs checks",
     "probe": "pnpm --silent --filter @saku/plugin-sdk jobs probe",
+    "health": "pnpm --silent --filter @saku/plugin-sdk health",
     "spike": "pnpm --silent --filter @saku/plugin-sdk jobs spike",
     "plugins": "pnpm --silent --filter @saku/plugin-sdk plugins",
     "sources": "pnpm --silent --filter @saku/plugin-sdk sources sources",
