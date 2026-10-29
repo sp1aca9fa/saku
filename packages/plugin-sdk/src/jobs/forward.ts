@@ -109,8 +109,12 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
       // Only closes after registration: the record never starts in the past.
       .filter((d) => zonedInstant(d, '16:00', 'America/New_York') > version.registeredAt);
 
+    // One read per version and run: the bars up to the run's last date, each date then sees only
+    // its prefix (dated <= that date), the same rows a read up to that date returns. The jobs lock
+    // holds the bars still while this runs.
+    const all = dates.length > 0 ? await loadRows(deps, o.to) : {};
     for (const date of dates) {
-      const rows = await loadRows(deps, date);
+      const rows = upTo(all, date);
       const bars = barsOf(rows);
       const decision = forwardDecision(strategy, date, bars, await healthOn(rows, date));
       const equity = await forwardEquity(db, version, strategy, bars, cashRate, {
@@ -177,7 +181,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   return summary;
 }
 
-type Rows = Record<string, Awaited<ReturnType<typeof canonicalBars>>>;
+export type Rows = Record<string, Awaited<ReturnType<typeof canonicalBars>>>;
 
 /** Reads the canonical bars of the active universe up to a date. */
 export async function reader(db: Db) {
@@ -193,6 +197,26 @@ export async function reader(db: Db) {
   const barsOf = (rows: Rows) =>
     Object.fromEntries(Object.entries(rows).map(([t, list]) => [t, list.map(toRaw)]));
   return { symbolIds, loadRows, barsOf };
+}
+
+/**
+ * Each ticker's rows dated on or before `date` (no look-ahead). The rows are in ascending date
+ * order (as `canonicalBars` returns them) and `YYYY-MM-DD` compares as text, so a binary search
+ * finds the cut: the first row dated after `date`.
+ */
+export function upTo(rows: Rows, date: TradingDate): Rows {
+  const out: Rows = {};
+  for (const [t, list] of Object.entries(rows)) {
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (list[mid]!.date <= date) lo = mid + 1;
+      else hi = mid;
+    }
+    out[t] = list.slice(0, lo);
+  }
+  return out;
 }
 
 const allGreen = (tickers: string[]): Record<string, TickerHealth> =>

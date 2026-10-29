@@ -18,7 +18,7 @@ import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
 import { sendRecomputeDiffers, sendStrategyAlerts } from './alerts';
-import { forward, recompute, signalsDiffer } from './forward';
+import { type Rows, forward, recompute, signalsDiffer, upTo } from './forward';
 import { verify } from './verify';
 
 const sessions = new Sessions({
@@ -198,6 +198,54 @@ describe('forward', () => {
       'Risk on',
       'Risk on',
     ]);
+  });
+
+  it('a multi-day catch-up records the same entries as one run per day', async () => {
+    // The entries' text, with the random ids (version, registration hash) and the chain's own
+    // hashes named by position: equal text then means equal hashes for equal ids.
+    const record = async (
+      db: Awaited<ReturnType<typeof setup>>['db'],
+      v: { id: string; hash: string },
+    ) => {
+      const list = await forwardRecord(db, v.id);
+      const names = new Map([
+        [v.hash, 'H0'],
+        ...list.map((e, i) => [e.hash, `H${i + 1}`] as const),
+      ]);
+      return list.map((e) => {
+        let text = e.payload.split(v.id).join('V');
+        for (const [h, n] of names) text = text.split(h).join(n);
+        return { text, hash: names.get(e.hash), prevHash: names.get(e.prevHash) };
+      });
+    };
+    const once = await setup();
+    await setSetting(once.db, 'forward_records_from', '2026-01-05');
+    expect((await forward(once.db, { runId: once.runId, sessions, to: D[4]! })).appended).toBe(3);
+    const daily = await setup();
+    await setSetting(daily.db, 'forward_records_from', '2026-01-05');
+    for (const d of D) await forward(daily.db, { runId: daily.runId, sessions, to: d });
+    const a = await record(once.db, once.version);
+    expect(a.map((e) => JSON.parse(e.text).date)).toEqual(D.slice(2));
+    expect(a).toEqual(await record(daily.db, daily.version));
+    expect(await verifyChain(once.db, once.version)).toEqual([]);
+    expect(await verifyChain(daily.db, daily.version)).toEqual([]);
+  });
+
+  it('a date never sees a later bar', () => {
+    const row = (date: string) => ({ date }) as Rows[string][number];
+    const rows: Rows = {
+      A: D.map(row),
+      B: [row(D[0]!), row(D[3]!)],
+      C: [],
+      L: [row(D[4]!)],
+    };
+    const dates = (r: Rows) =>
+      Object.fromEntries(Object.entries(r).map(([t, l]) => [t, l.map((b) => b.date)]));
+    expect(dates(upTo(rows, D[2]!))).toEqual({ A: D.slice(0, 3), B: [D[0]], C: [], L: [] });
+    // A date between two bars, before the first and after the last.
+    expect(dates(upTo(rows, '2026-01-07')).B).toEqual([D[0]]);
+    expect(dates(upTo(rows, '2026-01-01'))).toEqual({ A: [], B: [], C: [], L: [] });
+    expect(dates(upTo(rows, '2026-02-01'))).toEqual(dates(rows));
   });
 
   it('compares signals exactly, numbers within the near-tie rule', () => {
