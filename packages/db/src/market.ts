@@ -315,8 +315,9 @@ export interface StoredValues {
   /**
    * Dates (per series or pair) whose latest stored value for the same publication time (or, with
    * none given, the same date) the source now reports differently: stored as a new row known
-   * from its own publication time or fetch, reported like a bar revision. A new publication time
-   * is a new vintage, not a revision.
+   * from its fetch (a restatement could not have been known earlier; spec 2026-10-30
+   * restated-vintage), reported like a bar revision. A new publication time is a new vintage,
+   * not a revision, known from its publication time.
    *
    * A newly stored withdrawal (the source no longer has a value for the date from its
    * publication time, or with none given, from the fetch) is always listed here too, so it is
@@ -342,6 +343,11 @@ interface VintageRow {
  * time) says something else (a revision). A withdrawal is the same as a stored withdrawal for
  * the same key, so a refetch stores nothing (idempotent). Refuses a value and a withdrawal for
  * the same date and publication time in one response (which one holds would be a guess).
+ *
+ * `known_at` (spec 2026-10-30 restated-vintage; requirements 04, no look-ahead): a vintage first
+ * seen is known from its publication time (the source's history), as given in `incoming`; a
+ * restatement of a stored vintage (same key, another value or a withdrawal) only from the later
+ * of that time and its fetch, so a read before our fetch keeps the original.
  */
 function newVintages<T extends VintageRow>(
   stored: T[],
@@ -368,9 +374,11 @@ function newVintages<T extends VintageRow>(
   const revised = new Set<TradingDate>();
   const withdrawn = new Set<TradingDate>();
   let fresh = 0;
-  for (const row of incoming) {
+  for (let row of incoming) {
     const prev = latest.get(key(row));
     if (prev && prev.value === row.value) continue;
+    // Both UTC ISO text (`instant`, and the jobs' fetch time), so string order is time order.
+    if (prev && row.fetchedAt > row.knownAt) row = { ...row, knownAt: row.fetchedAt };
     if (row.value === null) {
       withdrawals.push(row);
       withdrawn.add(row.date);
@@ -642,28 +650,56 @@ export async function issuerRecordsOf(
   return new Map([...latest].map(([source, byDate]) => [source, [...byDate.values()]]));
 }
 
+interface StoredVintage {
+  date: string;
+  publishedAt: string | null;
+  knownAt: string;
+  fetchedAt: string;
+}
+
 /**
- * Values and withdrawals as point-in-time vintages, in fetch order (PointInTime keeps that order
- * for equal `known_at`, so a later fetch's restatement of the same publication wins).
+ * Values and withdrawals as point-in-time versions, in fetch order (PointInTime keeps that order
+ * for equal vintage and known times, so a later fetch's restatement of the same vintage wins).
+ *
+ * Vintage time (spec 2026-10-30 restated-vintage): rows without `published_at` use their own
+ * `known_at` (their fetch). Rows with one share the vintage of every row with the same date and
+ * `published_at` text (the key `newVintages` stores by), and its time is the earliest `known_at`
+ * among them: the first-seen row's, which is its publication time (later restatements are known
+ * at or after it). Taken from the stored, already normalized `known_at` rather than by parsing
+ * `published_at` again, so older rows (date-only, read as known at the day end) rank as they
+ * are read.
  */
 function vintages(
-  values: { date: string; value: number; knownAt: string; fetchedAt: string }[],
-  withdrawals: { date: string; knownAt: string; fetchedAt: string }[],
+  values: (StoredVintage & { value: number })[],
+  withdrawals: StoredVintage[],
 ): Vintage[] {
-  const all = [
+  const all = readKnownAt([
     ...values.map((r) => ({ ...r, withdrawn: false as const })),
-    ...withdrawals.map((r) => ({ ...r, withdrawn: true as const })),
-  ].sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt));
-  return readKnownAt(all).map((r): Vintage =>
-    r.withdrawn
-      ? { date: r.date, withdrawn: true, knownAt: r.knownAt }
-      : { date: r.date, value: r.value, knownAt: r.knownAt },
-  );
+    ...withdrawals.map((r) => ({ ...r, withdrawn: true as const, value: undefined })),
+  ]).sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt));
+  const key = (r: StoredVintage) => `${r.date}|${r.publishedAt}`;
+  const vintageAt = new Map<string, string>();
+  for (const r of all) {
+    if (r.publishedAt === null) continue;
+    const at = vintageAt.get(key(r));
+    if (at === undefined || r.knownAt < at) vintageAt.set(key(r), r.knownAt);
+  }
+  return all.map((r): Vintage => {
+    const v = r.publishedAt === null ? r.knownAt : vintageAt.get(key(r))!;
+    return r.withdrawn
+      ? { date: r.date, withdrawn: true, knownAt: r.knownAt, vintageAt: v }
+      : { date: r.date, value: r.value, knownAt: r.knownAt, vintageAt: v };
+  });
 }
 
 /** Every vintage of a series from one source (withdrawals included), for `asOf`. */
 export async function seriesPointInTime(db: Db, id: string, source: string): Promise<PointInTime> {
-  const cols = { date: series.date, knownAt: series.knownAt, fetchedAt: series.fetchedAt };
+  const cols = {
+    date: series.date,
+    publishedAt: series.publishedAt,
+    knownAt: series.knownAt,
+    fetchedAt: series.fetchedAt,
+  };
   const values = await db
     .select({ ...cols, value: series.value })
     .from(series)
@@ -671,6 +707,7 @@ export async function seriesPointInTime(db: Db, id: string, source: string): Pro
   const withdrawals = await db
     .select({
       date: seriesWithdrawals.date,
+      publishedAt: seriesWithdrawals.publishedAt,
       knownAt: seriesWithdrawals.knownAt,
       fetchedAt: seriesWithdrawals.fetchedAt,
     })
@@ -690,6 +727,7 @@ export async function fxPointInTime(
     .select({
       date: fxRates.date,
       value: fxRates.rate,
+      publishedAt: fxRates.publishedAt,
       knownAt: fxRates.knownAt,
       fetchedAt: fxRates.fetchedAt,
     })
@@ -698,6 +736,7 @@ export async function fxPointInTime(
   const withdrawals = await db
     .select({
       date: fxWithdrawals.date,
+      publishedAt: fxWithdrawals.publishedAt,
       knownAt: fxWithdrawals.knownAt,
       fetchedAt: fxWithdrawals.fetchedAt,
     })

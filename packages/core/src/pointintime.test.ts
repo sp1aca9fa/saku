@@ -152,3 +152,69 @@ describe('PointInTime withdrawals', () => {
     expect(withdrawalThenValue.knownAt(at)).toEqual([{ date: '2026-01-06', value: 4.1 }]);
   });
 });
+
+describe('PointInTime vintage time (restated vintages)', () => {
+  // 3.6 published 01-06, withdrawn by the 01-08 vintage, 3.7 published 01-12, then on 01-14 the
+  // source restates the 01-08 vintage as 3.65 (known from that fetch).
+  const t = (d: string) => `${d}T23:00:00.000Z`;
+  const rows = [
+    { date: '2026-01-05', value: 3.6, knownAt: t('2026-01-06'), vintageAt: t('2026-01-06') },
+    {
+      date: '2026-01-05',
+      withdrawn: true as const,
+      knownAt: t('2026-01-08'),
+      vintageAt: t('2026-01-08'),
+    },
+    { date: '2026-01-05', value: 3.7, knownAt: t('2026-01-12'), vintageAt: t('2026-01-12') },
+    { date: '2026-01-05', value: 3.65, knownAt: t('2026-01-14'), vintageAt: t('2026-01-08') },
+  ];
+  const p = new PointInTime(rows);
+
+  it('counts a restatement only from when it was known', () => {
+    expect(p.asOf('2026-01-05', t('2026-01-07'))!.value).toBe(3.6);
+    expect(p.asOf('2026-01-05', t('2026-01-10'))).toBeUndefined();
+  });
+
+  it('never lets a restated older vintage outrank a newer one', () => {
+    expect(p.asOf('2026-01-05', t('2026-01-13'))!.value).toBe(3.7);
+    expect(p.asOf('2026-01-05', t('2026-01-15'))).toMatchObject({
+      value: 3.7,
+      knownAt: t('2026-01-12'),
+    });
+    expect(p.knownAt(t('2026-01-15'))).toEqual([{ date: '2026-01-05', value: 3.7 }]);
+    // The order the rows are given in does not change that.
+    expect(new PointInTime([...rows].reverse()).asOf('2026-01-05', t('2026-01-15'))!.value).toBe(
+      3.7,
+    );
+  });
+
+  it('a restatement of the newest vintage wins over the original from its fetch', () => {
+    const r = new PointInTime([
+      { date: '2026-01-05', value: 3.6, knownAt: t('2026-01-06'), vintageAt: t('2026-01-06') },
+      { date: '2026-01-05', value: 3.62, knownAt: t('2026-01-09'), vintageAt: t('2026-01-06') },
+    ]);
+    expect(r.asOf('2026-01-05', t('2026-01-08'))!.value).toBe(3.6);
+    expect(r.asOf('2026-01-05', t('2026-01-09'))!.value).toBe(3.62);
+  });
+
+  it('first-known gives what was known first, not a later restatement of an older vintage', () => {
+    const r = new PointInTime([
+      { date: '2026-01-05', value: 3.7, knownAt: t('2026-01-12'), vintageAt: t('2026-01-12') },
+      // An older vintage first stored late (restated): ranked first, but known later.
+      { date: '2026-01-05', value: 3.65, knownAt: t('2026-01-14'), vintageAt: t('2026-01-08') },
+    ]);
+    expect(r.asOf('2026-01-05', t('2026-01-01'), { firstKnown: true })).toMatchObject({
+      value: 3.7,
+      firstKnown: true,
+    });
+  });
+
+  it('refuses a version known before its own vintage time', () => {
+    expect(
+      () =>
+        new PointInTime([
+          { date: '2026-01-05', value: 1, knownAt: t('2026-01-06'), vintageAt: t('2026-01-07') },
+        ]),
+    ).toThrow(/before its vintage time/);
+  });
+});

@@ -11,6 +11,8 @@ export type Vintage =
       value: number;
       /** When the value became known (ISO 8601). */
       knownAt: string;
+      /** The version's vintage time (see VintageTimes); defaults to `knownAt`. */
+      vintageAt?: string;
       withdrawn?: false;
     }
   | {
@@ -21,8 +23,22 @@ export type Vintage =
        */
       withdrawn: true;
       knownAt: string;
+      vintageAt?: string;
       value?: undefined;
     };
+
+/*
+ * Vintage time and known time (spec 2026-10-30 restated-vintage; requirements 04, point-in-time
+ * series, no look-ahead). A version carries two times:
+ * - `vintageAt`: when the source says the version was published (its vintage), or, when the
+ *   source gives none, when we fetched it (then equal to `knownAt`, the default).
+ * - `knownAt`: when a run could first have had it. A vintage first seen is known from its
+ *   publication (the source's history); a later restatement of the same vintage (another value,
+ *   or a withdrawal) only from its fetch, so `knownAt >= vintageAt` always (refused otherwise).
+ * Among a date's versions known at a moment, the latest vintage counts; among versions of the
+ * same vintage, the latest known, then the order given (fetch order). So a restatement never
+ * counts before we fetched it, and a restated older vintage never outranks a newer one.
+ */
 
 type Withdrawal = Extract<Vintage, { withdrawn: true }>;
 type Value = Exclude<Vintage, Withdrawal>;
@@ -41,17 +57,22 @@ const LOOK_BACK = 10;
 
 export class PointInTime {
   private readonly dates: TradingDate[] = [];
-  /** Vintages per observation, oldest knowledge first. */
+  /** Versions per observation in rank order (see above): the last one known at a moment counts. */
   private readonly vintages: Vintage[][] = [];
 
   /**
-   * Vintages of one date are ordered by `knownAt`; equal `knownAt` keep the order of `rows`
-   * (callers pass rows in fetch order, so a later fetch's restatement of the same publication
-   * wins).
+   * Versions of one date are ranked by vintage time, then `knownAt`, then the order of `rows`
+   * (callers pass rows in fetch order, so a later fetch's restatement of the same vintage known
+   * at the same time wins). Refuses a version known before its own vintage time.
    */
   constructor(rows: Vintage[]) {
     const byDate = new Map<TradingDate, Vintage[]>();
     for (const r of rows) {
+      if (vintageOf(r) > r.knownAt) {
+        throw new Error(
+          `${r.date}: a version known at ${r.knownAt}, before its vintage time ${vintageOf(r)}`,
+        );
+      }
       const list = byDate.get(r.date) ?? [];
       list.push(r);
       byDate.set(r.date, list);
@@ -61,7 +82,7 @@ export class PointInTime {
       this.vintages.push(
         byDate
           .get(date)!
-          .sort((a, b) => (a.knownAt < b.knownAt ? -1 : a.knownAt > b.knownAt ? 1 : 0)),
+          .sort((a, b) => compare(vintageOf(a), vintageOf(b)) || compare(a.knownAt, b.knownAt)),
       );
     }
   }
@@ -69,8 +90,9 @@ export class PointInTime {
   /**
    * The latest observation dated on or before `date` that was known at `at`, in its latest
    * version known then. `firstKnown`: when nothing was known yet (before a source's vintage
-   * history starts), use the observation's first known version instead, flagged as such; only
-   * for backtests that accept it, never for the live pipeline.
+   * history starts), use the observation's first known version instead (what a read at the
+   * earliest `knownAt` of its versions returns), flagged as such; only for backtests that accept
+   * it, never for the live pipeline.
    *
    * Withdrawals (spec 2026-10-30 withdrawn-values; requirements 04, point-in-time series): an
    * observation whose latest version known at `at` is a withdrawal has no value at `at`, so the
@@ -103,8 +125,10 @@ export class PointInTime {
     }
     if (!o.firstKnown || withdrawalKnown) return undefined;
     for (let j = i; j >= 0 && j > i - LOOK_BACK; j--) {
-      const first = this.vintages[j]![0]!;
-      if (isValue(first)) {
+      const list = this.vintages[j]!;
+      const earliest = list.reduce((m, x) => (x.knownAt < m ? x.knownAt : m), list[0]!.knownAt);
+      const first = latestKnown(list, earliest);
+      if (first && isValue(first)) {
         return { date: first.date, value: first.value, knownAt: first.knownAt, firstKnown: true };
       }
     }
@@ -127,7 +151,13 @@ export class PointInTime {
   }
 }
 
-/** The latest version of one observation known at `at` (a value or a withdrawal). */
+const vintageOf = (v: Vintage): string => v.vintageAt ?? v.knownAt;
+const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * The version of one observation that counts at `at` (a value or a withdrawal): the last known
+ * then in rank order (latest vintage, then latest known, then fetch order).
+ */
 function latestKnown(list: Vintage[], at: string): Vintage | undefined {
   return list.filter((x) => x.knownAt <= at).at(-1);
 }
