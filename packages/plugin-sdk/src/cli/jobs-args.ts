@@ -7,7 +7,7 @@ export type Job = (typeof JOBS)[number];
 
 export const USAGE =
   'Usage: pnpm bootstrap | pnpm daily [--force] | pnpm weekly | pnpm verify | pnpm checks | ' +
-  'pnpm probe | pnpm spike [--from <YYYY-MM-DD>]';
+  'pnpm probe [--report [--from <YYYY-MM-DD>] [--file <path>]] | pnpm spike [--from <YYYY-MM-DD>]';
 
 export interface JobArgs {
   job: Job;
@@ -15,6 +15,10 @@ export interface JobArgs {
   force: boolean;
   /** `pnpm spike --from <value>`: as given (checked against the calendar by `spikeFrom`). */
   from?: string;
+  /** `pnpm probe --report`: print the table from the probe file, send nothing. */
+  report?: boolean;
+  /** `pnpm probe --report --file <path>`: a probe file other than the state dir's. */
+  file?: string;
 }
 
 /** `argv`: the arguments from the job name on (`process.argv.slice(2)`). */
@@ -26,6 +30,8 @@ export function parseJobArgs(argv: string[]): JobArgs | { error: string } {
   const job = name as Job;
   let force = false;
   let from: string | undefined;
+  let report = false;
+  let file: string | undefined;
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
     if (job === 'daily' && arg === '--force') {
@@ -33,7 +39,7 @@ export function parseJobArgs(argv: string[]): JobArgs | { error: string } {
       force = true;
       continue;
     }
-    if (job === 'spike' && arg === '--from') {
+    if ((job === 'spike' || job === 'probe') && arg === '--from') {
       if (from !== undefined) return { error: 'Give --from once.' };
       const value = rest[i + 1];
       if (value === undefined || value === '' || value.startsWith('--')) {
@@ -43,7 +49,34 @@ export function parseJobArgs(argv: string[]): JobArgs | { error: string } {
       i++;
       continue;
     }
+    if (job === 'probe' && arg === '--report') {
+      if (report) return { error: 'Give --report once.' };
+      report = true;
+      continue;
+    }
+    if (job === 'probe' && arg === '--file') {
+      if (file !== undefined) return { error: 'Give --file once.' };
+      const value = rest[i + 1];
+      if (value === undefined || value === '' || value.startsWith('--')) {
+        return { error: 'Give a path for --file, like --file /path/probe.jsonl.' };
+      }
+      file = value;
+      i++;
+      continue;
+    }
     return { error: `Unknown argument ${arg} for pnpm ${job}.\n${USAGE}` };
   }
-  return { job, force, ...(from !== undefined && { from }) };
+  if (job === 'probe' && !report && (from !== undefined || file !== undefined)) {
+    return { error: `--from and --file belong to pnpm probe --report.\n${USAGE}` };
+  }
+  if (from !== undefined && job === 'probe' && !/^\d{4}-\d{2}-\d{2}$/.test(from)) {
+    return { error: 'Give --from as YYYY-MM-DD.' };
+  }
+  return {
+    job,
+    force,
+    ...(from !== undefined && { from }),
+    ...(report && { report }),
+    ...(file !== undefined && { file }),
+  };
 }

@@ -10,6 +10,9 @@
 //                          on the stored data, no fetching
 //   pnpm checks            the same as pnpm verify (its A1 name)
 //   pnpm probe             A1: the last sessions of one ticker from every bar source, to a log
+//   pnpm probe --report [--from <YYYY-MM-DD>] [--file <path>]
+//                          A1: the probe file as a table (first seen and last change per bar
+//                          source and date, minutes after the 16:00 New York close); no request
 //   pnpm spike             A1: the gate, every NYSE session from the first daily run to the
 //                          latest final day (a session without a run fails; the latest one is
 //                          pending until its run finishes); passed needs 20 judged sessions
@@ -46,6 +49,14 @@ if ('error' in args) {
   process.exit(1);
 }
 const { job, force } = args;
+if (job === 'probe' && args.report) {
+  // A local file only: no lock, no database, no plug-ins.
+  const { probeReport, readProbeFile } = await import('../jobs/probe-report');
+  const { stateDir } = await import('@saku/db/env');
+  const read = readProbeFile(args.file ?? join(stateDir(), 'probe.jsonl'));
+  console.log(probeReport({ ...read, ...(args.from !== undefined && { from: args.from }) }));
+  process.exit(0);
+}
 // `pnpm spike --from <date>`: the counted range starts at the first session on or after it.
 const spikeFromArg = args.from;
 const log = jobLogger(job);

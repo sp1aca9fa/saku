@@ -13,6 +13,27 @@ describe('parseJobArgs', () => {
     });
   });
 
+  it('reads probe --report with --from and --file, in any order', () => {
+    expect(parseJobArgs(['probe'])).toEqual({ job: 'probe', force: false });
+    expect(parseJobArgs(['probe', '--report'])).toEqual({
+      job: 'probe',
+      force: false,
+      report: true,
+    });
+    expect(
+      parseJobArgs(['probe', '--from', '2026-10-30', '--report', '--file', '/x/p.jsonl']),
+    ).toEqual({ job: 'probe', force: false, from: '2026-10-30', report: true, file: '/x/p.jsonl' });
+    for (const argv of [
+      ['probe', '--from', '2026-10-30'],
+      ['probe', '--file', 'x'],
+      ['probe', '--report', '--report'],
+      ['probe', '--report', '--from', 'soon'],
+      ['probe', '--report', '--file'],
+      ['probe', '--report', '--bogus'],
+    ])
+      expect(parseJobArgs(argv), argv.join(' ')).toHaveProperty('error');
+  });
+
   it('refuses an unknown job, an unknown argument and a flag of another job', () => {
     const refused = [
       [],
