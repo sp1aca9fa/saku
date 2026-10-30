@@ -63,6 +63,25 @@ describe('provider usage', () => {
     ]);
   });
 
+  it('before: only buckets up to the one holding it, that bucket whole', async () => {
+    const db = await testDb();
+    await recordProviderRequest(db, { provider: 'p', at: T0, symbol: 'AAA' });
+    await recordProviderRequest(db, { provider: 'p', at: T0 + 20_000, symbol: 'BBB' });
+    await recordProviderRequest(db, { provider: 'p', at: T0 + MIN, symbol: null });
+    await recordProviderRequest(db, { provider: 'p', at: T0 + DAY, symbol: 'CCC' });
+    // Bound inside the first minute (after AAA, before BBB): that minute and day count whole.
+    const h = await providerUsageSince(db, 'p', T0 + DAY + MIN, T0 + 1000);
+    // The minutes a day back are out of the request window; CCC's day is after the bound.
+    expect(h.requests).toEqual([]);
+    expect([...h.symbols.keys()].sort()).toEqual(['AAA', 'BBB']);
+    // Read close by: the minute holding the bound counts whole (AAA and BBB), the next does not.
+    const close = await providerUsageSince(db, 'p', T0 + 2 * MIN, T0 + 1000);
+    expect(close.requests).toEqual(Array(2).fill(Date.parse('2026-01-05T10:00:59.999Z')));
+    await expect(providerUsageSince(db, 'p', T0, Number.NaN)).rejects.toThrow(
+      /invalid usage bound/,
+    );
+  });
+
   it('stores no URL, key or body: only provider, bucket, count and symbols', async () => {
     const db = await testDb();
     await recordProviderRequest(db, { provider: 'p', at: T0, symbol: 'AAA' });

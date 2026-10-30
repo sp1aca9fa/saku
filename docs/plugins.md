@@ -63,10 +63,16 @@ the descriptions to the database. The fields:
   provider still counts (loaded with the provider's); new usage goes under the provider id only.
   Same form as a key. Changing or removing it later keeps the old id's usage counting: each run
   (and `pnpm plugins`, `pnpm probe`) saves the plug-in's description with the provider ids it
-  was saved under before (`formerProviders`), and the quota guard loads their stored requests
-  and symbols with the new id's. An old id is remembered while it still has usage the windows
-  count (requests in the last day, symbols in the last 31 days) and dropped after; a saved
-  description that cannot be read stops the run (its history unknown). Notifier keys share this namespace: a notifier whose key equals
+  was saved under before and when each stopped (`formerProviders: [{ id, since }]`), and the
+  quota guard loads the requests and symbols stored under an old id before `since` with the new
+  id's (later rows belong to plug-ins still on that id). An old id is dropped 32 days after
+  `since` (the 31-day symbol window plus the day a symbol is stored under), whatever it holds.
+  A saved description that cannot be read is left as saved: the run reports it (incomplete,
+  with the row's kind and key) and that plug-in's provider sends nothing, since its history is
+  unknown; other providers go on. To recover, restore the database from the last backup made
+  before the row went bad (`docs/backups.md`), or delete that `plugin_info` row (its key and
+  kind) when its provider id has not changed in the last 32 days; the next run saves it
+  afresh. Notifier keys share this namespace: a notifier whose key equals
   a data provider id counts with it, so it must not equal one unless their limits match.
 - `keyEnv`: the environment variable(s) holding the key, read from `.env`.
 - `termsUrl`: the provider's terms.

@@ -9,6 +9,7 @@ import {
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { Sessions } from '@saku/data';
+import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { BlockedError, PoliteHttp, type UsageStore } from '../http';
 import { allInfos, emptyPlugins, providerUsageStore, savePluginInfos } from '../registry';
@@ -541,7 +542,8 @@ describe('ingest: quota guard across runs', () => {
     async function changed(from: string | undefined, to: string | undefined) {
       const db = await setup();
       const old = pair(from, { perMinute: 10, symbolsPerMonth: 2 });
-      await savePluginInfos(db, allInfos(old.plugins), new Date(old.start - 60_000));
+      const first = old.start - 60_000;
+      await savePluginInfos(db, allInfos(old.plugins), new Date(first), () => first);
       const before = old.start - 1000;
       const oldId = from ?? 'acme-bars';
       await recordProviderRequest(db, { provider: oldId, at: before, symbol: 'BBB' });
@@ -552,15 +554,16 @@ describe('ingest: quota guard across runs', () => {
       const asked: string[] = [];
       const real = providerUsageStore(db);
       const usage: UsageStore = {
-        load: (id, now) => {
+        load: (id, now, bound) => {
           asked.push(id);
-          return real.load(id, now);
+          return real.load(id, now, bound);
         },
         record: real.record,
       };
       /** A run as `runJob` does it: the descriptions saved first, then the ingest. */
       const run = async () => {
-        await savePluginInfos(db, allInfos(p.plugins), p.now());
+        const at = p.now();
+        await savePluginInfos(db, allInfos(p.plugins), at, () => at.getTime());
         return ingest(db, p.plugins, {
           ...options('daily'),
           context: p.context,
@@ -583,7 +586,7 @@ describe('ingest: quota guard across runs', () => {
     });
 
     it('a provider id renamed: two runs later the old id still counts', async () => {
-      const { db, asked, run } = await changed('acme', 'acme-corp');
+      const { db, p, asked, run } = await changed('acme', 'acme-corp');
       await run();
       asked.length = 0;
       const second = await run();
@@ -593,7 +596,7 @@ describe('ingest: quota guard across runs', () => {
       const saved = await db.select().from(schema.pluginInfo);
       for (const row of saved) {
         expect(row.description).toMatchObject({
-          formerProviders: expect.arrayContaining(['acme']),
+          formerProviders: [{ id: 'acme', since: new Date(p.start).toISOString() }],
         });
       }
     });
@@ -608,12 +611,12 @@ describe('ingest: quota guard across runs', () => {
 
     it('fault: a former id whose history cannot be loaded stops the source, sending nothing', async () => {
       const { db, p } = await changed('acme', 'acme-corp');
-      await savePluginInfos(db, allInfos(p.plugins), p.now());
+      await savePluginInfos(db, allInfos(p.plugins), p.now(), () => p.start);
       const real = providerUsageStore(db);
       const usage: UsageStore = {
-        load: async (id, now) => {
+        load: async (id, now, bound) => {
           if (id === 'acme') throw new Error('database locked');
-          return real.load(id, now);
+          return real.load(id, now, bound);
         },
         record: real.record,
       };
@@ -627,6 +630,95 @@ describe('ingest: quota guard across runs', () => {
         expect(x.stopped).toMatch(/earlier requests of acme-corp \(stored under acme\) unknown/);
       }
       expect(p.times).toHaveLength(0);
+    });
+
+    it('two plug-ins of one provider, one renamed: it counts the old id only up to the rename', async () => {
+      const db = await setup();
+      const limits = { perMinute: 10, symbolsPerMonth: 3 };
+      const p = pair('acme-corp', limits);
+      const [bars] = p.plugins.bars;
+      const [series] = p.plugins.series;
+      const t0 = Date.parse('2026-01-08T00:00:00Z');
+      const renamed = Date.parse('2026-01-12T00:00:00Z');
+      const save = (infos: PluginInfo[], at: number) =>
+        savePluginInfos(db, infos, new Date(at), () => at);
+      await save(
+        [
+          { ...bars!.info, provider: 'acme' },
+          { ...series!.info, provider: 'acme' },
+        ],
+        t0,
+      );
+      // BBB before the rename (the bar plug-in's); CCC and a full minute after it (the series
+      // plug-in's, still on acme).
+      await recordProviderRequest(db, { provider: 'acme', at: t0 + 3_600_000, symbol: 'BBB' });
+      await save([bars!.info, { ...series!.info, provider: 'acme' }], renamed);
+      await recordProviderRequest(db, {
+        provider: 'acme',
+        at: Date.parse('2026-01-14T00:00:00Z'),
+        symbol: 'CCC',
+      });
+      for (let k = 0; k < 8; k++) {
+        await recordProviderRequest(db, { provider: 'acme', at: p.start - 1000, symbol: null });
+      }
+      const bounds: [string, number | undefined][] = [];
+      const real = providerUsageStore(db);
+      const usage: UsageStore = {
+        load: (id, now, bound) => {
+          bounds.push([id, bound]);
+          return real.load(id, now, bound);
+        },
+        record: real.record,
+      };
+      const r = await ingest(
+        db,
+        { ...emptyPlugins(), bars: [bars!] },
+        { ...options('daily'), context: p.context, now: p.now, usage },
+      );
+      // 80% of 3 is 2: only BBB counts, so AAA is allowed; the later minute does not pace it.
+      expect(r[0]).toMatchObject({ ok: ['AAA', 'BBB'], failed: [] });
+      expect(p.times[0]).toBe(p.start);
+      expect(bounds).toEqual([
+        ['acme-corp', undefined],
+        ['acme-bars', undefined],
+        ['acme', renamed],
+      ]);
+      // Dropped once no window can count the plug-in's rows under it (32 days after).
+      await save([bars!.info], renamed + 32 * 86_400_000);
+      const kept = await db.select().from(schema.pluginInfo);
+      expect(
+        (kept.find((x) => x.key === 'acme-bars')!.description as Record<string, unknown>)
+          .formerProviders,
+      ).toHaveLength(1);
+      await save([bars!.info], renamed + 32 * 86_400_000 + 1);
+      const gone = await db.select().from(schema.pluginInfo);
+      expect(
+        (gone.find((x) => x.key === 'acme-bars')!.description as Record<string, unknown>)
+          .formerProviders,
+      ).toBeUndefined();
+    });
+
+    it('fault: an unreadable saved description stops only its provider’s sources', async () => {
+      const db = await setup();
+      const p = pair(undefined);
+      await savePluginInfos(db, allInfos(p.plugins), p.now(), () => p.start);
+      await db
+        .update(schema.pluginInfo)
+        .set({ description: { key: 'acme-bars', formerProviders: [{ id: 'acme' }] } })
+        .where(eq(schema.pluginInfo.key, 'acme-bars'));
+      const { usage } = blank();
+      const r = await ingest(db, p.plugins, {
+        ...options('daily'),
+        context: p.context,
+        now: p.now,
+        usage,
+      });
+      expect(r[0]!.stopped).toMatch(
+        /earlier requests of acme-bars unknown: saved description of bar acme-bars unreadable/,
+      );
+      expect(r[0]!.ok).toEqual([]);
+      expect(r[1]).toMatchObject({ ok: ['S1', 'S2', 'S3'] });
+      expect(r[1]!.stopped).toBeUndefined();
     });
 
     it('fault: unknown history stops every source of the provider, sending nothing', async () => {

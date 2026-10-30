@@ -128,7 +128,7 @@ if (job === 'probe') {
   if (!ticker) throw new Error('No symbols: run pnpm symbols import first.');
   const today = sessions.onOrBefore(tradingDateOf(now));
   // Saved first, like a run: a provider id the probe sends under is remembered when it changes.
-  await savePluginInfos(db, allInfos(plugins), now);
+  for (const line of await savePluginInfos(db, allInfos(plugins), now)) log.warn(line);
   const lines = await probe(plugins, {
     ticker,
     from: sessions.before(today, 2),

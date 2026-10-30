@@ -8,7 +8,7 @@
 // Buckets lose exact times, so reads are conservative: each request counts as sent at the last
 // millisecond of its bucket (never earlier than it was sent), so a window never sees fewer
 // requests or symbols than were sent in it; it may see some for up to one bucket longer.
-import { and, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, eq, gte, lt, lte, sql } from 'drizzle-orm';
 import type { Db } from './client';
 import { providerUsage } from './schema';
 
@@ -81,12 +81,19 @@ export async function recordProviderRequest(
 /**
  * A provider's requests in the last day and symbols in the last 31 days, as seen at `now` (ms).
  * Rows starting after `now` (a clock set back) are included: counted, never dropped.
+ * `before` (ms): only buckets starting no later than the bucket holding it, for an id another
+ * plug-in may still use after `before` (a former provider id). The bucket holding `before` is
+ * kept whole, so a request sent before it is never left out (some after it may count).
  */
 export async function providerUsageSince(
   db: Db,
   provider: string,
   now: number,
+  before?: number,
 ): Promise<ProviderUsageHistory> {
+  if (before !== undefined && !Number.isFinite(before)) {
+    throw new Error(`invalid usage bound for ${provider}`);
+  }
   // Every minute bucket whose last millisecond can still be inside the day window.
   const minutes = await db
     .select()
@@ -96,6 +103,7 @@ export async function providerUsageSince(
         eq(providerUsage.provider, provider),
         eq(providerUsage.windowType, 'minute'),
         gte(providerUsage.windowStart, minuteStart(now - USAGE_REQUEST_WINDOW_MS)),
+        before === undefined ? undefined : lte(providerUsage.windowStart, minuteStart(before)),
       ),
     );
   const requests: number[] = [];
@@ -114,6 +122,7 @@ export async function providerUsageSince(
         eq(providerUsage.provider, provider),
         eq(providerUsage.windowType, 'day'),
         gte(providerUsage.windowStart, dayStart(now - USAGE_SYMBOL_WINDOW_MS)),
+        before === undefined ? undefined : lte(providerUsage.windowStart, dayStart(before)),
       ),
     );
   const symbols = new Map<string, number>();

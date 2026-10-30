@@ -111,7 +111,14 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
   const stopped: string[] = [];
   try {
     const infos = allInfos(plugins);
-    await savePluginInfos(db, infos, now);
+    // A saved description that cannot be read is left as saved: its provider's sources stop in
+    // the ingest (history unknown) and the admins hear which row to restore (docs/plugins.md).
+    const kept = await savePluginInfos(db, infos, now);
+    if (kept.length > 0) {
+      log.warn('Plug-in descriptions left as saved', { kept });
+      markIncomplete('plug-in descriptions');
+      failures.push(...kept);
+    }
     await seedSourceRoles(
       db,
       infos.flatMap((i) =>

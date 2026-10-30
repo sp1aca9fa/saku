@@ -10,6 +10,7 @@ import {
   SymbolQuotaError,
   type UsageStore,
   WINDOWS,
+  mergeFormerIds,
   redactUrl,
 } from './http';
 
@@ -516,6 +517,43 @@ describe('PoliteHttp quota guard', () => {
     expect(() => new PoliteHttp().alsoCount(['x'])).toThrow(/quota guard/);
   });
 
+  it('mergeFormerIds: one entry per id, all rows over a bound, the later bound of two', () => {
+    expect(
+      mergeFormerIds('acme', [
+        'acme',
+        { id: 'a', before: 5 },
+        { id: 'a', before: 9 },
+        { id: 'b', before: 3 },
+        'b',
+        { id: 'c' },
+        { id: 'c', before: 1 },
+      ]),
+    ).toEqual([{ id: 'a', before: 9 }, { id: 'b' }, { id: 'c' }]);
+  });
+
+  it('a bounded former id is loaded only up to its bound', async () => {
+    const calls: [string, number | undefined][] = [];
+    const store: UsageStore = {
+      load: async (id, _now, before) => {
+        calls.push([id, before]);
+        return { requests: [], symbols: new Map() };
+      },
+      record: async () => {},
+    };
+    const http = new PoliteHttp({
+      minDelayMs: 0,
+      fetchImpl: (async () => ok()) as unknown as typeof fetch,
+    });
+    http.guard({ provider: 'acme-corp', store });
+    http.alsoCount([{ id: 'acme', before: 42 }, 'acme-bars']);
+    await http.json('https://example.test/a');
+    expect(calls).toEqual([
+      ['acme-corp', undefined],
+      ['acme', 42],
+      ['acme-bars', undefined],
+    ]);
+  });
+
   it('history unknown under a former key sends nothing', async () => {
     const { store } = memoryStore();
     const failing: UsageStore = {
@@ -527,7 +565,7 @@ describe('PoliteHttp quota guard', () => {
     };
     const calls: string[] = [];
     const http = new PoliteHttp({
-      usage: { provider: 'acme', store: failing, formerKeys: ['acme-bars'] },
+      usage: { provider: 'acme', store: failing, formerKeys: [{ id: 'acme-bars' }] },
       fetchImpl: (async (url: string) => {
         calls.push(url);
         return ok();

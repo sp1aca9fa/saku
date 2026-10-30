@@ -12,6 +12,6 @@ const db = createDb(dbConfigFromEnv());
 await exitIfUnmigrated(db);
 const plugins = await loadPlugins();
 const infos = allInfos(plugins);
-await savePluginInfos(db, infos);
+for (const line of await savePluginInfos(db, infos)) console.error(line);
 for (const i of infos) console.log(`${i.kind} ${i.key}`);
 if (plugins.missing.length > 0) console.log(`Not present: ${plugins.missing.join(', ')}`);

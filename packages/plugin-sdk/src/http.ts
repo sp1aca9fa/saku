@@ -86,8 +86,12 @@ export interface UsageHistory {
 
 /** Where the quota guard keeps each provider's requests across runs (the database in jobs). */
 export interface UsageStore {
-  /** The provider's requests in the last day and symbols in the last 31 days, as seen at `now`. */
-  load(provider: string, now: number): Promise<UsageHistory>;
+  /**
+   * The provider's requests in the last day and symbols in the last 31 days, as seen at `now`.
+   * `before`: only rows stored before then (their buckets kept whole), for a former provider id
+   * that another plug-in may still use.
+   */
+  load(provider: string, now: number, before?: number): Promise<UsageHistory>;
   /** Records one request as it is sent; given no URL, key or body. */
   record(provider: string, at: number, symbol: string | null): Promise<void>;
 }
@@ -110,16 +114,49 @@ export function redactUrl(url: string): string {
   return url.replace(SECRET_PARAMS, '$1***');
 }
 
+/**
+ * Another id whose stored history counts for a provider: all of it, or with `before` (ms) only
+ * the rows stored before then (a former provider id, which another plug-in may still use).
+ */
+export interface FormerId {
+  id: string;
+  before?: number;
+}
+
 /** The quota guard: the store and the provider id requests are counted under across runs. */
 export interface UsageGuard {
   provider: string;
   store: UsageStore;
   /**
-   * Other ids whose stored history counts for this provider too: the keys its plug-ins were
-   * counted under before they declared it (`alsoCount`). Loaded with the provider's history and
-   * merged; new requests are recorded under the provider id only.
+   * Other ids whose stored history counts for this provider too (`alsoCount`): the keys its
+   * plug-ins were counted under before they declared it, and provider ids they declared before.
+   * Loaded with the provider's history and merged; new requests are recorded under the provider
+   * id only.
    */
-  formerKeys?: readonly string[];
+  formerKeys?: readonly FormerId[];
+}
+
+/**
+ * Former ids merged by id: an unbounded one wins (it counts more), else the latest `before`.
+ * The provider's own id is left out (all its rows count anyway).
+ */
+export function mergeFormerIds(provider: string, ids: readonly (string | FormerId)[]): FormerId[] {
+  const out = new Map<string, FormerId>();
+  for (const raw of ids) {
+    const f = typeof raw === 'string' ? { id: raw } : raw;
+    if (f.id === provider) continue;
+    const had = out.get(f.id);
+    if (!had) out.set(f.id, { ...f });
+    else if (had.before !== undefined) {
+      out.set(
+        f.id,
+        f.before === undefined
+          ? { id: f.id }
+          : { id: f.id, before: Math.max(had.before, f.before) },
+      );
+    }
+  }
+  return [...out.values()];
 }
 
 export interface PoliteHttpOptions {
@@ -296,15 +333,14 @@ export class PoliteHttp {
    * their earlier requests and symbols. Before the history is loaded; new requests are still
    * recorded under the provider id only. For the clients sharing the count, like the guard.
    */
-  alsoCount(formerKeys: readonly string[]): void {
+  alsoCount(formerKeys: readonly (string | FormerId)[]): void {
     const usage = this.usage;
     if (!usage) throw new Error('former keys need a quota guard');
     if (this.ledger.loaded || this.sent.length > 0) {
       throw new Error('former keys added after requests were sent');
     }
-    const keys = new Set([...(usage.formerKeys ?? []), ...formerKeys]);
-    keys.delete(usage.provider);
-    this.ledger.usage = { ...usage, formerKeys: [...keys] };
+    const keys = mergeFormerIds(usage.provider, [...(usage.formerKeys ?? []), ...formerKeys]);
+    this.ledger.usage = { ...usage, formerKeys: keys };
   }
 
   /**
@@ -341,13 +377,16 @@ export class PoliteHttp {
     if (!usage) return Promise.resolve();
     this.ledger.loaded ??= (async () => {
       const histories: UsageHistory[] = [];
-      for (const id of [usage.provider, ...(usage.formerKeys ?? [])]) {
+      for (const { id, before } of [{ id: usage.provider }, ...(usage.formerKeys ?? [])]) {
         try {
           // Read (and pruned) at the earlier of the two clocks, the mirror of recording at the
           // later: an injected clock ahead of the system one never prunes or skips rows that are
           // still inside a real window. The windows then filter on the run's clock.
+          const at = Math.min(this.ledger.clock(), this.o.wallClock());
           histories.push(
-            await usage.store.load(id, Math.min(this.ledger.clock(), this.o.wallClock())),
+            await (before === undefined
+              ? usage.store.load(id, at)
+              : usage.store.load(id, at, before)),
           );
         } catch (e) {
           const under = id === usage.provider ? '' : ` (stored under ${id})`;
