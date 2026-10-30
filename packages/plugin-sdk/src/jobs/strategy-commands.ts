@@ -120,7 +120,7 @@ export function recomputeRecords(
     const c = await annotateStandInCorrections(db, null);
     if (c.annotations) out.push(`${c.annotations} stand-in corrections annotated.`);
     out.push(...c.errors);
-    const r = await recompute(db, { runId: null, code: o.code });
+    const r = await recompute(db, { runId: null, code: o.code, waiting: c.deferred });
     for (const d of r.differences) {
       out.push(`${d.version} ${d.date}: recorded ${d.recorded}, now ${d.now} (annotated)`);
     }

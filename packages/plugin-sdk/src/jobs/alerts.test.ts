@@ -779,11 +779,11 @@ describe('stand-in correction alerts (requirements 04, the stand-in rule 4)', ()
     );
   });
 
-  it('one message per channel and version: the newest in full, the others counted', async () => {
+  it('one message per channel and version: the others that change the signal listed, the rest counted', async () => {
     const { db, owner, version, day } = await setup('ja');
     await day(DAY, 'Calm');
     await day('2026-01-06', 'Calm');
-    await note(db, version.id, { ticker: 'BBB' });
+    await note(db, version.id, { ticker: 'BBB', correctedAllocation: 'Calm', differs: false });
     await note(db, version.id);
     // The next day read the 01-05 stand-in in its lookback; the safe state by its name.
     await note(
@@ -794,12 +794,17 @@ describe('stand-in correction alerts (requirements 04, the stand-in rule 4)', ()
     );
     const { notifier, sent } = fakeNotifier();
     expect((await sendStandInCorrections(db, options(notifier, '2026-01-06'))).sent).toBe(1);
-    expect(sent[0]!.text.split('\n').slice(0, 4)).toEqual([
+    const told = [
       'Trend: 2026-01-06 のシグナルの訂正',
       '2026-01-06 のシグナルは AAA の 2026-01-05 の代替価格(副ソース)を参照しました。後から届いた主ソースの価格は、それと 1.01% 異なっていました。',
       '記録された配分: セーフステート。訂正後の価格なら Calm になっていました。記録は変更せず、注記を付けました。',
-      'この戦略のほかの未通知の訂正: 2 件(それぞれ記録に注記済み)。',
-    ]);
+      '訂正後の価格なら配分が変わっていたほかの日:',
+      '2026-01-05 AAA: Calm → Risk on',
+      'この戦略のほかの訂正で、シグナルが変わらなかったもの: 1 件(それぞれ記録に注記済み)。',
+      '過去の日についてのお知らせで、新しいシグナルではありません。現在の配分は最新のシグナルのとおりです。',
+      'データ状態: 緑。 (最新の記録日 2026-01-06)',
+    ].join('\n');
+    expect(sent[0]!.text).toBe(told);
     // Every key recorded: nothing repeated.
     const subjects = (await db.select().from(schema.alertsSent)).map((r) => [r.subject, r.date]);
     expect(subjects.sort()).toEqual(
@@ -813,14 +818,44 @@ describe('stand-in correction alerts (requirements 04, the stand-in rule 4)', ()
     // A channel added later gets the corrections not told on it, in one message.
     await addChannel(db, owner, { type: 'fake', target: 'chat-2', authSecret: SECRET });
     expect((await sendStandInCorrections(db, options(notifier, '2026-01-07'))).sent).toBe(1);
-    expect(sent[1]!.target).toBe('chat-2');
-    expect(sent[1]!.text).toContain('未通知の訂正: 2 件');
-    // A new correction alone: no count line.
+    expect(sent[1]).toEqual({ target: 'chat-2', text: told });
+    // A new correction alone: no other lines.
     await day('2026-01-07', 'Calm');
     await note(db, version.id, { ticker: 'CCC' }, '2026-01-07');
     await sendStandInCorrections(db, options(notifier, '2026-01-07'));
     expect(sent.slice(2).map((m) => m.target)).toEqual(['chat-1', 'chat-2']);
-    expect(sent[2]!.text).not.toContain('未通知');
+    expect(sent[2]!.text).not.toContain('ほかの');
+  });
+
+  it('D changes the signal, D+1 does not: D in full, D+1 counted', async () => {
+    const { db, version, day } = await setup();
+    await day(DAY, 'Calm');
+    await day('2026-01-06', 'Risk on');
+    await note(db, version.id);
+    await note(
+      db,
+      version.id,
+      {
+        standInDate: DAY,
+        recordedAllocation: 'Risk on',
+        correctedAllocation: 'Risk on',
+        differs: false,
+      },
+      '2026-01-06',
+    );
+    const { notifier, sent } = fakeNotifier();
+    expect((await sendStandInCorrections(db, options(notifier, '2026-01-06'))).sent).toBe(1);
+    expect(sent[0]!.text).toBe(
+      [
+        'Trend: correction to the signal of 2026-01-05',
+        "The signal of 2026-01-05 used a secondary price for AAA; the primary's price, which arrived later, differed from it by 1.01%.",
+        'Recorded allocation: Calm. With the corrected price it would have been Risk on. The record is annotated, not changed.',
+        'Other corrections of this strategy that would not have changed the signal: 1 (each is annotated in the record).',
+        ...EN_LAST,
+        'Data health: green. (Latest recorded day, 2026-01-06.)',
+      ].join('\n'),
+    );
+    expect(await db.select().from(schema.alertsSent)).toHaveLength(2);
   });
 
   it('a failed delivery is caught up at the next call, then not repeated', async () => {

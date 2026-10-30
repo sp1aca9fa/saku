@@ -552,8 +552,8 @@ export function standInDetail(detail: unknown, date: TradingDate): StandInCorrec
  * secondary price that was off by X; with the corrected price it would have been Y." X is the
  * stored deviation, |primary / stand-in - 1|, so it is worded as how far the primary's price
  * differed from the stand-in. It is about a past day: the corrected allocation is never given as
- * a signal or an instruction, and the record is said to be annotated, not changed. `more`: other
- * corrections of the version told in the same message (counted, each annotated). The lines before
+ * a signal or an instruction, and the record is said to be annotated, not changed. `others`: the
+ * version's other corrections in the same message (see there). The lines before
  * the health line are cut to fit (the first lines kept); the health line (the version's latest
  * recorded day) always ends it. A channel too small even for that is cut at the end by `deliver`.
  */
@@ -566,7 +566,12 @@ export function standInCorrectedText(
     detail: StandInCorrectedDetail;
     /** The data health of the version's latest recorded day, or undefined without one. */
     health?: { status: string; date: TradingDate };
-    more?: number;
+    /**
+     * The version's other corrections told in the same message: each one that changes the
+     * signal on its own line (date, ticker, recorded and corrected allocation), in the given
+     * order; the unchanged ones counted.
+     */
+    others?: { date: TradingDate; detail: StandInCorrectedDetail }[];
   },
   /** The channel's longest message. */
   max: number,
@@ -580,6 +585,8 @@ export function standInCorrectedText(
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(d.deviation);
+  const changed = (o.others ?? []).filter((x) => x.detail.differs);
+  const unchanged = (o.others ?? []).length - changed.length;
   const values = {
     strategy: o.name,
     date: o.date,
@@ -599,7 +606,20 @@ export function standInCorrectedText(
           corrected: name(d.correctedAllocation),
         })
       : t('alerts.standInCorrected.same', { recorded: name(d.recordedAllocation) }),
-    ...(o.more ? [t('alerts.standInCorrected.more', { count: o.more })] : []),
+    ...(changed.length > 0
+      ? [
+          t('alerts.standInCorrected.otherChanged'),
+          ...changed.map((x) =>
+            t('alerts.standInCorrected.otherDay', {
+              date: x.date,
+              ticker: x.detail.ticker,
+              recorded: name(x.detail.recordedAllocation),
+              corrected: name(x.detail.correctedAllocation),
+            }),
+          ),
+        ]
+      : []),
+    ...(unchanged > 0 ? [t('alerts.standInCorrected.more', { count: unchanged })] : []),
     t('alerts.standInCorrected.pastDay'),
   ].join('\n');
   // Unknown stays unknown: without a recorded day the status is `unknown`, never green.
@@ -635,8 +655,9 @@ export function standInSubject(versionId: string, d: StandInCorrectedDetail, dat
  * annotations and `alerts_sent`, so a failed delivery, a run that stopped or a channel added
  * later is caught up at the next run. A user's version goes to its owner's channels (as the
  * strategy alerts do); a library version (no owner) to the admins' channels. Per channel and
- * version one message: the newest correction (latest entry date) in full, the others counted,
- * every key recorded once it is delivered. An annotation that does not read back is told to the
+ * version one message: the newest correction that changes the signal (else the newest; latest
+ * entry date first) in full, each other one that changes it on a line of its own, the unchanged
+ * ones counted, every key recorded once it is delivered. An annotation that does not read back is told to the
  * admins once (keyed by its id), never with a guessed value. Not sent in a drill.
  */
 export async function sendStandInCorrections(
@@ -677,23 +698,24 @@ export async function sendStandInCorrections(
     const tell = async (t: Translate, language: string, channel: Target) => {
       const pending: typeof readable = [];
       for (const n of readable) if (!(await alertSent(db, channel, n.key))) pending.push(n);
-      const [newest] = pending;
-      if (!newest) return;
+      // In full: the newest correction that changes the signal, else the newest one.
+      const lead = pending.find((n) => n.detail.differs) ?? pending[0];
+      if (!lead) return;
       const max = o.notifiers.find((n) => n.info.key === channel.type)?.info.maxLength ?? Infinity;
       const text = standInCorrectedText(
         t,
         language,
         {
           name: version.name,
-          date: newest.date,
-          detail: newest.detail,
-          more: pending.length - 1,
+          date: lead.date,
+          detail: lead.detail,
+          others: pending.filter((n) => n !== lead),
           ...(health && { health }),
         },
         max,
       );
       const keys = pending.map((n) => n.key);
-      await deliver(db, o, channel, { key: newest.key, keys, text }, summary, t);
+      await deliver(db, o, channel, { key: lead.key, keys, text }, summary, t);
     };
     if (!version.ownerId) {
       // The status passed only spares the overall-health read: the message states the

@@ -96,7 +96,9 @@
       "earlier": "The signal of {date} read a secondary price for {ticker} on {standInDate}; the primary's price, which arrived later, differed from it by {deviation}.",
       "differs": "Recorded allocation: {recorded}. With the corrected price it would have been {corrected}. The record is annotated, not changed.",
       "same": "Recorded allocation: {recorded}. With the corrected price it would have been the same: the signal would not have changed.",
-      "more": "Other corrections of this strategy not told before: {count} (each is annotated in the record).",
+      "otherChanged": "Other days the corrected price would have changed:",
+      "otherDay": "{date} {ticker}: {recorded} → {corrected}",
+      "more": "Other corrections of this strategy that would not have changed the signal: {count} (each is annotated in the record).",
       "pastDay": "This is about a past day, not a new signal: the latest signal gives the current allocation.",
       "healthDate": "(Latest recorded day, {date}.)"
     },

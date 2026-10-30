@@ -4,6 +4,7 @@ import type { RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   addChannel,
+  annotationsOf,
   appendForward,
   createUser,
   forwardRecord,
@@ -644,6 +645,17 @@ describe('a stand-in the primary later corrects', () => {
         ],
       },
     });
+    // A hole the primary never fills, years before the record: it holds nothing back.
+    const [aaa] = await db.select().from(schema.symbols).where(eq(schema.symbols.ticker, 'AAA'));
+    await db.insert(schema.standIns).values({
+      symbolId: aaa!.id,
+      date: '2019-03-04',
+      source: 's',
+      close: 50,
+      band: 0.005,
+      basis: 'unchecked',
+      createdAt: '2019-03-05T01:30:00.000Z',
+    });
     const { notifier, sent } = fakeNotifier();
     await runJob(db, withStandIn(), run1(notifier));
     // D+1: the primary still lacks D (the stand-in stays unresolved), has D+1.
@@ -671,17 +683,128 @@ describe('a stand-in the primary later corrects', () => {
     // Both days are explained: no "the engine decides differently".
     expect(await notes(db, 'recomputed')).toEqual([]);
     expect(sent.some((m) => m.text.includes('decides'))).toBe(false);
-    // One message per channel and version: the newest day in full, the other counted.
+    // One message per channel and version: the newest day in full, the other on its own line.
     const told = sent.filter((m) => m.text.startsWith('Quiet: correction'));
     expect(told.map((m) => m.target)).toEqual(['me', 'ops']);
-    expect(told[0]!.text.split('\n').slice(0, 4)).toEqual([
+    expect(told[0]!.text.split('\n').slice(0, 5)).toEqual([
       'Quiet: correction to the signal of 2026-01-16',
       expect.stringMatching(
         /^The signal of 2026-01-16 read a secondary price for AAA on 2026-01-15; the primary's price, which arrived later, differed from it by 1\.01%\.$/,
       ),
       'Recorded allocation: Calm. With the corrected price it would have been Still. The record is annotated, not changed.',
-      'Other corrections of this strategy not told before: 1 (each is annotated in the record).',
+      'Other days the corrected price would have changed:',
+      '2026-01-15 AAA: Calm → Still',
     ]);
+  });
+
+  it("waits while another dependency's stand-in is unresolved: no engine difference meanwhile", async () => {
+    const { db, version } = await setup();
+    await upsertSymbols(db, [{ ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    // Reads AAA's last two returns (so D+1 reads D), holds BBB.
+    const quiet = await registerVersion(db, {
+      ownerId: version.ownerId,
+      name: 'Quiet',
+      at: new Date('2026-01-12T22:00:00Z'),
+      strategy: {
+        name: 'Quiet',
+        account: 'taxable',
+        safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [
+          {
+            id: 'V',
+            type: 'compare',
+            left: { indicator: 'volatility', ticker: 'AAA', length: 2 },
+            op: '<',
+            right: { threshold: 0.005 },
+          },
+        ],
+        allocations: [
+          { name: 'Still', when: { all: ['V'] }, holdings: [{ ticker: 'BBB', weight: 100 }] },
+          { name: 'Calm', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        ],
+      },
+    });
+    const [D, D1, D2] = ['2026-01-13', '2026-01-14', '2026-01-15'];
+    /** A source without the listed `ticker date` bars, and with closes scaled for others. */
+    const source = (key: string, omit: string[] = [], scale: Record<string, number> = {}) => {
+      const base = barSource(key);
+      const out: BarSource = {
+        info: base.info,
+        async fetchBars(ticker, from, to, ctx) {
+          return (await base.fetchBars(ticker, from, to, ctx))
+            .filter((b) => !omit.includes(`${ticker} ${b.date}`))
+            .map((b) => {
+              // The test source's bars are flat (open = high = low = close).
+              const close = b.close * (scale[`${ticker} ${b.date}`] ?? 1);
+              return { ...b, open: close, high: close, low: close, close };
+            });
+        },
+      };
+      return out;
+    };
+    const at = (notifier: Notifier, target: string, now: string, over: Partial<RunOptions> = {}) =>
+      options(notifier, {
+        target,
+        now: new Date(now),
+        clock: () => new Date(now),
+        alerting: { ...options(notifier).alerting, date: target },
+        ...over,
+      });
+    const off = source('s', [], { [`AAA ${D}`]: 0.99 });
+    const { notifier, sent } = fakeNotifier();
+    // D: AAA stands in (1% low). D+1: still, and BBB stands in too. D+2: AAA resolved, BBB not.
+    await runJob(
+      db,
+      plugins([source('p', [`AAA ${D}`]), off]),
+      at(notifier, D, '2026-01-14T01:30:00Z'),
+    );
+    await runJob(
+      db,
+      plugins([source('p', [`AAA ${D}`, `BBB ${D1}`]), off]),
+      at(notifier, D1, '2026-01-15T01:30:00Z'),
+    );
+    const c = await runJob(
+      db,
+      plugins([source('p', [`BBB ${D1}`]), source('s')]),
+      at(notifier, D2, '2026-01-16T01:30:00Z'),
+    );
+    expect(c).toMatchObject({ ok: true });
+    expect((await forwardRecord(db, quiet.id)).map((e) => [e.date, e.allocation])).toEqual([
+      [D, 'Calm'],
+      [D1, 'Calm'],
+      [D2, 'Still'],
+    ]);
+    const corrections = async () =>
+      (await annotationsOf(db, quiet.id, 'stand_in_corrected')).map((n) => [
+        n.date,
+        (n.detail as { correctedAllocation: string }).correctedAllocation,
+      ]);
+    // D is annotated; D+1 waits for BBB's stand-in, and is not compared meanwhile.
+    expect(await corrections()).toEqual([[D, 'Still']]);
+    expect(await notes(db, 'recomputed')).toEqual([]);
+    expect(sent.some((m) => m.text.includes('decides'))).toBe(false);
+    // The weekly full refetch still lacks BBB's bar: the admins hear which stand-in holds what.
+    const w = await runJob(
+      db,
+      plugins([source('p', [`BBB ${D1}`]), source('s')]),
+      at(notifier, D2, '2026-01-16T02:30:00Z', { job: 'weekly' }),
+    );
+    expect(w.ok).toBe(false);
+    expect(w.error).toContain('stand-in corrections waiting');
+    expect(w.error).toContain(
+      `BBB ${D1}: stand-in still unresolved after the full refetch; corrections wait for it (Quiet (${quiet.id}) ${D1})`,
+    );
+    expect(await notes(db, 'recomputed')).toEqual([]);
+    // BBB's primary bar arrives: D+1 is annotated, still no engine difference.
+    const d = await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier));
+    expect(d).toMatchObject({ ok: true });
+    expect(await corrections()).toEqual([
+      [D, 'Still'],
+      [D1, 'Still'],
+    ]);
+    expect(await notes(db, 'recomputed')).toEqual([]);
+    expect(sent.some((m) => m.text.includes('decides'))).toBe(false);
   });
 
   it('an unreadable correction annotation: incomplete until the admins are told which', async () => {

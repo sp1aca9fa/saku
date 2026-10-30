@@ -152,8 +152,26 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       // stand-in this run resolved never reads as "the engine decides differently").
       const c = await annotateStandInCorrections(db, runId);
       log.info(`Stand-in corrections: ${c.annotations} new annotations`);
-      // A correction waiting for another unresolved stand-in is annotated by a later run.
-      if (c.deferred > 0) log.info(`Stand-in corrections waiting: ${c.deferred}`);
+      // A correction waiting for another unresolved stand-in is annotated by a later run. After
+      // the weekly full refetch a stand-in still unresolved is not one a source is late with:
+      // the run is incomplete, the admins told which stand-in holds which days back.
+      if (c.deferred.length > 0) {
+        log.info(`Stand-in corrections waiting: ${c.deferred.length}`, { deferred: c.deferred });
+        if (job === 'weekly') {
+          markIncomplete('stand-in corrections waiting');
+          const byBlocking = new Map<string, string[]>();
+          for (const d of c.deferred) {
+            const k = `${d.blocking.ticker} ${d.blocking.date}`;
+            byBlocking.set(k, [...(byBlocking.get(k) ?? []), `${d.version} ${d.date}`]);
+          }
+          for (const [k, days] of byBlocking) {
+            failures.push(
+              `${k}: stand-in still unresolved after the full refetch; corrections wait for it ` +
+                `(${days.join(', ')})`,
+            );
+          }
+        }
+      }
       // Whether an entry used a corrected stand-in is unknown: nothing annotated on a guess;
       // the run is incomplete and the admins hear which.
       if (c.errors.length > 0) {
@@ -174,7 +192,8 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         markIncomplete('stand-in alerts');
         failures.push(...s.errors);
       }
-      const r = await recompute(db, { runId, code: o.code });
+      // Days whose correction waits are not compared yet (their difference is that correction).
+      const r = await recompute(db, { runId, code: o.code, waiting: c.deferred });
       log.info(`Recomputed ${r.checked} recorded days: ${r.differences.length} new differences`);
       if (r.differences.length > 0) {
         log.warn('The engine decides recorded days differently', { differences: r.differences });

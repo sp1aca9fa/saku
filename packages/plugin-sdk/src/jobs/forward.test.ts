@@ -344,7 +344,7 @@ describe('forward', () => {
     expect((await forward(db, { runId, sessions, to: D[3]! })).errors).toHaveLength(1);
     expect(await annotateStandInCorrections(db, runId)).toEqual({
       annotations: 0,
-      deferred: 0,
+      deferred: [],
       errors: [],
     });
     expect(await annotationsOf(db, version.id, 'stand_in_corrected')).toEqual([]);
@@ -356,7 +356,7 @@ describe('forward', () => {
     // reads the stand-in's close).
     expect(await annotateStandInCorrections(db, runId)).toEqual({
       annotations: 2,
-      deferred: 0,
+      deferred: [],
       errors: [],
     });
     const notes = await annotationsOf(db, version.id, 'stand_in_corrected');
@@ -399,7 +399,7 @@ describe('forward', () => {
     expect((await forward(db, { runId, sessions, to: D[3]! })).appended).toBe(2);
     expect(await annotateStandInCorrections(db, runId)).toEqual({
       annotations: 0,
-      deferred: 0,
+      deferred: [],
       errors: [],
     });
     expect(await annotationsOf(db, version.id, 'stand_in_corrected')).toEqual([]);
@@ -441,13 +441,13 @@ describe('forward', () => {
     const after = '2026-01-09T00:00:00.000Z';
     // Run ids first: appended in the resolving run, the primary's bar (even inside the window);
     // in the recording run, the stand-in (even outside it).
-    expect(run(used, [s()], [], 'r2')).toEqual({ annotate: [], deferred: 0, errors: [] });
+    expect(run(used, [s()], [], 'r2')).toEqual({ annotate: [], deferred: [], errors: [] });
     expect(run(after, [s()], [], 'r1').annotate).toHaveLength(1);
     // Run ids decide without reading the timestamps, so a bad one does not block them.
     const unreadable = s({ createdAt: 'x', resolvedAt: '2026-01-08 21:30:00' });
     expect(run('y', [unreadable], [], 'r1')).toMatchObject({ errors: [] });
     expect(run('y', [unreadable], [], 'r1').annotate).toHaveLength(1);
-    expect(run('y', [unreadable], [], 'r2')).toEqual({ annotate: [], deferred: 0, errors: [] });
+    expect(run('y', [unreadable], [], 'r2')).toEqual({ annotate: [], deferred: [], errors: [] });
     // No run on either side is not the same run: placed by time.
     expect(run(after, [s({ runId: null, resolvedRunId: null })], [], null).annotate).toEqual([]);
     expect(run(used, [s({ runId: null, resolvedRunId: null })], [], null).annotate).toHaveLength(1);
@@ -518,13 +518,33 @@ describe('forward', () => {
     // Another dependency's stand-in still unresolved on D+1: D is annotated, D+1 waits.
     const waiting = run([{ ticker: 'AAA2', date: '2026-01-08' }]);
     expect(waiting.annotate.map((a) => a.recorded.date)).toEqual(['2026-01-07']);
-    expect(waiting.deferred).toBe(1);
-    // On or before D: both wait. A ticker the version does not read: none waits.
-    expect(run([{ ticker: 'AAA2', date: '2026-01-02' }])).toMatchObject({
+    expect(waiting.deferred).toEqual([
+      { date: '2026-01-08', blocking: { ticker: 'AAA2', date: '2026-01-08' } },
+    ]);
+    // On or before D, from the first entry on: both wait, on the earliest such stand-in.
+    expect(
+      run([
+        { ticker: 'AAA2', date: '2026-01-07' },
+        { ticker: 'AAA2', date: '2026-01-06' },
+      ]),
+    ).toMatchObject({
       annotate: [],
-      deferred: 2,
+      deferred: [
+        { date: '2026-01-07', blocking: { ticker: 'AAA2', date: '2026-01-06' } },
+        { date: '2026-01-08', blocking: { ticker: 'AAA2', date: '2026-01-06' } },
+      ],
     });
-    expect(run([{ ticker: 'BBB', date: '2026-01-02' }]).annotate).toHaveLength(2);
+    // Before the first entry (a permanent hole in 2019, or the week before registration): the
+    // recorded and the corrected decision read it alike, nothing waits. Nor for a ticker the
+    // version does not read.
+    for (const u of [
+      { ticker: 'AAA2', date: '2019-03-04' },
+      { ticker: 'AAA', date: '2026-01-05' },
+      { ticker: 'BBB', date: '2026-01-07' },
+    ]) {
+      expect(run([u])).toMatchObject({ deferred: [] });
+      expect(run([u]).annotate).toHaveLength(2);
+    }
   });
 
   it('reads only ISO 8601 instants with a zone', () => {

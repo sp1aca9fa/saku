@@ -180,14 +180,24 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   return summary;
 }
 
+/** A recorded day whose stand-in correction waits, and the unresolved stand-in it waits for. */
+export interface Deferred {
+  versionId: string;
+  /** `name (id)`, for the log and the admins. */
+  version: string;
+  date: TradingDate;
+  blocking: { ticker: string; date: TradingDate };
+}
+
 export interface StandInCorrectionSummary {
   /** Annotations added by this call. */
   annotations: number;
   /**
-   * Corrections waiting for an unresolved stand-in (see `standInCorrections`): annotated by a
-   * later run once the primary has replaced it.
+   * Recorded days whose correction waits for an unresolved stand-in (see `standInCorrections`),
+   * once per version and date, with the stand-in it waits for: annotated by a later run once the
+   * primary has replaced it. Recompute skips them meanwhile (`RecomputeOptions.waiting`).
    */
-  deferred: number;
+  deferred: Deferred[];
   /**
    * Corrected stand-ins whether an entry used them is unknown (a stored timestamp that is not an
    * ISO 8601 instant): nothing is annotated on a guess; the caller reports each line (the run is
@@ -216,7 +226,7 @@ export async function annotateStandInCorrections(
   db: Db,
   runId: string | null,
 ): Promise<StandInCorrectionSummary> {
-  const summary: StandInCorrectionSummary = { annotations: 0, deferred: 0, errors: [] };
+  const summary: StandInCorrectionSummary = { annotations: 0, deferred: [], errors: [] };
   const corrected = (await resolvedStandIns(db)).filter(
     (s) => s.deviation !== null && s.deviation > TOLERANCE.close,
   );
@@ -242,7 +252,13 @@ export async function annotateStandInCorrections(
       }),
     });
     for (const e of pending.errors) errors.add(e);
-    summary.deferred += pending.deferred;
+    for (const d of pending.deferred) {
+      summary.deferred.push({
+        versionId: version.id,
+        version: `${version.name} (${version.id})`,
+        ...d,
+      });
+    }
     for (const { standIn, recorded } of pending.annotate) {
       const bars = barsOf(await loadRows(deps, recorded.date));
       const now = forwardDecision(strategy, recorded.date, bars, allGreen(deps));
@@ -309,9 +325,12 @@ export function instantOf(text: string | null): number {
  * and before the primary resolved it (compared as instants). A timestamp that is not an instant
  * then leaves that unknown: an error, nothing annotated.
  *
- * A correction waits (`deferred`) while any ticker the version depends on has an unresolved
- * stand-in dated on or before the entry's date: its corrected decision would rest on a price not
- * verified yet. It is annotated by a later run, once the primary has replaced that one too.
+ * A correction waits (`deferred`, once per entry date, naming the earliest such stand-in) while
+ * any ticker the version depends on has an unresolved stand-in dated on or before the entry's
+ * date and on or after the version's first entry: its corrected decision would rest on a price
+ * not verified yet. It is annotated by a later run, once the primary has replaced that one too.
+ * An unresolved stand-in before the first entry does not hold anything back: the recorded and
+ * the corrected decision read it alike, so it explains no difference between them.
  */
 export function standInCorrections(o: {
   version: string;
@@ -323,21 +342,23 @@ export function standInCorrections(o: {
   annotated: { date: string; ticker: unknown; standInDate: unknown }[];
 }): {
   annotate: { standIn: ResolvedStandIn; recorded: Pick<ForwardEntry, 'date' | 'allocation'> }[];
-  deferred: number;
+  deferred: { date: TradingDate; blocking: { ticker: string; date: TradingDate } }[];
   errors: string[];
 } {
   const done = new Set(
     o.annotated.map((a) => `${a.date} ${String(a.ticker)} ${String(a.standInDate)}`),
   );
-  // The earliest unresolved stand-in among the version's tickers: an entry dated on or after it
-  // waits.
-  const waitFrom = o.unresolved
-    .filter((u) => o.deps.includes(u.ticker))
-    .reduce<string | undefined>(
-      (min, u) => (min === undefined || u.date < min ? u.date : min),
+  // The earliest unresolved stand-in among the version's tickers since its first entry: an entry
+  // dated on or after it waits.
+  const first = o.record[0]?.date;
+  const blocking = o.unresolved
+    .filter((u) => o.deps.includes(u.ticker) && first !== undefined && u.date >= first)
+    .reduce<{ ticker: string; date: TradingDate } | undefined>(
+      (min, u) => (min === undefined || u.date < min.date ? u : min),
       undefined,
     );
-  const out: ReturnType<typeof standInCorrections> = { annotate: [], deferred: 0, errors: [] };
+  const out: ReturnType<typeof standInCorrections> = { annotate: [], deferred: [], errors: [] };
+  const waiting = new Set<string>();
   for (const s of o.corrected) {
     if (!o.deps.includes(s.ticker)) continue;
     const from = instantOf(s.createdAt);
@@ -371,8 +392,14 @@ export function standInCorrections(o: {
         used = at >= from && at < until;
       }
       if (!used) continue;
-      if (waitFrom !== undefined && waitFrom <= recorded.date) {
-        out.deferred++;
+      if (blocking && blocking.date <= recorded.date) {
+        if (!waiting.has(recorded.date)) {
+          waiting.add(recorded.date);
+          out.deferred.push({
+            date: recorded.date,
+            blocking: { ticker: blocking.ticker, date: blocking.date },
+          });
+        }
         continue;
       }
       out.annotate.push({ standIn: s, recorded });
@@ -474,13 +501,25 @@ export interface RecomputeSummary {
  * so each recorded day reads only bars up to that day), and only the engine's output is compared:
  * health was graded and recorded then. A difference can come from the engine or from data
  * corrected since; the annotation names the code version. Skipped: safe-state days that recorded
- * no signals (nothing to reproduce) and days a corrected stand-in already explains (the engine
- * now decides the allocation the `stand_in_corrected` annotation gives for that day).
+ * no signals (nothing to reproduce), days a corrected stand-in already explains (the engine now
+ * decides the allocation the `stand_in_corrected` annotation gives for that day), and days whose
+ * correction waits (`o.waiting`).
  */
 export async function recompute(
   db: Db,
-  o: { runId: string | null; code: string },
+  o: {
+    runId: string | null;
+    code: string;
+    /**
+     * Days whose stand-in correction waits (`annotateStandInCorrections`' `deferred`): skipped,
+     * not counted as checked. Their recorded decision used a stand-in the primary has corrected,
+     * so a difference now would be that correction, not the engine; it is annotated as one once
+     * the stand-in it waits for is resolved.
+     */
+    waiting?: Pick<Deferred, 'versionId' | 'date'>[];
+  },
 ): Promise<RecomputeSummary> {
+  const waiting = new Set((o.waiting ?? []).map((w) => `${w.versionId} ${w.date}`));
   const summary: RecomputeSummary = { checked: 0, differences: [], errors: [] };
   const { loadRows, barsOf } = await reader(db);
   for (const version of await allVersions(db)) {
@@ -528,6 +567,7 @@ export async function recompute(
         signals?: Record<string, boolean | number> | null;
       };
       if (e.safeStateApplied && !recorded.signals) continue;
+      if (waiting.has(`${version.id} ${e.date}`)) continue;
       const now = days.get(e.date);
       if (explained.get(e.date)?.has(now?.allocation ?? 'no decision')) continue;
       summary.checked++;
