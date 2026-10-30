@@ -64,7 +64,7 @@ interface Covering extends ReportRun {
 }
 
 /** Whether a run stored anything (a run that failed before storing graded nothing). */
-async function storedAny(db: Db, runId: string): Promise<boolean> {
+export async function storedAny(db: Db, runId: string): Promise<boolean> {
   for (const table of [schema.checkResults, schema.checkSummaries, schema.dataHealth]) {
     const [row] = await db
       .select({ runId: table.runId })
