@@ -150,7 +150,10 @@ if (tool === 'strategy' && command === 'check') {
   for (const d of r.differences) {
     console.log(`${d.version} ${d.date}: recorded ${d.recorded}, now ${d.now} (annotated)`);
   }
-  for (const e of r.errors) console.log(`${e.version}: could not evaluate (${e.error})`);
+  for (const e of r.errors) {
+    const what = e.kind === 'parse' ? 'definition does not parse' : 'could not evaluate';
+    console.log(`${e.version}: ${what} (${e.error})`);
+  }
   if (r.differences.length) console.log('The next daily run alerts the admins.');
   console.log(`${r.checked} recorded days, ${r.differences.length} new differences.`);
   process.exit(r.differences.length || r.errors.length ? 1 : 0);
