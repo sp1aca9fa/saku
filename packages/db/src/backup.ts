@@ -34,6 +34,22 @@ async function checkCopy(file: string): Promise<number> {
 }
 
 /**
+ * A consistent copy of the database at `url` in the new file `file` (VACUUM INTO, which only
+ * reads the source), checked by SQLite's integrity check; returns its table count. Used by the
+ * backups and by `pnpm drill`, which runs on such a copy.
+ */
+export async function snapshotDatabase(url: string, file: string): Promise<number> {
+  if (existsSync(file)) throw new Error(`${file} exists; a snapshot only writes a new file.`);
+  const source = createClient({ url });
+  try {
+    await source.execute({ sql: 'VACUUM INTO ?', args: [file] });
+  } finally {
+    source.close();
+  }
+  return checkCopy(file);
+}
+
+/**
  * Writes `<dir>/saku-<day>.db.gz` from the database file at `url` (a consistent snapshot through
  * VACUUM INTO, checked before it is compressed). The file appears whole or not at all.
  */
@@ -41,13 +57,7 @@ export async function backupDatabase(url: string, dir: string, day: string) {
   const work = await mkdtemp(join(tmpdir(), 'saku-backup-'));
   try {
     const copy = join(work, 'saku.db');
-    const source = createClient({ url });
-    try {
-      await source.execute({ sql: 'VACUUM INTO ?', args: [copy] });
-    } finally {
-      source.close();
-    }
-    const tables = await checkCopy(copy);
+    const tables = await snapshotDatabase(url, copy);
     await mkdir(dir, { recursive: true });
     const file = join(dir, backupName(day));
     const partial = `${file}.partial`;

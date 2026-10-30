@@ -13,7 +13,8 @@
     "plugins": "tsx src/cli/plugins.ts",
     "cli": "tsx src/cli/strategy.ts",
     "sources": "tsx src/cli/sources.ts",
-    "health": "tsx src/cli/health.ts"
+    "health": "tsx src/cli/health.ts",
+    "drill": "tsx src/cli/drill.ts"
   },
   "dependencies": {
     "@saku/content": "workspace:*",

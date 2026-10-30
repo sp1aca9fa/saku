@@ -38,6 +38,7 @@
     "journal": "pnpm --silent --filter @saku/plugin-sdk cli journal",
     "channel": "pnpm --silent --filter @saku/plugin-sdk cli channel",
     "alert": "pnpm --silent --filter @saku/plugin-sdk cli alert",
+    "drill": "pnpm --silent --filter @saku/plugin-sdk drill",
     "update:log": "pnpm --silent --filter @saku/db update-log",
     "docs:build": "node scripts/docs-build.mjs",
     "docs:check": "node scripts/docs-build.mjs --check"

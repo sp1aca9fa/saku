@@ -109,31 +109,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   const { symbolIds, loadRows, barsOf } = await reader(db);
   const cashRate = await cashRateReader(db);
 
-  /** Each ticker's grade on the date: the canonical bar's status (set by every verify run). */
-  const healthOn = async (rows: Rows, date: TradingDate) => {
-    const out: Record<string, TickerHealth> = {};
-    for (const [t, list] of Object.entries(rows)) {
-      const bar = list.at(-1);
-      const id = symbolIds.get(t)!;
-      if (!bar || bar.date !== date || !bar.status) {
-        // No bar that day: the grade says why (a refused stand-in), else it stays `no_data`.
-        const graded = await latestHealth(db, id, date);
-        if (graded && graded.status !== 'green') {
-          out[t] = { status: graded.status, reasons: graded.reasons };
-        }
-        continue;
-      }
-      const reasons =
-        bar.status === 'green' ? [] : ((await latestHealth(db, id, date))?.reasons ?? []);
-      const stood = bar.standIn ? await standInOn(db, id, date) : undefined;
-      out[t] = {
-        status: bar.status,
-        reasons,
-        ...(stood && !stood.resolvedAt && { standInBand: stood.band }),
-      };
-    }
-    return out;
-  };
+  const healthOn = (rows: Rows, date: TradingDate) => healthOf(db, symbolIds, rows, date);
 
   for (const version of await allVersions(db)) {
     const parsed = parseVersion(version);
@@ -225,6 +201,40 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     }
   }
   return summary;
+}
+
+/**
+ * Each ticker's grade on the date: the canonical bar's status (set by every verify run). `rows`:
+ * each ticker's canonical rows up to `date` (the last one is the day's bar when there is one).
+ */
+export async function healthOf(
+  db: Db,
+  symbolIds: Map<string, number>,
+  rows: Rows,
+  date: TradingDate,
+): Promise<Record<string, TickerHealth>> {
+  const out: Record<string, TickerHealth> = {};
+  for (const [t, list] of Object.entries(rows)) {
+    const bar = list.at(-1);
+    const id = symbolIds.get(t)!;
+    if (!bar || bar.date !== date || !bar.status) {
+      // No bar that day: the grade says why (a refused stand-in), else it stays `no_data`.
+      const graded = await latestHealth(db, id, date);
+      if (graded && graded.status !== 'green') {
+        out[t] = { status: graded.status, reasons: graded.reasons };
+      }
+      continue;
+    }
+    const reasons =
+      bar.status === 'green' ? [] : ((await latestHealth(db, id, date))?.reasons ?? []);
+    const stood = bar.standIn ? await standInOn(db, id, date) : undefined;
+    out[t] = {
+      status: bar.status,
+      reasons,
+      ...(stood && !stood.resolvedAt && { standInBand: stood.band }),
+    };
+  }
+  return out;
 }
 
 export type Rows = Record<string, Awaited<ReturnType<typeof canonicalBars>>>;

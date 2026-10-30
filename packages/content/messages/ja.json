@@ -27,6 +27,10 @@
       "title": "{strategy}: {date} はセーフステート",
       "body": "データの信頼性が通常のシグナルに足りないため、戦略のセーフステートを適用します。"
     },
+    "drill": {
+      "mark": "[訓練]",
+      "body": "これは訓練(pnpm drill)です。何も記録されず、データも変更されていません。対応は不要です。"
+    },
     "reasons": "詳細: {reasons}。",
     "jobFailure": {
       "title": "Saku: {date} の {job} 処理が完了しませんでした",

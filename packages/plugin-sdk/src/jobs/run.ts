@@ -134,16 +134,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       );
     }
     const used = assignedOnly(plugins, roles);
-    // The calendars sources declare (expected gaps); a declared one not loaded is warned about
-    // and counts no day as closed.
-    const loadedCalendars = plugins.calendars.flatMap((c) => c.calendars);
-    const sourceCalendars: Record<string, Sessions> = {};
-    for (const info of infos) {
-      if (!info.calendar || (info.kind !== 'fx' && info.kind !== 'series')) continue;
-      const calendar = loadedCalendars.find((c) => c.id === info.calendar);
-      if (calendar) sourceCalendars[info.key] = new Sessions(calendar);
-      else log.warn(`${info.key} declares calendar ${info.calendar}, which is not loaded`);
-    }
+    const sourceCalendars = declaredCalendars(plugins, infos, log);
     log.info(`${job} for ${target}`, { runId });
 
     // Before any request: the cash series is checked on this calendar.
@@ -430,6 +421,26 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
   }
   log.info(ok ? `${job} done` : `${job} not complete: ${error}`);
   return { runId, ok, ...(error && { error }) };
+}
+
+/**
+ * The calendars sources declare (expected gaps), by source key; a declared one not loaded is
+ * warned about and counts no day as closed. Shared with `pnpm drill`, which checks as a run does.
+ */
+export function declaredCalendars(
+  plugins: LoadedPlugins,
+  infos: PluginInfo[],
+  log: Logger,
+): Record<string, Sessions> {
+  const loadedCalendars = plugins.calendars.flatMap((c) => c.calendars);
+  const sourceCalendars: Record<string, Sessions> = {};
+  for (const info of infos) {
+    if (!info.calendar || (info.kind !== 'fx' && info.kind !== 'series')) continue;
+    const calendar = loadedCalendars.find((c) => c.id === info.calendar);
+    if (calendar) sourceCalendars[info.key] = new Sessions(calendar);
+    else log.warn(`${info.key} declares calendar ${info.calendar}, which is not loaded`);
+  }
+  return sourceCalendars;
 }
 
 /**

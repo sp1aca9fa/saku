@@ -50,6 +50,29 @@ same rules apply to index series and the base-currency exchange rate.
   corrected and the checks pass, the next day is normal. The cause is in `pnpm health --date
   <YYYY-MM-DD>` (the reasons are in words) and in the revision log if a value changed.
 
+## Red-day drill
+
+`pnpm drill red` proves that a red day produces the safe-state alert (stage A2 acceptance),
+without touching your data:
+
+1. It copies the database to a temporary file (the backups' method; the live database is only
+   read) and holds the jobs lock while it runs.
+2. On the copy, the primary's stored close (and high) of each registered strategy's signal ticker
+   on the date is multiplied by 10 (a decimal shift, a fault layers A and B must catch). Nothing
+   is fetched.
+3. The checks run on the copy, each registered strategy decides the day as the daily run does,
+   and the day's alerts go to the real channels, each titled `[DRILL]` (`[訓練]` in Japanese) and
+   saying nothing was recorded.
+4. The copy is deleted. No forward record, timestamp, stamp, heartbeat or run is written to the
+   live database, and nothing needs to be done about the alert.
+
+The date is the latest completed session, or `--date <YYYY-MM-DD>` (a completed session the daily
+run fetched). The output lists the fault, the day's grade, each strategy's action (it must be the
+safe state) and the alerts sent; the command exits 0 only when the day was red, every strategy
+applied its safe state and its alert reached at least one channel. It refuses without a
+registered strategy (register one first), on CI or Vercel, and while another job runs (try again
+when it has finished).
+
 ## A failed run and catch-up
 
 The run did not complete (a source down, an alert not delivered, a backup failed). No stamp is

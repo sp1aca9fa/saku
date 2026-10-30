@@ -135,6 +135,14 @@ export interface AlertOptions {
   authSecret: string;
   context: (notifier: Notifier, channelId: string) => PluginContext;
   log: Logger;
+  /**
+   * A drill (`pnpm drill`, on a throwaway copy of the database): every message is marked as one
+   * in its first line, followed by a line saying nothing was recorded, and is sent whatever was
+   * sent before; nothing is read from or written to `alerts_sent`.
+   */
+  drill?: boolean;
+  /** Told of each delivered message: the channel, the alert type and the message's first line. */
+  onDelivered?: (d: { channel: string; type: AlertType; title: string }) => void;
 }
 
 export interface AlertSummary {
@@ -148,10 +156,7 @@ export async function sendStrategyAlerts(
   o: AlertOptions & { sessions: Sessions },
 ): Promise<AlertSummary> {
   const summary: AlertSummary = { sent: 0, failed: [] };
-  const owners = new Map<
-    string,
-    { language: string; t: Translate; targets: Awaited<ReturnType<typeof deliveryTargets>> }
-  >();
+  const owners: Owners = new Map();
   for (const version of await allVersions(db)) {
     if (!version.ownerId) continue;
     const entry = await lastEntry(db, version.id);
@@ -165,15 +170,6 @@ export async function sendStrategyAlerts(
       );
       continue;
     }
-    const { strategy } = parsed;
-    let owner = owners.get(version.ownerId);
-    if (!owner) {
-      const language = await languageOf(db, version.ownerId);
-      const targets = await deliveryTargets(db, version.ownerId, o.authSecret);
-      owner = { language, t: translator(language), targets };
-      owners.set(version.ownerId, owner);
-    }
-    const { language, t } = owner;
     const day: DayEntry = {
       date: entry.date,
       allocation: entry.allocation,
@@ -182,17 +178,55 @@ export async function sendStrategyAlerts(
       safeStateApplied: entry.safeStateApplied,
       reasons: (JSON.parse(entry.payload) as { reasons?: string[] }).reasons ?? [],
     };
-    for (const channel of owner.targets) {
-      const alert = strategyAlert(t, language, {
-        versionId: version.id,
-        name: version.name,
-        execution: strategy.execution,
-        entry: day,
-        nextSession: o.sessions.after(o.date),
-        lastTold: await lastToldAllocation(db, channel, version.id, TOLD),
-      });
-      if (alert) await deliver(db, o, channel, alert, summary);
-    }
+    await sendDayAlert(db, o, { version, strategy: parsed.strategy, day, owners }, summary);
+  }
+  return summary;
+}
+
+/** Each owner's language, translator and channels, read once per run. */
+type Owners = Map<
+  string,
+  { language: string; t: Translate; targets: Awaited<ReturnType<typeof deliveryTargets>> }
+>;
+
+/**
+ * One version's alert for a day to each of its owner's channels (none for a library version).
+ * The daily run passes the day's forward entry; `pnpm drill` passes a decision it made on a copy
+ * of the database without recording it (`o.drill`).
+ */
+export async function sendDayAlert(
+  db: Db,
+  o: AlertOptions & { sessions: Sessions },
+  d: {
+    version: { id: string; name: string; ownerId: string | null };
+    strategy: Strategy;
+    day: DayEntry;
+    owners?: Owners;
+  },
+  summary: AlertSummary = { sent: 0, failed: [] },
+): Promise<AlertSummary> {
+  const { version, strategy, day } = d;
+  if (!version.ownerId) return summary;
+  const owners = d.owners ?? new Map();
+  let owner = owners.get(version.ownerId);
+  if (!owner) {
+    const language = await languageOf(db, version.ownerId);
+    const targets = await deliveryTargets(db, version.ownerId, o.authSecret);
+    owner = { language, t: translator(language), targets };
+    owners.set(version.ownerId, owner);
+  }
+  const { language, t } = owner;
+  for (const channel of owner.targets) {
+    const alert = strategyAlert(t, language, {
+      versionId: version.id,
+      name: version.name,
+      execution: strategy.execution,
+      entry: day,
+      nextSession: o.sessions.after(day.date),
+      // A drill reads nothing told before (the safe-state alert does not depend on it).
+      lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
+    });
+    if (alert) await deliver(db, o, channel, alert, summary, t);
   }
   return summary;
 }
@@ -222,7 +256,7 @@ export async function sendAdminAlert(
     // No notifier for the channel: deliver reports it; the room is then irrelevant.
     const max = o.notifiers.find((n) => n.info.key === channel.type)?.info.maxLength ?? Infinity;
     const text = [...o.lines(t, max - healthLine.length - 1), healthLine].join('\n');
-    await deliver(db, o, channel, { key, text }, summary);
+    await deliver(db, o, channel, { key, text }, summary, t);
   });
   return summary;
 }
@@ -462,6 +496,7 @@ export async function sendRecomputeDiffers(db: Db, o: AlertOptions): Promise<Ale
       channel,
       { key: first.key, keys: pending.map((n) => n.key), text },
       summary,
+      t,
     );
   });
   return summary;
@@ -505,8 +540,9 @@ async function deliver(
   channel: Target,
   alert: Alert,
   summary: AlertSummary,
+  t: Translate,
 ) {
-  if (await alertSent(db, channel, alert.key)) return;
+  if (!o.drill && (await alertSent(db, channel, alert.key))) return;
   const notifier = o.notifiers.find((n) => n.info.key === channel.type);
   const label = `${channel.type} channel ${channel.id}`;
   if (channel.target === null) {
@@ -518,18 +554,32 @@ async function deliver(
     return;
   }
   const max = notifier.info.maxLength;
-  const text = alert.text.length > max ? `${alert.text.slice(0, max - 1)}…` : alert.text;
+  // A drill's mark is in the first two lines, so a cut at the end never removes it.
+  const full = o.drill ? drillText(t, alert.text) : alert.text;
+  const text = full.length > max ? `${full.slice(0, max - 1)}…` : full;
   try {
     await notifier.send(channel.target, text, o.context(notifier, channel.id));
-    for (const key of alert.keys ?? [alert.key]) {
-      await recordAlertSent(db, channel, key, alert.allocation);
+    if (!o.drill) {
+      for (const key of alert.keys ?? [alert.key]) {
+        await recordAlertSent(db, channel, key, alert.allocation);
+      }
     }
     summary.sent++;
+    o.onDelivered?.({ channel: label, type: alert.key.type, title: text.split('\n')[0]! });
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     o.log.warn(`Alert not delivered (${label})`, { key: alert.key, reason });
     summary.failed.push(`${label}: ${reason}`);
   }
+}
+
+/**
+ * A drill's message: its title marked as a drill, then a line saying nothing was recorded, then
+ * the rest of the message as the real alert says it.
+ */
+export function drillText(t: Translate, text: string): string {
+  const [title = '', ...rest] = text.split('\n');
+  return [`${t('alerts.drill.mark')} ${title}`, t('alerts.drill.body'), ...rest].join('\n');
 }
 
 const SIMPLE_REASONS = [

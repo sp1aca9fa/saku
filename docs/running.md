@@ -34,6 +34,7 @@ last two only when every source answered for every item. Details: `docs/data-pip
 | `pnpm journal add\|list` | What you did with a signal |
 | `pnpm channel add\|list\|disable\|enable\|test` | Alert channels (Discord, Telegram) |
 | `pnpm backup`, `pnpm restore <file>` | See `docs/backups.md` |
+| `pnpm drill red [--date <D>]` | A simulated red day, to prove the safe-state alert arrives (see "Red-day drill" in `docs/troubleshooting.md`) |
 
 Run a command without arguments, or with a wrong one, to see its usage line.
 
@@ -88,6 +89,7 @@ weekly run is not repeated for it.
 |---|---|---|
 | `pnpm daily`, `bootstrap`, `weekly` | The run completed (or nothing was due, or another job holds the lock) | The run could not start or did not complete |
 | `pnpm health` | Every shown date is green overall and per symbol | Anything not green, not graded, or a wrong argument |
+| `pnpm drill red` | The day was red, every registered strategy applied its safe state and its alert reached a channel | Anything else, or a refusal (no registered strategy, CI or Vercel set, another job running) |
 | Other commands | Done | An error or wrong usage, with a message |
 
 A command run against an unmigrated database stops and says to run `pnpm db:migrate`.

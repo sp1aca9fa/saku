@@ -27,6 +27,10 @@
       "title": "{strategy}: safe state for {date}",
       "body": "Data is not reliable enough for a normal signal, so the strategy's safe state applies."
     },
+    "drill": {
+      "mark": "[DRILL]",
+      "body": "This is a drill (pnpm drill): nothing was recorded, no data was changed and nothing needs to be done."
+    },
     "reasons": "Details: {reasons}.",
     "jobFailure": {
       "title": "Saku: the {job} run for {date} did not finish",
