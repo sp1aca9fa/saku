@@ -189,10 +189,20 @@ export async function spikeReport(
       (r) => r.checkName === 'bar_valid' && r.source === primary && r.status !== 'red',
     );
     const available: Record<string, boolean> = {};
+    // A secondary is available in a run when it was compared on the date (a close result) and
+    // lacked no symbol's bar: `secondary_missing`, or, in results stored before that code
+    // existed, a `close_match` with the message 'no secondary bar'.
+    const missingBar = (r: Result) =>
+      r.checkName === 'secondary_missing' ||
+      (r.checkName === 'close_match' && r.message === 'no secondary bar');
     for (const s of secondaries) {
       available[s] = own.some(({ rs: x }) => {
-        const closes = x.filter((r) => r.checkName === 'close_match' && r.source === s);
-        return closes.length > 0 && closes.every((r) => r.message !== 'no secondary bar');
+        const closes = x.filter(
+          (r) =>
+            (r.checkName === 'close_match' || r.checkName === 'secondary_missing') &&
+            r.source === s,
+        );
+        return closes.length > 0 && !closes.some(missingBar);
       });
     }
 

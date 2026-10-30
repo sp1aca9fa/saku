@@ -127,6 +127,56 @@ describe('spikeReport', () => {
     ]);
   });
 
+  // A missing secondary bar is `secondary_missing` now; results stored before carry it as a
+  // `close_match` with the message 'no secondary bar'. Both count the same: the secondary is not
+  // available that day (also when another symbol's close was compared), and layer B is not passed.
+  const missingBar = {
+    current: { checkName: 'secondary_missing', message: 'no secondary bar' },
+    stored: { checkName: 'close_match', message: 'no secondary bar' },
+  };
+  for (const [form, m] of Object.entries(missingBar)) {
+    it(`counts a missing secondary bar the same way (${form} form)`, async () => {
+      const { db, aaa } = await setup();
+      await upsertSymbols(db, [{ ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+      const bbb = (await symbolId(db, 'BBB'))!;
+      const both = (r: Omit<Result, 'runId' | 'date'>) => [
+        { ...r, symbolId: aaa },
+        { ...r, symbolId: bbb },
+      ];
+      const good = [
+        ...both(ok('A', 'bar_valid', 'p')),
+        ...both(ok('B', 'close_match', 's')),
+        ...both(ok('C', 'leverage_track')),
+      ];
+      const missing = { layer: 'B' as const, source: 's', status: 'yellow' as const, ...m };
+      await day(db, '2026-01-05', good);
+      // Every symbol's secondary bar missing.
+      await day(db, '2026-01-06', [
+        ...both(ok('A', 'bar_valid', 'p')),
+        ...both(missing),
+        ...both(ok('C', 'leverage_track')),
+      ]);
+      // One symbol's close compared, the other's bar missing.
+      await day(db, '2026-01-07', [
+        ...both(ok('A', 'bar_valid', 'p')),
+        { ...ok('B', 'close_match', 's'), symbolId: aaa },
+        { ...missing, symbolId: bbb },
+        ...both(ok('C', 'leverage_track')),
+      ]);
+      const report = await spikeReport(db, { sessions });
+      expect(report.days.map((d) => [d.date, d.available.s, d.layerBPass])).toEqual([
+        ['2026-01-05', true, true],
+        ['2026-01-06', false, false],
+        ['2026-01-07', false, false],
+      ]);
+      expect(report.availability.s).toBeCloseTo(1 / 3, 12);
+      expect(report.layerB).toEqual({ days: 1, passed: 1 });
+      expect(report.days[2]!.nonGreen.map((r) => [r.check, r.status, r.message])).toEqual([
+        [m.checkName, 'yellow', 'no secondary bar'],
+      ]);
+    });
+  }
+
   it('counts every session in the range; one without a finished run fails (no run)', async () => {
     const db = await testDb();
     await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);

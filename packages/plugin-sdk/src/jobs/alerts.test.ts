@@ -335,6 +335,13 @@ describe('reason codes in words', () => {
     expect(describeReason(t, 'SPY:B.close_match@alpaca')).toBe(
       'SPY: closes differ between sources (alpaca)',
     );
+    // A secondary without a bar is not a disagreement.
+    expect(describeReason(t, 'SPY:B.secondary_missing@alpaca')).toBe(
+      'SPY: no bar from alpaca for this day',
+    );
+    expect(describeReason(translator('ja'), 'SPY:B.secondary_missing@alpaca')).toBe(
+      'SPY: alpaca にこの日のデータがありません',
+    );
     expect(describeReason(t, 'stand_in@yahoo')).toBe(
       'the main source was missing; yahoo stands in',
     );

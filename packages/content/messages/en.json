@@ -49,6 +49,7 @@
         "unchanged_close": "the close did not change, possibly stale ({source})",
         "large_move": "an unusually large move to confirm ({source})",
         "close_match": "closes differ between sources ({source})",
+        "secondary_missing": "no bar from {source} for this day",
         "adj_return_match": "adjusted returns differ from the provider ({source})",
         "dividend_match": "dividends differ between sources ({source})",
         "split_match": "splits differ between sources ({source})",

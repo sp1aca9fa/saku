@@ -160,7 +160,9 @@ export function layerA(
 
 /**
  * Layer B: the primary against one secondary (already un-split), on the primary's dates. A date
- * the secondary lacks is yellow (secondary unavailable). Events must fall on the same dates.
+ * the secondary lacks is a yellow `secondary_missing` (04 severity rules: a secondary unavailable
+ * is yellow), kept apart from `close_match` so a source without a bar never reads as a
+ * disagreement. Events must fall on the same dates.
  */
 export function layerB(primary: RawBar[], secondary: RawBar[], source: string): CheckResult[] {
   const out: CheckResult[] = [];
@@ -172,7 +174,7 @@ export function layerB(primary: RawBar[], secondary: RawBar[], source: string): 
     if (!s) {
       out.push({
         ...base,
-        check: 'close_match',
+        check: 'secondary_missing',
         date: p.date,
         status: 'yellow',
         message: 'no secondary bar',

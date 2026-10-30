@@ -109,10 +109,18 @@ describe('layer B', () => {
 
   it('compares closes: 0.05% green, up to 2x yellow, beyond red; a missing bar yellow', () => {
     const s = [bar('2026-01-05', 100.04), bar('2026-01-06', 101.08, { divCash: 0.5 })];
-    expect(statuses(layerB(p, s, 's'), 'close_match')).toEqual([
-      '2026-01-05 green',
-      '2026-01-06 yellow',
-      '2026-01-07 yellow',
+    const rs = layerB(p, s, 's');
+    expect(statuses(rs, 'close_match')).toEqual(['2026-01-05 green', '2026-01-06 yellow']);
+    // The date the secondary lacks is its own check, never a close disagreement.
+    expect(rs.filter((r) => r.check === 'secondary_missing')).toEqual([
+      {
+        layer: 'B',
+        source: 's',
+        check: 'secondary_missing',
+        date: '2026-01-07',
+        status: 'yellow',
+        message: 'no secondary bar',
+      },
     ]);
     expect(statuses(layerB(p, [bar('2026-01-05', 101)], 's'), 'close_match')[0]).toBe(
       '2026-01-05 red',

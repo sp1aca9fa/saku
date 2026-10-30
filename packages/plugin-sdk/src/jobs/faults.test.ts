@@ -895,17 +895,17 @@ describe('fault injection (layer F)', () => {
         safeStateApplied: false,
         allocation: 'Risk on',
       });
-      expect(r.reasons).toEqual(['SPY:B.close_match@s2', 'SSO:B.close_match@s2']);
+      expect(r.reasons).toEqual(['SPY:B.secondary_missing@s2', 'SSO:B.secondary_missing@s2']);
       // Caught as the secondary's bar missing (layer B, yellow), not as a mismatch.
       const b = (
         await r.db
           .select()
           .from(schema.checkResults)
           .where(eq(schema.checkResults.runId, r.result.runId))
-      ).filter((x) => x.date === TARGET && x.checkName === 'close_match' && x.source === 's2');
-      expect(b.map((x) => [x.status, x.message])).toEqual([
-        ['yellow', 'no secondary bar'],
-        ['yellow', 'no secondary bar'],
+      ).filter((x) => x.date === TARGET && x.source === 's2' && x.layer === 'B');
+      expect(b.map((x) => [x.checkName, x.status, x.message])).toEqual([
+        ['secondary_missing', 'yellow', 'no secondary bar'],
+        ['secondary_missing', 'yellow', 'no secondary bar'],
       ]);
     });
 
@@ -953,15 +953,20 @@ describe('fault injection (layer F)', () => {
         safeStateApplied: false,
         allocation: 'Risk on',
       });
-      expect(r.reasons).toEqual(['SPY:B.close_match@s1', 'SSO:B.close_match@s1']);
+      // Its own reason, in words naming the source, never "closes differ between sources".
+      expect(r.reasons).toEqual(['SPY:B.secondary_missing@s1', 'SSO:B.secondary_missing@s1']);
+      expect(r.alert).toContain('SPY: no bar from s1 for this day');
+      expect(r.alert).not.toContain('closes differ');
       const b = (
         await r.db
           .select()
           .from(schema.checkResults)
           .where(eq(schema.checkResults.runId, r.result.runId))
-      ).filter((x) => x.date === TARGET && x.checkName === 'close_match' && x.source === 's1');
-      expect(b.every((x) => x.status === 'yellow' && x.message === 'no secondary bar')).toBe(true);
-      expect(b).toHaveLength(2);
+      ).filter((x) => x.date === TARGET && x.source === 's1' && x.layer === 'B');
+      expect(b.map((x) => [x.checkName, x.status, x.message])).toEqual([
+        ['secondary_missing', 'yellow', 'no secondary bar'],
+        ['secondary_missing', 'yellow', 'no secondary bar'],
+      ]);
       // The next run, with the bar: the target regraded green; the forward record keeps what was
       // signaled (yellow), append-only.
       const next = await r.again(sources(), '2026-01-17T03:00:00Z');

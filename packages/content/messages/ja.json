@@ -49,6 +49,7 @@
         "unchanged_close": "終値が変化しておらず、古い可能性があります({source})",
         "large_move": "確認が必要な大きな値動きがあります({source})",
         "close_match": "ソース間で終値が異なります({source})",
+        "secondary_missing": "{source} にこの日のデータがありません",
         "adj_return_match": "調整後リターンが提供元と異なります({source})",
         "dividend_match": "ソース間で分配金が異なります({source})",
         "split_match": "ソース間で分割が異なります({source})",
