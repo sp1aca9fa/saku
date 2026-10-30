@@ -85,6 +85,11 @@ export interface SpikeReport {
   ratiosMet: boolean;
   /** The numeric gate: the ratios met over at least GATE.sessions judged sessions. */
   passed: boolean;
+  /**
+   * With `from`: the sessions before it that a daily run targeted (any status), neither listed
+   * nor counted, and how many of them failed some part of the gate (`dayFailed`).
+   */
+  leftOut?: { from: TradingDate; sessions: number; failed: number };
 }
 
 type Result = typeof schema.checkResults.$inferSelect;
@@ -155,8 +160,8 @@ export async function spikeReport(
     }
   }
 
-  const days: SpikeDay[] = [];
-  for (const date of dates) {
+  // One session, judged as the rules above say.
+  const judge = async (date: TradingDate): Promise<SpikeDay> => {
     // Runs targeting the date that stored results for it, latest last.
     const own: { id: string; rs: Result[] }[] = [];
     for (const r of finished.filter((x) => x.target === date)) {
@@ -166,7 +171,7 @@ export async function spikeReport(
     const empty = Object.fromEntries(secondaries.map((s) => [s, false]));
     if (own.length === 0) {
       const pending = date === o.open;
-      days.push({
+      return {
         date,
         runId: null,
         layerCRunId: null,
@@ -176,8 +181,7 @@ export async function spikeReport(
         layerBPass: false,
         layerCPass: false,
         nonGreen: [],
-      });
-      continue;
+      };
     }
     const { id: runId, rs } = own.at(-1)!;
     const live = symbols.filter((s) => !s.inceptionDate || s.inceptionDate <= date);
@@ -214,7 +218,7 @@ export async function spikeReport(
       .filter((s) => s.indexSeries)
       .some((s) => !indexNow.some((r) => r.symbolId === s.id));
     const waits = missingIndex && !laterCovering && reachable !== undefined && reachable <= date;
-    days.push({
+    return {
       date,
       runId,
       layerCRunId: cRun.id,
@@ -239,8 +243,11 @@ export async function spikeReport(
           message: r.message,
           runId: r.runId,
         })),
-    });
-  }
+    };
+  };
+
+  const days: SpikeDay[] = [];
+  for (const date of dates) days.push(await judge(date));
 
   // The verdict covers the sessions before the first pending one (judged through the day before);
   // later sessions are listed, never counted as passed.
@@ -268,6 +275,22 @@ export async function spikeReport(
     layerB.passed / layerB.days >= GATE.layerB &&
     layerC.passed / layerC.days >= GATE.layerC;
   const passed = ratiosMet && n >= GATE.sessions;
+
+  // `from` given: say what it leaves out, so a start chosen after bad days is visible.
+  let leftOut: SpikeReport['leftOut'];
+  if (o.from !== undefined) {
+    const start = o.from;
+    const earlier = [...new Set(targets.filter((t) => t < start))].filter((t) => {
+      try {
+        return o.sessions.isSession(t);
+      } catch {
+        return false; // Outside the calendar: not a session the gate could count.
+      }
+    });
+    let failed = 0;
+    for (const date of earlier) if (dayFailed(await judge(date))) failed++;
+    leftOut = { from: start, sessions: earlier.length, failed };
+  }
   return {
     days,
     ...(through !== undefined && { through }),
@@ -279,7 +302,58 @@ export async function spikeReport(
     judged: n,
     ratiosMet,
     passed,
+    ...(leftOut && { leftOut }),
   };
+}
+
+/**
+ * A judged session that misses some part of the gate: the primary, no secondary available, a
+ * layer B or layer C result not green (or an index result that never arrived), no run. A session
+ * still pending is not judged, so not counted as failed.
+ */
+export function dayFailed(d: SpikeDay): boolean {
+  if (d.reason === 'pending' || d.layerCPending) return false;
+  const anySecondary = Object.values(d.available).some(Boolean);
+  return !d.primaryOk || !anySecondary || !d.layerBPass || !d.layerCPass;
+}
+
+type VerdictInput = Pick<
+  SpikeReport,
+  'judged' | 'passed' | 'through' | 'primaryOkDays' | 'availability' | 'layerB' | 'layerC'
+>;
+
+// Shares shown rounded down to 0.1%, so an unmet share never reads as reaching its threshold.
+const down = (x: number) => `${Math.floor(1000 * x) / 10}%`;
+const threshold = (x: number) => `${Math.round(1000 * x) / 10}%`;
+
+/** The gate ratios not met over the judged sessions, in words (none judged: none). */
+export function unmetRatios(r: VerdictInput): string[] {
+  const n = r.judged;
+  if (n === 0) return [];
+  const out: string[] = [];
+  if (r.primaryOkDays < n) out.push(`primary ok ${down(r.primaryOkDays / n)} < 100%`);
+  const best = Math.max(0, ...Object.values(r.availability));
+  if (!(best >= GATE.secondaryAvailability))
+    out.push(`secondary available ${down(best)} < ${threshold(GATE.secondaryAvailability)}`);
+  if (r.layerB.days === 0) out.push('layer B not measured (no session with a secondary)');
+  else if (!(r.layerB.passed / r.layerB.days >= GATE.layerB))
+    out.push(`layer B ${down(r.layerB.passed / r.layerB.days)} < ${threshold(GATE.layerB)}`);
+  if (!(r.layerC.passed / r.layerC.days >= GATE.layerC))
+    out.push(`layer C ${down(r.layerC.passed / r.layerC.days)} < ${threshold(GATE.layerC)}`);
+  return out;
+}
+
+/**
+ * The verdict line. Below GATE.sessions judged sessions it is always "not passed yet", naming any
+ * ratio unmet so far; from there "passed through <date>" or "not passed", with the count.
+ */
+export function verdict(r: VerdictInput): string {
+  if (r.judged < GATE.sessions) {
+    const unmet = unmetRatios(r);
+    return `not passed yet: ${r.judged} of ${GATE.sessions} sessions judged${unmet.length ? ` (${unmet.join(', ')} so far)` : ''}`;
+  }
+  const count = `${r.judged} sessions judged, gate needs ${GATE.sessions}`;
+  return r.passed && r.through ? `passed through ${r.through} (${count})` : `not passed (${count})`;
 }
 
 /**

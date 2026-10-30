@@ -2,7 +2,7 @@ import { Sessions } from '@saku/data';
 import { finishRun, schema, seedSourceRoles, startRun, symbolId, upsertSymbols } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
-import { GATE, spikeFrom, spikeReport } from './spike';
+import { GATE, spikeFrom, spikeReport, verdict } from './spike';
 
 type Result = typeof schema.checkResults.$inferInsert;
 
@@ -417,6 +417,11 @@ describe('spikeReport', () => {
     });
     expect(report.days.map((d) => d.date)).toEqual(['2026-01-12', '2026-01-13']);
     expect(report).toMatchObject({ judged: 2, primaryOkDays: 2, ratiosMet: true });
+    // What it left out: the sessions earlier daily runs targeted (01-02 crashed, 01-06 primary
+    // failed), both failed.
+    expect(report.leftOut).toEqual({ from: '2026-01-12', sessions: 2, failed: 2 });
+    // Without --from nothing is left out.
+    expect((await spikeReport(db, { sessions, to: '2026-01-13' })).leftOut).toBeUndefined();
 
     // Refused: not a date, outside the calendar, after the target.
     expect(spikeFrom(sessions, '2026-1-12', '2026-01-13')).toHaveProperty('error');
@@ -424,5 +429,51 @@ describe('spikeReport', () => {
     expect(spikeFrom(sessions, '2025-06-01', '2026-01-13')).toHaveProperty('error');
     expect(spikeFrom(sessions, '2026-01-14', '2026-01-13')).toHaveProperty('error');
     expect(spikeFrom(sessions, '2026-01-13', '2026-01-13')).toEqual({ date: '2026-01-13' });
+  });
+
+  it('words the verdict with the judged count and any ratio unmet so far', () => {
+    const met = {
+      primaryOkDays: 0,
+      availability: { s: 1 },
+      layerB: { days: 0, passed: 0 },
+      layerC: { days: 0, passed: 0 },
+      passed: false,
+    };
+    const all = (n: number) => ({
+      ...met,
+      judged: n,
+      primaryOkDays: n,
+      layerB: { days: n, passed: n },
+      layerC: { days: n, passed: n },
+    });
+    expect(verdict({ ...met, judged: 0 })).toBe('not passed yet: 0 of 20 sessions judged');
+    expect(verdict({ ...all(3), through: '2026-01-07' })).toBe(
+      'not passed yet: 3 of 20 sessions judged',
+    );
+    // Ten sessions, the secondary available on 9, layer C passed on 9: named, shares rounded down.
+    expect(
+      verdict({
+        ...all(10),
+        availability: { s: 0.9, t: 0.5 },
+        layerB: { days: 9, passed: 9 },
+        layerC: { days: 10, passed: 9 },
+        through: '2026-01-16',
+      }),
+    ).toBe(
+      'not passed yet: 10 of 20 sessions judged (secondary available 90% < 95%, layer C 90% < 99% so far)',
+    );
+    expect(verdict({ ...all(10), primaryOkDays: 9, layerB: { days: 0, passed: 0 } })).toBe(
+      'not passed yet: 10 of 20 sessions judged (primary ok 90% < 100%, layer B not measured (no session with a secondary) so far)',
+    );
+    // A share just under its threshold never reads as reaching it.
+    expect(
+      verdict({ ...all(10), layerB: { days: 10, passed: 9.899 }, through: '2026-01-16' }),
+    ).toBe('not passed yet: 10 of 20 sessions judged (layer B 98.9% < 99% so far)');
+    expect(verdict({ ...all(20), passed: true, through: '2026-01-30' })).toBe(
+      'passed through 2026-01-30 (20 sessions judged, gate needs 20)',
+    );
+    expect(verdict({ ...all(35), layerC: { days: 35, passed: 34 }, through: '2026-02-20' })).toBe(
+      'not passed (35 sessions judged, gate needs 20)',
+    );
   });
 });

@@ -75,4 +75,7 @@ Built (A2): the daily anchor asks each authority in `SAKU_TSA_URLS` in order and
 Proposal: FreeTSA first, DigiCert as fallback (two independent authorities; a day neither answers leaves the run incomplete, so healthchecks.io alerts).
 
 ## 20-day run
+
+**Count start (owner, pre-registered 2026-10-30, before any counted result):** the A1 count starts at 2026-10-30, `pnpm spike --from 2026-10-30`. Earlier sessions (the daily runs while the pipeline was being fixed) are neither listed nor counted; the report says how many sessions with daily runs it left out and how many of them failed. The gate passes only with at least 20 judged sessions (stage-a A1).
+
 Per day and source: data received (any run that day), failures and their reasons. Filled from the server's job runs.
