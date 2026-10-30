@@ -353,7 +353,9 @@ export function verdict(r: VerdictInput): string {
     return `not passed yet: ${r.judged} of ${GATE.sessions} sessions judged${unmet.length ? ` (${unmet.join(', ')} so far)` : ''}`;
   }
   const count = `${r.judged} sessions judged, gate needs ${GATE.sessions}`;
-  return r.passed && r.through ? `passed through ${r.through} (${count})` : `not passed (${count})`;
+  if (r.passed && r.through) return `passed through ${r.through} (${count})`;
+  const unmet = unmetRatios(r);
+  return `not passed (${count}${unmet.length ? `; ${unmet.join(', ')}` : ''})`;
 }
 
 /**

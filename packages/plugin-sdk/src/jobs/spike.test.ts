@@ -473,7 +473,7 @@ describe('spikeReport', () => {
       'passed through 2026-01-30 (20 sessions judged, gate needs 20)',
     );
     expect(verdict({ ...all(35), layerC: { days: 35, passed: 34 }, through: '2026-02-20' })).toBe(
-      'not passed (35 sessions judged, gate needs 20)',
+      'not passed (35 sessions judged, gate needs 20; layer C 97.1% < 99%)',
     );
   });
 });
