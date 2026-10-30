@@ -2,7 +2,7 @@ import { Sessions } from '@saku/data';
 import { finishRun, schema, seedSourceRoles, startRun, symbolId, upsertSymbols } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
-import { spikeReport } from './spike';
+import { GATE, spikeFrom, spikeReport } from './spike';
 
 type Result = typeof schema.checkResults.$inferInsert;
 
@@ -226,7 +226,14 @@ describe('spikeReport', () => {
     // The verdict covers the judged sessions; the pending one is listed, never counted.
     expect(report.primaryOkDays).toBe(1);
     expect(report.layerC).toEqual({ days: 1, passed: 1 });
-    expect(report).toMatchObject({ pending: 1, through: '2026-01-05', passed: true });
+    // The ratios hold, but one judged session is far from the 20 the gate needs.
+    expect(report).toMatchObject({
+      pending: 1,
+      through: '2026-01-05',
+      judged: 1,
+      ratiosMet: true,
+      passed: false,
+    });
     // Once the window closed (the next target), the same session is a failure.
     const later = await spikeReport(db, { sessions, to: '2026-01-07', open: '2026-01-07' });
     expect(later.days[1]).toMatchObject({ date: '2026-01-06', reason: 'no_run' });
@@ -241,7 +248,8 @@ describe('spikeReport', () => {
     const index = { ...ok('C', 'index_match', 'idx'), symbolId: aaa };
     // The run for 01-05 has no index value for it yet (published after the run).
     await day(db, '2026-01-05', base);
-    let report = await spikeReport(db, { sessions });
+    // The next daily target (01-06) is open: its run can still check 01-05.
+    let report = await spikeReport(db, { sessions, open: '2026-01-06' });
     expect(report.days[0]).toMatchObject({ layerCPass: false, layerCPending: true });
     expect(report).toMatchObject({ pending: 1, passed: false, layerC: { days: 0, passed: 0 } });
     expect(report.through).toBeUndefined();
@@ -251,26 +259,30 @@ describe('spikeReport', () => {
       '2026-01-05': [...base, index],
       '2026-01-06': base,
     });
-    report = await spikeReport(db, { sessions });
+    report = await spikeReport(db, { sessions, open: '2026-01-07' });
     expect(report.days.map((d) => [d.date, d.layerCPass, d.layerCPending ?? false])).toEqual([
       ['2026-01-05', true, false],
       ['2026-01-06', false, true],
     ]);
     expect(report.days[0]!.layerCRunId).toBe(next);
     expect(report.layerC).toEqual({ days: 1, passed: 1 });
-    expect(report).toMatchObject({ through: '2026-01-05', passed: true, pending: 1 });
+    expect(report).toMatchObject({ through: '2026-01-05', ratiosMet: true, pending: 1 });
 
     // A later run that stored nothing for 01-06 did not check it: still pending.
     await runFor(db, '2026-01-07', { '2026-01-07': [...base, index] });
-    report = await spikeReport(db, { sessions });
+    report = await spikeReport(db, { sessions, open: '2026-01-08' });
     expect(report.days[1]).toMatchObject({ date: '2026-01-06', layerCPending: true });
     // Pending from 01-06 on: 01-07 is listed, not judged, though its own layer C is green.
     expect(report).toMatchObject({ through: '2026-01-05', pending: 2 });
 
     // A later run that stored 01-06 without an index result: no longer pending, not passed.
     await runFor(db, '2026-01-08', { '2026-01-06': base, '2026-01-08': [...base, index] });
-    report = await spikeReport(db, { sessions });
-    expect(report.days[1]).toMatchObject({ date: '2026-01-06', layerCPass: false });
+    report = await spikeReport(db, { sessions, open: '2026-01-09' });
+    expect(report.days[1]).toMatchObject({
+      date: '2026-01-06',
+      layerCPass: false,
+      layerCReason: 'index_never_arrived',
+    });
     expect(report.days[1]!.layerCPending).toBeUndefined();
     // 01-08's own run had its index (the test's simplification): judged through 01-08.
     expect(report.layerC).toEqual({ days: 4, passed: 3 });
@@ -309,5 +321,108 @@ describe('spikeReport', () => {
     expect(report.days[0]!.nonGreen).toEqual([
       expect.objectContaining({ check: 'index_match', status: 'red', runId: later }),
     ]);
+  });
+
+  it('a pending index result stops waiting once no future run can cover the date', async () => {
+    const { db, aaa } = await setup({ indexed: true });
+    const base = [
+      { ...ok('A', 'bar_valid', 'p'), symbolId: aaa },
+      { ...ok('B', 'close_match', 's'), symbolId: aaa },
+    ];
+    const index = { ...ok('C', 'index_match', 'idx'), symbolId: aaa };
+    // 01-05 has no index result; 01-06's run stored only its own date; then an outage.
+    await day(db, '2026-01-05', base);
+    await day(db, '2026-01-06', [...base, index]);
+
+    // Open 01-19: its window (10 sessions before, 01-05, through 01-19) still covers 01-05.
+    let report = await spikeReport(db, { sessions, to: '2026-01-19', open: '2026-01-19' });
+    expect(report.days[0]).toMatchObject({ date: '2026-01-05', layerCPending: true });
+    expect(report.days[0]!.layerCReason).toBeUndefined();
+    expect(report).toMatchObject({ judged: 0, pending: 11, passed: false });
+    expect(report.through).toBeUndefined();
+
+    // Open 01-20: the earliest any future run reaches is 01-06, so 01-05 is judged not passed,
+    // and the later sessions are judged normally (the outage days fail as no run).
+    report = await spikeReport(db, { sessions, to: '2026-01-20', open: '2026-01-20' });
+    expect(report.days[0]).toMatchObject({
+      date: '2026-01-05',
+      layerCPass: false,
+      layerCReason: 'index_never_arrived',
+    });
+    expect(report.days[0]!.layerCPending).toBeUndefined();
+    expect(report.days[1]).toMatchObject({ date: '2026-01-06', layerCPass: true });
+    expect(report.days.slice(2, -1).every((d) => d.reason === 'no_run')).toBe(true);
+    expect(report.days.at(-1)).toMatchObject({ date: '2026-01-20', reason: 'pending' });
+    expect(report).toMatchObject({
+      through: '2026-01-19',
+      judged: 11,
+      pending: 1,
+      layerC: { days: 11, passed: 1 },
+      passed: false,
+    });
+
+    // Without an open session no future run is known: nothing waits.
+    report = await spikeReport(db, { sessions, to: '2026-01-06' });
+    expect(report.days[0]).toMatchObject({ layerCReason: 'index_never_arrived' });
+    expect(report).toMatchObject({ judged: 2, pending: 0 });
+  });
+
+  it('passes only with at least 20 judged sessions', async () => {
+    expect(GATE.sessions).toBe(20);
+    const { db } = await setup();
+    const good = [
+      ok('A', 'bar_valid', 'p'),
+      ok('B', 'close_match', 's'),
+      ok('C', 'leverage_track'),
+    ];
+    const dates = sessions.between('2026-01-05', '2026-01-30');
+    expect(dates).toHaveLength(20);
+    const after = async (n: number) => {
+      const to = dates[n - 1]!;
+      return spikeReport(db, { sessions, to, open: sessions.after(to) });
+    };
+    for (const d of dates) await day(db, d, good);
+    // Three green sessions: every ratio met, not passed.
+    expect(await after(3)).toMatchObject({ judged: 3, ratiosMet: true, passed: false });
+    expect(await after(19)).toMatchObject({ judged: 19, ratiosMet: true, passed: false });
+    expect(await after(20)).toMatchObject({
+      judged: 20,
+      ratiosMet: true,
+      passed: true,
+      through: '2026-01-30',
+    });
+  });
+
+  it('--from starts the count at the first session on or after it; earlier ones are left out', async () => {
+    const { db } = await setup();
+    const good = [
+      ok('A', 'bar_valid', 'p'),
+      ok('B', 'close_match', 's'),
+      ok('C', 'leverage_track'),
+    ];
+    // An earlier failing stretch (01-05 without a run, 01-06 primary failed) before the count.
+    await day(db, '2026-01-02', good, { finished: false });
+    await day(db, '2026-01-06', [ok('B', 'close_match', 's')]);
+    await day(db, '2026-01-12', good);
+    await day(db, '2026-01-13', good);
+
+    // A Saturday: the count starts at the Monday after.
+    const from = spikeFrom(sessions, '2026-01-10', '2026-01-13');
+    expect(from).toEqual({ date: '2026-01-12' });
+    const report = await spikeReport(db, {
+      sessions,
+      to: '2026-01-13',
+      open: '2026-01-13',
+      from: (from as { date: string }).date,
+    });
+    expect(report.days.map((d) => d.date)).toEqual(['2026-01-12', '2026-01-13']);
+    expect(report).toMatchObject({ judged: 2, primaryOkDays: 2, ratiosMet: true });
+
+    // Refused: not a date, outside the calendar, after the target.
+    expect(spikeFrom(sessions, '2026-1-12', '2026-01-13')).toHaveProperty('error');
+    expect(spikeFrom(sessions, '2026-02-30', '2026-01-13')).toHaveProperty('error');
+    expect(spikeFrom(sessions, '2025-06-01', '2026-01-13')).toHaveProperty('error');
+    expect(spikeFrom(sessions, '2026-01-14', '2026-01-13')).toHaveProperty('error');
+    expect(spikeFrom(sessions, '2026-01-13', '2026-01-13')).toEqual({ date: '2026-01-13' });
   });
 });

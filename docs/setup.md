@@ -65,7 +65,7 @@ pnpm user create <your username>                         # the first account is 
 
 ```bash
 pnpm bootstrap   # full history from every source, then layers A-C over it
-pnpm spike       # (after daily runs) the A1 gate, day by day
+pnpm spike       # (after daily runs) the A1 gate, day by day (--from <YYYY-MM-DD>: count from that date)
 ```
 
 The bootstrap takes a few minutes (the slowest source sets the pace: 5 calls per minute on

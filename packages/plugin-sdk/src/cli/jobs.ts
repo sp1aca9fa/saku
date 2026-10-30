@@ -12,7 +12,10 @@
 //   pnpm probe             A1: the last sessions of one ticker from every bar source, to a log
 //   pnpm spike             A1: the gate, every NYSE session from the first daily run to the
 //                          latest final day (a session without a run fails; the latest one is
-//                          pending until its run finishes)
+//                          pending until its run finishes); passed needs 20 judged sessions
+//   pnpm spike --from <YYYY-MM-DD>
+//                          the same, counted from the first NYSE session on or after the date
+//                          (earlier sessions are neither listed nor counted)
 import { Sessions } from '@saku/data';
 import { tradingDateOf } from '@saku/core';
 import { join } from 'node:path';
@@ -26,7 +29,7 @@ import { lock, readStamp, writeStamp } from '../jobs/lock';
 import { jobLogger } from '../jobs/log';
 import { probe } from '../jobs/probe';
 import { runJob } from '../jobs/run';
-import { GATE, type SpikeReport, spikeReport } from '../jobs/spike';
+import { GATE, type SpikeReport, spikeFrom, spikeReport } from '../jobs/spike';
 import { dailyTarget } from '../jobs/target';
 import { loadPlugins, notifierContexts, pluginContext } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -35,10 +38,18 @@ assertServerOnly();
 loadRootEnv();
 const JOBS = ['bootstrap', 'daily', 'weekly', 'verify', 'checks', 'probe', 'spike'] as const;
 const job = process.argv[2] as (typeof JOBS)[number];
+const usage =
+  'Usage: pnpm bootstrap | pnpm daily [--force] | pnpm weekly | pnpm verify | pnpm probe | pnpm spike [--from <YYYY-MM-DD>]';
 if (!JOBS.includes(job)) {
-  console.error(
-    'Usage: pnpm bootstrap | pnpm daily [--force] | pnpm weekly | pnpm verify | pnpm probe | pnpm spike',
-  );
+  console.error(usage);
+  process.exit(1);
+}
+// `pnpm spike --from <date>`: the counted range starts at the first session on or after it.
+const fromAt = process.argv.indexOf('--from');
+const spikeFromArg = fromAt < 0 ? undefined : (process.argv[fromAt + 1] ?? '');
+if (spikeFromArg !== undefined && job !== 'spike') {
+  console.error('--from is for pnpm spike only.');
+  console.error(usage);
   process.exit(1);
 }
 const force = process.argv.includes('--force');
@@ -65,7 +76,23 @@ const target = dailyTarget(sessions, now, process.env.SAKU_DAILY_AFTER || undefi
 if (job === 'spike') {
   // Through the current daily target: a session without a run fails, except the target while its
   // run window is open (pending).
-  console.log(spikeMarkdown(await spikeReport(db, { sessions, to: target, open: target })));
+  const from = spikeFromArg === undefined ? undefined : spikeFrom(sessions, spikeFromArg, target);
+  if (from !== undefined && 'error' in from) {
+    console.error(from.error);
+    console.error(usage);
+    held.release();
+    process.exit(1);
+  }
+  console.log(
+    spikeMarkdown(
+      await spikeReport(db, {
+        sessions,
+        to: target,
+        open: target,
+        ...(from !== undefined && { from: from.date }),
+      }),
+    ),
+  );
   held.release();
   process.exit(0);
 }
@@ -155,6 +182,16 @@ async function heartbeat(): Promise<boolean> {
   }
 }
 
+/** The verdict with the judged session count; below GATE.sessions it can only be "not passed". */
+function verdict(r: SpikeReport): string {
+  const count = `${r.judged} of ${GATE.sessions} sessions judged`;
+  if (r.passed && r.through) return `passed through ${r.through} (${count})`;
+  // Not enough sessions yet, nothing failed so far: say so rather than plain "not passed".
+  if (r.judged < GATE.sessions && (r.ratiosMet || r.judged === 0))
+    return `not passed yet: ${count}`;
+  return `not passed (${count})`;
+}
+
 function spikeMarkdown(r: SpikeReport): string {
   const pct = (x: number) => `${(100 * x).toFixed(1)}%`;
   const sources = Object.keys(r.availability);
@@ -163,13 +200,13 @@ function spikeMarkdown(r: SpikeReport): string {
     `|---|---|${sources.map(() => '---|').join('')}---|---|---|`,
     ...r.days.map(
       (d) =>
-        `| ${d.date} | ${d.reason === 'pending' ? 'pending' : d.primaryOk ? 'ok' : d.reason === 'no_run' ? 'FAILED (no run)' : 'FAILED'} | ${sources.map((s) => (d.available[s] ? 'yes' : 'no')).join(' | ')} | ${d.reason === 'pending' ? 'pending' : d.layerBPass ? 'pass' : 'fail'} | ${d.reason === 'pending' || d.layerCPending ? 'pending' : d.layerCPass ? 'pass' : 'fail'} | ${d.nonGreen.length} |`,
+        `| ${d.date} | ${d.reason === 'pending' ? 'pending' : d.primaryOk ? 'ok' : d.reason === 'no_run' ? 'FAILED (no run)' : 'FAILED'} | ${sources.map((s) => (d.available[s] ? 'yes' : 'no')).join(' | ')} | ${d.reason === 'pending' ? 'pending' : d.layerBPass ? 'pass' : 'fail'} | ${d.reason === 'pending' || d.layerCPending ? 'pending' : d.layerCPass ? 'pass' : d.layerCReason === 'index_never_arrived' ? 'fail (index result never arrived)' : 'fail'} | ${d.nonGreen.length} |`,
     ),
     '',
     `Judged: ${r.days.length - r.pending} sessions${r.through ? ` through ${r.through}` : ''}. Primary ok: ${r.primaryOkDays}. Without a finished daily run: ${r.days.filter((d) => d.reason === 'no_run' && (!r.through || d.date <= r.through)).length}. Not judged yet (from the first pending session on): ${r.pending}.`,
     `Secondary availability (gate: one >= ${pct(GATE.secondaryAvailability)}): ${sources.map((s) => `${s} ${pct(r.availability[s] ?? 0)}`).join(', ')}.`,
     `Layer B (gate >= ${pct(GATE.layerB)}): ${r.layerB.passed}/${r.layerB.days}. Layer C (gate >= ${pct(GATE.layerC)}): ${r.layerC.passed}/${r.layerC.days}.`,
-    `Numeric gate: ${r.passed && r.through ? `passed through ${r.through}` : 'not passed'} (every failure must still be explained).`,
+    `Numeric gate: ${verdict(r)} (every failure must still be explained).`,
   ];
   return lines.join('\n');
 }

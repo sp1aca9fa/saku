@@ -15,19 +15,31 @@
 //     index results for the date from the latest such run whose window (DAILY_OVERLAP sessions
 //     before its target through the target) covers it all green, so the next run's index check
 //     for the date counts and a failure at decision time is never dropped by a later correction.
-//     A fund with an index and no index result for the date is not passed; it is pending while
-//     no later finished run covering the date has stored results for it.
+//     A fund with an index and no index result for the date is not passed. It is pending only
+//     while a future daily run can still bring it: no later finished run covering the date has
+//     stored results for it, and the open session's run window (DAILY_OVERLAP sessions before
+//     `open` through `open`, the earliest any future daily run reaches) still covers the date.
+//     Otherwise it is judged: layer C not passed, "index result never arrived". Without `open`,
+//     no future run is known, so nothing waits.
 //   - A session without a run is failed everywhere (`no_run`), except the `open` session (the
 //     daily target whose run window has not closed): pending while no run for it has finished.
 //   - The verdict covers the sessions before the first pending one ("passed through <date>");
 //     the later ones are listed, never counted as passed. Unknown never reads as passing.
-import type { TradingDate } from '@saku/core';
+//   - Passed needs at least GATE.sessions judged sessions (stage-a A1: daily runs over 20 trading
+//     days); fewer is "not passed yet", whatever the ratios.
+import { type TradingDate, isTradingDate } from '@saku/core';
 import type { Sessions } from '@saku/data';
 import { type Db, activeSymbols, schema } from '@saku/db';
 import { and, asc, eq } from 'drizzle-orm';
 import { DAILY_OVERLAP } from './ingest';
 
-export const GATE = { secondaryAvailability: 0.95, layerB: 0.99, layerC: 0.99 } as const;
+export const GATE = {
+  /** Judged sessions needed before the gate can pass (stage-a A1: 20 trading days). */
+  sessions: 20,
+  secondaryAvailability: 0.95,
+  layerB: 0.99,
+  layerC: 0.99,
+} as const;
 
 export interface SpikeDay {
   date: string;
@@ -44,6 +56,8 @@ export interface SpikeDay {
   layerCPass: boolean;
   /** Layer C waits for an index result a later run can still bring (not judged yet). */
   layerCPending?: boolean;
+  /** Why layer C failed without a non-green result: no future run can bring the index result. */
+  layerCReason?: 'index_never_arrived';
   nonGreen: {
     layer: string;
     check: string;
@@ -65,7 +79,11 @@ export interface SpikeReport {
   through?: TradingDate;
   /** Sessions after `through`, listed but not judged yet (from the first pending one on). */
   pending: number;
-  /** The numeric gate over the sessions through `through`. */
+  /** Sessions the verdict covers (through `through`). */
+  judged: number;
+  /** The ratios (primary every day, availability, layers B and C) met over the judged sessions. */
+  ratiosMet: boolean;
+  /** The numeric gate: the ratios met over at least GATE.sessions judged sessions. */
   passed: boolean;
 }
 
@@ -125,6 +143,17 @@ export async function spikeReport(
       .sort()
       .at(-1);
   const dates = from && to && from <= to ? o.sessions.between(from, to) : [];
+  // The earliest date a future daily run can still cover: the open session's window start (a
+  // future run targets `open` or later). Outside the calendar a run covers its target only (as
+  // `finished` above). No `open`: no future run is known, nothing can still arrive.
+  let reachable: TradingDate | undefined;
+  if (o.open) {
+    try {
+      reachable = o.sessions.before(o.open, DAILY_OVERLAP);
+    } catch {
+      reachable = o.open;
+    }
+  }
 
   const days: SpikeDay[] = [];
   for (const date of dates) {
@@ -184,6 +213,7 @@ export async function spikeReport(
     const missingIndex = live
       .filter((s) => s.indexSeries)
       .some((s) => !indexNow.some((r) => r.symbolId === s.id));
+    const waits = missingIndex && !laterCovering && reachable !== undefined && reachable <= date;
     days.push({
       date,
       runId,
@@ -197,7 +227,8 @@ export async function spikeReport(
         !missingIndex &&
         ownC.every((r) => r.status === 'green') &&
         indexNow.every((r) => r.status === 'green'),
-      ...(missingIndex && !laterCovering && { layerCPending: true }),
+      ...(waits && { layerCPending: true }),
+      ...(missingIndex && !waits && { layerCReason: 'index_never_arrived' as const }),
       nonGreen: [...rs, ...index]
         .filter((r) => r.status !== 'green')
         .map((r) => ({
@@ -229,13 +260,14 @@ export async function spikeReport(
   const layerC = { days: n, passed: counted.filter((d) => d.layerCPass).length };
   const primaryOkDays = counted.filter((d) => d.primaryOk).length;
   const pending = days.length - n;
-  const passed =
+  const ratiosMet =
     n > 0 &&
     primaryOkDays === n &&
     Object.values(availability).some((a) => a >= GATE.secondaryAvailability) &&
     layerB.days > 0 &&
     layerB.passed / layerB.days >= GATE.layerB &&
     layerC.passed / layerC.days >= GATE.layerC;
+  const passed = ratiosMet && n >= GATE.sessions;
   return {
     days,
     ...(through !== undefined && { through }),
@@ -244,6 +276,31 @@ export async function spikeReport(
     layerB,
     layerC,
     pending,
+    judged: n,
+    ratiosMet,
     passed,
   };
+}
+
+/**
+ * `pnpm spike --from <date>`: the first session the gate counts (the owner names when the A1 count
+ * starts). The first NYSE session on or after `value`; refused when it is not a date, outside the
+ * calendar, or after the daily target (nothing to judge).
+ */
+export function spikeFrom(
+  sessions: Sessions,
+  value: string,
+  target: TradingDate,
+): { date: TradingDate } | { error: string } {
+  if (!isTradingDate(value))
+    return { error: `--from needs a date like 2026-10-30 (got "${value}").` };
+  let first: TradingDate;
+  try {
+    first = sessions.isSession(value) ? value : sessions.after(value);
+  } catch {
+    return { error: `--from ${value} is outside the trading calendar.` };
+  }
+  if (value > target || first > target)
+    return { error: `--from ${value} is after the daily target ${target}.` };
+  return { date: first };
 }
