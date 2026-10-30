@@ -178,8 +178,8 @@ async function symbolProblems(
   if (closed.length > 0) {
     problems.push(
       `${ticker}: ${closed.length} stored ${closed.length === 1 ? 'bar' : 'bars'} on days the market was ` +
-        `closed: ${listed(closed)}. The primary must withdraw them or an admin removes them ` +
-        'through the revision log.',
+        `closed: ${listed(closed)}. No command removes such a bar yet; tell the admin (an open ` +
+        'decision: keep closed-day bars out of the canonical series, or an admin withdrawal).',
     );
   }
   if (outside.length > 0) {

@@ -302,8 +302,9 @@ describe('registrationProblems', () => {
       { symbolId: ids.AAA!, date: '2024-12-31', close: 1, source: 'p', status: 'red' },
     ]);
     expect(await check(db, strategy(), '2026-01-12')).toEqual([
-      'AAA: 1 stored bar on days the market was closed: 2026-01-10. The primary must withdraw ' +
-        'them or an admin removes them through the revision log.',
+      'AAA: 1 stored bar on days the market was closed: 2026-01-10. No command removes such a ' +
+        'bar yet; tell the admin (an open decision: keep closed-day bars out of the canonical ' +
+        'series, or an admin withdrawal).',
       'AAA: 1 stored bar is on days the market calendar does not cover: 2024-12-31. Update the ' +
         'calendar plug-in.',
       // The pass is also stale and started after the (uncovered) first bar.
