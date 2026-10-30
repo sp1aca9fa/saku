@@ -34,6 +34,7 @@ import {
   resolvedStandIns,
   sha256,
   standInOn,
+  unresolvedStandIns,
 } from '@saku/db';
 import { cashRateReader } from './cash';
 
@@ -183,6 +184,11 @@ export interface StandInCorrectionSummary {
   /** Annotations added by this call. */
   annotations: number;
   /**
+   * Corrections waiting for an unresolved stand-in (see `standInCorrections`): annotated by a
+   * later run once the primary has replaced it.
+   */
+  deferred: number;
+  /**
    * Corrected stand-ins whether an entry used them is unknown (a stored timestamp that is not an
    * ISO 8601 instant): nothing is annotated on a guess; the caller reports each line (the run is
    * incomplete and the admins' job-failure alert names it).
@@ -194,10 +200,11 @@ export interface StandInCorrectionSummary {
  * The stand-in correction step (requirements 04, the stand-in rule: forward records that used a
  * stand-in are annotated once the primary arrives, never edited). For every registered version
  * that parses, each resolved stand-in off the primary by more than the layer B close tolerance
- * (as verify reports them; those within it are not annotated) on a ticker it depends on, whose
- * recorded entry used the stand-in (`standInCorrections`), gets one `stand_in_corrected`
- * annotation: the recorded allocation against the decision on the corrected bars (only bars
- * dated <= the entry's date, all green: the primary's bar is there now).
+ * (as verify reports them; those within it are not annotated) on a ticker it depends on gives
+ * one `stand_in_corrected` annotation on every recorded entry that used it (`standInCorrections`:
+ * the stand-in day's and each later day's appended while it was unresolved, whose lookback may
+ * read it): the recorded allocation against the decision on the corrected bars (only bars dated
+ * <= the entry's date, all green: the primary's bar is there now).
  *
  * Caught up from `stand_ins` (not one run's list), so a version skipped in the resolving run is
  * annotated in a later one; idempotent. Run it before every recompute (daily, weekly, `pnpm
@@ -209,11 +216,12 @@ export async function annotateStandInCorrections(
   db: Db,
   runId: string | null,
 ): Promise<StandInCorrectionSummary> {
-  const summary: StandInCorrectionSummary = { annotations: 0, errors: [] };
+  const summary: StandInCorrectionSummary = { annotations: 0, deferred: 0, errors: [] };
   const corrected = (await resolvedStandIns(db)).filter(
     (s) => s.deviation !== null && s.deviation > TOLERANCE.close,
   );
   if (corrected.length === 0) return summary;
+  const unresolved = await unresolvedStandIns(db);
   const { loadRows, barsOf } = await reader(db);
   const errors = new Set<string>();
   for (const version of await allVersions(db)) {
@@ -226,21 +234,25 @@ export async function annotateStandInCorrections(
       deps,
       record: await forwardRecord(db, version.id),
       corrected,
-      annotated: (await annotationsOf(db, version.id, 'stand_in_corrected')).map((a) => ({
-        date: a.date,
-        ticker: (a.detail as { ticker?: unknown }).ticker,
-      })),
+      unresolved,
+      annotated: (await annotationsOf(db, version.id, 'stand_in_corrected')).map((a) => {
+        const d = a.detail as { ticker?: unknown; standInDate?: unknown };
+        // Written before `standInDate` existed: on the stand-in day's own entry.
+        return { date: a.date, ticker: d.ticker, standInDate: d.standInDate ?? a.date };
+      }),
     });
     for (const e of pending.errors) errors.add(e);
+    summary.deferred += pending.deferred;
     for (const { standIn, recorded } of pending.annotate) {
-      const bars = barsOf(await loadRows(deps, standIn.date));
-      const now = forwardDecision(strategy, standIn.date, bars, allGreen(deps));
+      const bars = barsOf(await loadRows(deps, recorded.date));
+      const now = forwardDecision(strategy, recorded.date, bars, allGreen(deps));
       await annotate(db, {
         versionId: version.id,
-        date: standIn.date,
+        date: recorded.date,
         kind: 'stand_in_corrected',
         detail: {
           ticker: standIn.ticker,
+          standInDate: standIn.date,
           // Against the stand-in's last stored close: a later run may have replaced the close
           // an entry used while the stand-in was unresolved (docs/data-pipeline.md).
           deviation: standIn.deviation,
@@ -283,60 +295,88 @@ export function instantOf(text: string | null): number {
 }
 
 /**
- * The corrected stand-ins still to annotate for one version (requirements 04, the stand-in rule:
- * records are annotated once the primary arrives, never edited; 05: recomputations are
- * annotations). One per stand-in on a ticker the version depends on, on a date it recorded,
- * whose entry used the stand-in, and not annotated yet for that date and ticker (idempotent).
+ * The corrections still to annotate for one version (requirements 04, the stand-in rule: records
+ * are annotated once the primary arrives, never edited; 05: recomputations are annotations). For
+ * each corrected stand-in on a ticker the version depends on: every recorded entry dated on or
+ * after the stand-in's date that used it (its own day, and later days whose lookback may read it),
+ * not annotated yet for that entry date, ticker and stand-in date (idempotent).
  *
- * Whether the entry used the stand-in is decided by run ids first, since verify records and
+ * Whether an entry used the stand-in is decided by run ids first, since verify records and
  * resolves stand-ins before the forward step appends within a run (runs hold the jobs lock):
  * an entry appended in the resolving run used the primary's bar; one appended in the run that
  * first recorded the stand-in used it. Only an entry from another run (or without a run) is
  * placed by time: it used the stand-in when appended at or after the stand-in was first recorded
  * and before the primary resolved it (compared as instants). A timestamp that is not an instant
  * then leaves that unknown: an error, nothing annotated.
+ *
+ * A correction waits (`deferred`) while any ticker the version depends on has an unresolved
+ * stand-in dated on or before the entry's date: its corrected decision would rest on a price not
+ * verified yet. It is annotated by a later run, once the primary has replaced that one too.
  */
 export function standInCorrections(o: {
   version: string;
   deps: string[];
   record: Pick<ForwardEntry, 'date' | 'allocation' | 'createdAt' | 'runId'>[];
   corrected: ResolvedStandIn[];
-  annotated: { date: string; ticker: unknown }[];
+  /** Stand-ins the primary has not replaced yet. */
+  unresolved: { ticker: string; date: TradingDate }[];
+  annotated: { date: string; ticker: unknown; standInDate: unknown }[];
 }): {
   annotate: { standIn: ResolvedStandIn; recorded: Pick<ForwardEntry, 'date' | 'allocation'> }[];
+  deferred: number;
   errors: string[];
 } {
-  const done = new Set(o.annotated.map((a) => `${a.date} ${String(a.ticker)}`));
-  const byDate = new Map(o.record.map((e) => [e.date, e]));
-  const out: ReturnType<typeof standInCorrections> = { annotate: [], errors: [] };
+  const done = new Set(
+    o.annotated.map((a) => `${a.date} ${String(a.ticker)} ${String(a.standInDate)}`),
+  );
+  // The earliest unresolved stand-in among the version's tickers: an entry dated on or after it
+  // waits.
+  const waitFrom = o.unresolved
+    .filter((u) => o.deps.includes(u.ticker))
+    .reduce<string | undefined>(
+      (min, u) => (min === undefined || u.date < min ? u.date : min),
+      undefined,
+    );
+  const out: ReturnType<typeof standInCorrections> = { annotate: [], deferred: 0, errors: [] };
   for (const s of o.corrected) {
     if (!o.deps.includes(s.ticker)) continue;
-    const recorded = byDate.get(s.date);
-    if (!recorded) continue;
-    if (done.has(`${s.date} ${s.ticker}`)) continue;
-    if (recorded.runId !== null && recorded.runId === s.resolvedRunId) continue;
-    if (recorded.runId !== null && recorded.runId === s.runId) {
-      out.annotate.push({ standIn: s, recorded });
-      continue;
-    }
     const from = instantOf(s.createdAt);
     const until = instantOf(s.resolvedAt);
-    if (Number.isNaN(from) || Number.isNaN(until)) {
-      out.errors.push(
-        `${s.ticker} ${s.date}: the stand-in's timestamps are not instants ` +
-          `(created ${s.createdAt}, resolved ${s.resolvedAt}); its correction is not annotated`,
-      );
-      continue;
+    let unplaced = false;
+    for (const recorded of o.record) {
+      if (recorded.date < s.date) continue;
+      if (done.has(`${recorded.date} ${s.ticker} ${s.date}`)) continue;
+      if (recorded.runId !== null && recorded.runId === s.resolvedRunId) continue;
+      let used: boolean;
+      if (recorded.runId !== null && recorded.runId === s.runId) used = true;
+      else if (Number.isNaN(from) || Number.isNaN(until)) {
+        // Unknown for every entry placed by time: one line for the stand-in, none annotated.
+        if (!unplaced) {
+          out.errors.push(
+            `${s.ticker} ${s.date}: the stand-in's timestamps are not instants ` +
+              `(created ${s.createdAt}, resolved ${s.resolvedAt}); its correction is not annotated`,
+          );
+        }
+        unplaced = true;
+        continue;
+      } else {
+        const at = instantOf(recorded.createdAt);
+        if (Number.isNaN(at)) {
+          out.errors.push(
+            `${o.version} ${recorded.date}: the entry's created_at (${recorded.createdAt}) is ` +
+              `not an instant; the ${s.ticker} ${s.date} stand-in correction is not annotated`,
+          );
+          continue;
+        }
+        used = at >= from && at < until;
+      }
+      if (!used) continue;
+      if (waitFrom !== undefined && waitFrom <= recorded.date) {
+        out.deferred++;
+        continue;
+      }
+      out.annotate.push({ standIn: s, recorded });
     }
-    const at = instantOf(recorded.createdAt);
-    if (Number.isNaN(at)) {
-      out.errors.push(
-        `${o.version} ${s.date}: the entry's created_at (${recorded.createdAt}) is not an ` +
-          `instant; the ${s.ticker} stand-in correction is not annotated`,
-      );
-      continue;
-    }
-    if (at >= from && at < until) out.annotate.push({ standIn: s, recorded });
   }
   return out;
 }
@@ -434,7 +474,8 @@ export interface RecomputeSummary {
  * so each recorded day reads only bars up to that day), and only the engine's output is compared:
  * health was graded and recorded then. A difference can come from the engine or from data
  * corrected since; the annotation names the code version. Skipped: safe-state days that recorded
- * no signals (nothing to reproduce) and days a corrected stand-in already explains.
+ * no signals (nothing to reproduce) and days a corrected stand-in already explains (the engine
+ * now decides the allocation the `stand_in_corrected` annotation gives for that day).
  */
 export async function recompute(
   db: Db,
@@ -474,17 +515,22 @@ export async function recompute(
     const seen = new Set(
       (await annotationsOf(db, version.id, 'recomputed')).map((a) => `${a.date} ${a.fingerprint}`),
     );
-    const explained = new Set(
-      (await annotationsOf(db, version.id, 'stand_in_corrected')).map((a) => a.date),
-    );
+    // What a corrected stand-in explains: each date's corrected allocations. A day is skipped
+    // only when the engine now decides exactly that; otherwise it is compared as usual.
+    const explained = new Map<TradingDate, Set<string>>();
+    for (const a of await annotationsOf(db, version.id, 'stand_in_corrected')) {
+      const corrected = (a.detail as { correctedAllocation?: unknown }).correctedAllocation;
+      if (typeof corrected !== 'string') continue;
+      explained.set(a.date, (explained.get(a.date) ?? new Set()).add(corrected));
+    }
     for (const e of record) {
       const recorded = JSON.parse(e.payload) as {
         signals?: Record<string, boolean | number> | null;
       };
       if (e.safeStateApplied && !recorded.signals) continue;
-      if (explained.has(e.date)) continue;
-      summary.checked++;
       const now = days.get(e.date);
+      if (explained.get(e.date)?.has(now?.allocation ?? 'no decision')) continue;
+      summary.checked++;
       const signals = signalsDiffer(recorded.signals ?? null, now?.signals ?? null);
       const nowAllocation = now?.allocation ?? 'no decision';
       // A safe-state day records the normal allocation's signals but not its name.

@@ -14,7 +14,7 @@ import {
   type Vintage,
   zonedInstant,
 } from '@saku/core';
-import { and, asc, between, desc, eq, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, asc, between, desc, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import type { Db } from './client';
 import {
   barRevisions,
@@ -955,6 +955,19 @@ export async function resolvedStandIns(db: Db) {
     .from(standIns)
     .innerJoin(symbols, eq(symbols.id, standIns.symbolId))
     .where(isNotNull(standIns.resolvedAt))
+    .orderBy(asc(standIns.date), asc(symbols.ticker));
+}
+
+/**
+ * Every stand-in the primary has not replaced yet (its ticker and date), oldest date first: a
+ * correction that would decide on such a price waits (the stand-in correction step).
+ */
+export async function unresolvedStandIns(db: Db) {
+  return db
+    .select({ ticker: symbols.ticker, date: standIns.date })
+    .from(standIns)
+    .innerJoin(symbols, eq(symbols.id, standIns.symbolId))
+    .where(isNull(standIns.resolvedAt))
     .orderBy(asc(standIns.date), asc(symbols.ticker));
 }
 

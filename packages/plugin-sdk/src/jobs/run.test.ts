@@ -617,6 +617,98 @@ describe('a stand-in the primary later corrects', () => {
     ).toEqual(['me']);
   });
 
+  it('D and D+1 both read it: each annotated and told, neither an engine difference', async () => {
+    const { db, version } = await setup();
+    // Its signal reads the last two returns, so the day after the stand-in reads it too.
+    const quiet = await registerVersion(db, {
+      ownerId: version.ownerId,
+      name: 'Quiet',
+      at: new Date('2026-01-14T22:00:00Z'),
+      strategy: {
+        name: 'Quiet',
+        account: 'taxable',
+        safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [
+          {
+            id: 'V',
+            type: 'compare',
+            left: { indicator: 'volatility', ticker: 'AAA', length: 2 },
+            op: '<',
+            right: { threshold: 0.005 },
+          },
+        ],
+        allocations: [
+          { name: 'Still', when: { all: ['V'] }, holdings: [{ ticker: 'AAA', weight: 100 }] },
+          { name: 'Calm', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        ],
+      },
+    });
+    const { notifier, sent } = fakeNotifier();
+    await runJob(db, withStandIn(), run1(notifier));
+    // D+1: the primary still lacks D (the stand-in stays unresolved), has D+1.
+    await runJob(db, withStandIn(), options(notifier));
+    const recorded = await forwardRecord(db, quiet.id);
+    expect(recorded.map((e) => [e.date, e.allocation])).toEqual([
+      [DAY, 'Calm'],
+      ['2026-01-16', 'Calm'],
+    ]);
+    // The primary's bar for D arrives.
+    const r = await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier));
+    expect(r).toMatchObject({ ok: true });
+    const corrected = (await notes(db, 'stand_in_corrected')).filter(
+      (n) => n.versionId === quiet.id,
+    );
+    expect(
+      corrected.map((n) => {
+        const d = n.detail as { standInDate: string; correctedAllocation: string };
+        return [n.date, d.standInDate, d.correctedAllocation];
+      }),
+    ).toEqual([
+      [DAY, DAY, 'Still'],
+      ['2026-01-16', DAY, 'Still'],
+    ]);
+    // Both days are explained: no "the engine decides differently".
+    expect(await notes(db, 'recomputed')).toEqual([]);
+    expect(sent.some((m) => m.text.includes('decides'))).toBe(false);
+    // One message per channel and version: the newest day in full, the other counted.
+    const told = sent.filter((m) => m.text.startsWith('Quiet: correction'));
+    expect(told.map((m) => m.target)).toEqual(['me', 'ops']);
+    expect(told[0]!.text.split('\n').slice(0, 4)).toEqual([
+      'Quiet: correction to the signal of 2026-01-16',
+      expect.stringMatching(
+        /^The signal of 2026-01-16 read a secondary price for AAA on 2026-01-15; the primary's price, which arrived later, differed from it by 1\.01%\.$/,
+      ),
+      'Recorded allocation: Calm. With the corrected price it would have been Still. The record is annotated, not changed.',
+      'Other corrections of this strategy not told before: 1 (each is annotated in the record).',
+    ]);
+  });
+
+  it('an unreadable correction annotation: incomplete until the admins are told which', async () => {
+    const { db, version } = await setup();
+    await db.insert(schema.forwardAnnotations).values({
+      versionId: version.id,
+      date: '2026-01-15',
+      kind: 'stand_in_corrected',
+      detail: { ticker: 'AAA' },
+      runId: null,
+    });
+    const [bad] = await notes(db, 'stand_in_corrected');
+    const down = fakeNotifier(['ops']);
+    const r = await runJob(db, plugins([barSource('p'), barSource('s')]), options(down.notifier));
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('incomplete: alerts, stand-in alerts');
+    expect(r.error).toContain(
+      `Trend (${version.id}) 2026-01-15: stand-in correction annotation ${bad!.id} does not read back`,
+    );
+    const { notifier, sent } = fakeNotifier();
+    const again = await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier));
+    expect(again).toMatchObject({ ok: true });
+    const told = sent.filter((m) => m.text.startsWith('Saku: a stand-in correction annotation'));
+    expect(told.map((m) => m.target)).toEqual(['ops']);
+    expect(told[0]!.text).toContain(`annotation ${bad!.id} does not read back`);
+  });
+
   it('a stand-in timestamp that is not an instant: the run is incomplete, the admins told which', async () => {
     const { db, version } = await setup();
     const [aaa] = await db.select().from(schema.symbols).where(eq(schema.symbols.ticker, 'AAA'));

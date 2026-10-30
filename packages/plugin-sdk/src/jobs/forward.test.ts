@@ -2,6 +2,7 @@ import type { RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   addChannel,
+  annotate,
   annotationsOf,
   createUser,
   forwardRecord,
@@ -193,6 +194,39 @@ describe('forward', () => {
     ]);
   });
 
+  it('recompute skips a day a correction explains only when it now decides that allocation', async () => {
+    for (const corrected of ['Calm', 'Risk on']) {
+      const { db, version, runId, store } = await setup();
+      await setSetting(db, 'forward_records_from', '2026-01-05');
+      await forward(db, { runId, sessions, to: D[3]! });
+      // The engine now decides 01-08 Calm (its close corrected below the 2-day average).
+      const revised = bars([100, 101, 102, 100]);
+      await store('AAA', 'p', revised);
+      await store('AAA', 's', revised);
+      await verify(db, { runId: await startRun(db, 'checks'), sessions, mode: 'full', to: D[3]! });
+      await annotate(db, {
+        versionId: version.id,
+        date: '2026-01-08',
+        kind: 'stand_in_corrected',
+        detail: {
+          ticker: 'AAA',
+          standInDate: '2026-01-08',
+          deviation: 0.01,
+          recordedAllocation: 'Risk on',
+          correctedAllocation: corrected,
+          differs: corrected !== 'Risk on',
+        },
+        runId,
+      });
+      const r = await recompute(db, { runId, code: 'c2' });
+      // Explained: not a difference. Not explained (the correction said otherwise): compared.
+      expect(r.differences.map((d) => [d.date, d.now])).toEqual(
+        corrected === 'Calm' ? [] : [['2026-01-08', 'Calm']],
+      );
+      expect(r.checked).toBe(corrected === 'Calm' ? 1 : 2);
+    }
+  });
+
   it('recompute: the record reproduces, and a difference is annotated once', async () => {
     const { db, version, runId, store } = await setup();
     await setSetting(db, 'forward_records_from', '2026-01-05');
@@ -308,28 +342,39 @@ describe('forward', () => {
         .where(eq(schema.strategyVersions.id, version.id));
     await setJson(JSON.stringify(broken));
     expect((await forward(db, { runId, sessions, to: D[3]! })).errors).toHaveLength(1);
-    expect(await annotateStandInCorrections(db, runId)).toEqual({ annotations: 0, errors: [] });
+    expect(await annotateStandInCorrections(db, runId)).toEqual({
+      annotations: 0,
+      deferred: 0,
+      errors: [],
+    });
     expect(await annotationsOf(db, version.id, 'stand_in_corrected')).toEqual([]);
 
     // Run 2: it parses again, and the correction is caught up from the database, once.
     await setJson(row!.canonicalJson);
     expect((await forward(db, { runId, sessions, to: D[3]! })).errors).toEqual([]);
-    expect(await annotateStandInCorrections(db, runId)).toEqual({ annotations: 1, errors: [] });
+    // The stand-in day's entry and the next one, appended while it was unresolved (its lookback
+    // reads the stand-in's close).
+    expect(await annotateStandInCorrections(db, runId)).toEqual({
+      annotations: 2,
+      deferred: 0,
+      errors: [],
+    });
     const notes = await annotationsOf(db, version.id, 'stand_in_corrected');
+    const detail = (recorded: string) => ({
+      ticker: 'AAA',
+      standInDate: D[2],
+      deviation: 102.51 / 102 - 1,
+      recordedAllocation: recorded,
+      correctedAllocation: recorded,
+      differs: false,
+    });
     expect(notes.map((n) => [n.date, n.detail])).toEqual([
-      [
-        D[2],
-        {
-          ticker: 'AAA',
-          deviation: 102.51 / 102 - 1,
-          recordedAllocation: 'Risk on',
-          correctedAllocation: 'Risk on',
-          differs: false,
-        },
-      ],
+      [D[2], detail(record[0]!.allocation)],
+      [D[3], detail(record[1]!.allocation)],
     ]);
+    expect(record.map((e) => e.date)).toEqual([D[2], D[3]]);
     expect((await annotateStandInCorrections(db, runId)).annotations).toBe(0);
-    expect(await annotationsOf(db, version.id, 'stand_in_corrected')).toHaveLength(1);
+    expect(await annotationsOf(db, version.id, 'stand_in_corrected')).toHaveLength(2);
     // The record itself is untouched.
     expect(await forwardRecord(db, version.id)).toEqual(record);
   });
@@ -352,7 +397,11 @@ describe('forward', () => {
       resolvedAt: '2026-01-08T21:30:00.000Z',
     });
     expect((await forward(db, { runId, sessions, to: D[3]! })).appended).toBe(2);
-    expect(await annotateStandInCorrections(db, runId)).toEqual({ annotations: 0, errors: [] });
+    expect(await annotateStandInCorrections(db, runId)).toEqual({
+      annotations: 0,
+      deferred: 0,
+      errors: [],
+    });
     expect(await annotationsOf(db, version.id, 'stand_in_corrected')).toEqual([]);
   });
 
@@ -377,7 +426,7 @@ describe('forward', () => {
     const run = (
       createdAt: string,
       corrected: ResolvedStandIn[],
-      annotated: { date: string; ticker: unknown }[] = [],
+      annotated: { date: string; ticker: unknown; standInDate?: unknown }[] = [],
       runId: string | null = 'r0',
     ) =>
       standInCorrections({
@@ -385,19 +434,20 @@ describe('forward', () => {
         deps: ['AAA', 'AAA2'],
         record: [entry(createdAt, runId)],
         corrected,
-        annotated,
+        unresolved: [],
+        annotated: annotated.map((a) => ({ standInDate: a.date, ...a })),
       });
     const used = '2026-01-08T00:00:00.000Z';
     const after = '2026-01-09T00:00:00.000Z';
     // Run ids first: appended in the resolving run, the primary's bar (even inside the window);
     // in the recording run, the stand-in (even outside it).
-    expect(run(used, [s()], [], 'r2')).toEqual({ annotate: [], errors: [] });
+    expect(run(used, [s()], [], 'r2')).toEqual({ annotate: [], deferred: 0, errors: [] });
     expect(run(after, [s()], [], 'r1').annotate).toHaveLength(1);
     // Run ids decide without reading the timestamps, so a bad one does not block them.
     const unreadable = s({ createdAt: 'x', resolvedAt: '2026-01-08 21:30:00' });
     expect(run('y', [unreadable], [], 'r1')).toMatchObject({ errors: [] });
     expect(run('y', [unreadable], [], 'r1').annotate).toHaveLength(1);
-    expect(run('y', [unreadable], [], 'r2')).toEqual({ annotate: [], errors: [] });
+    expect(run('y', [unreadable], [], 'r2')).toEqual({ annotate: [], deferred: 0, errors: [] });
     // No run on either side is not the same run: placed by time.
     expect(run(after, [s({ runId: null, resolvedRunId: null })], [], null).annotate).toEqual([]);
     expect(run(used, [s({ runId: null, resolvedRunId: null })], [], null).annotate).toHaveLength(1);
@@ -409,11 +459,20 @@ describe('forward', () => {
     expect(run('2026-01-07T21:29:59.999Z', [s()]).annotate).toEqual([]);
     expect(run('2026-01-08T21:30:00.000Z', [s()]).annotate).toEqual([]);
     expect(run('2026-01-08T16:30:00.000-05:00', [s()]).annotate).toEqual([]);
-    // Not a dependency, no entry that day, already annotated.
+    // Not a dependency, only entries before the stand-in's date, already annotated (for this
+    // entry date, ticker and stand-in date).
     expect(run(used, [s({ ticker: 'BBB' })]).annotate).toEqual([]);
-    expect(run(used, [s({ date: '2026-01-06' })]).annotate).toEqual([]);
+    expect(run(used, [s({ date: '2026-01-08' })]).annotate).toEqual([]);
     expect(run(used, [s()], [{ date: '2026-01-07', ticker: 'AAA' }]).annotate).toEqual([]);
     expect(run(used, [s()], [{ date: '2026-01-07', ticker: 'AAA2' }]).annotate).toHaveLength(1);
+    expect(
+      run(used, [s()], [{ date: '2026-01-07', ticker: 'AAA', standInDate: '2026-01-06' }]).annotate,
+    ).toHaveLength(1);
+    // A later entry appended while the stand-in was unresolved (its lookback may read it).
+    const later = run(used, [s({ date: '2026-01-06' })]);
+    expect(later.annotate.map((a) => [a.recorded.date, a.standIn.date])).toEqual([
+      ['2026-01-07', '2026-01-06'],
+    ]);
     // A timestamp that is not an instant: unknown, an error, nothing annotated on a guess.
     for (const bad of [s({ resolvedAt: '2026-01-08 21:30:00' }), s({ createdAt: 'x' })]) {
       const r = run(used, [bad]);
@@ -424,6 +483,48 @@ describe('forward', () => {
     expect(r.annotate).toEqual([]);
     expect(r.errors).toEqual([expect.stringContaining('Trend (v1) 2026-01-07')]);
     expect(run(used, []).annotate).toEqual([]);
+  });
+
+  it('stand-in corrections: every entry that used it, waiting for unresolved stand-ins', () => {
+    const standIn: ResolvedStandIn = {
+      ticker: 'AAA',
+      date: '2026-01-07',
+      deviation: 0.01,
+      runId: 'r1',
+      createdAt: '2026-01-07T21:30:00.000Z',
+      resolvedRunId: 'r3',
+      resolvedAt: '2026-01-09T21:30:00.000Z',
+    };
+    const e = (date: string, runId: string) => ({
+      date,
+      allocation: 'Risk on',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      runId,
+    });
+    // D in the recording run, D+1 in the run between, D+2 in the resolving run.
+    const record = [e('2026-01-06', 'r0'), e('2026-01-07', 'r1'), e('2026-01-08', 'r2')];
+    record[2]!.createdAt = '2026-01-08T21:30:00.000Z';
+    record.push(e('2026-01-09', 'r3'));
+    const run = (unresolved: { ticker: string; date: string }[]) =>
+      standInCorrections({
+        version: 'Trend (v1)',
+        deps: ['AAA', 'AAA2'],
+        record,
+        corrected: [standIn],
+        unresolved,
+        annotated: [],
+      });
+    expect(run([]).annotate.map((a) => a.recorded.date)).toEqual(['2026-01-07', '2026-01-08']);
+    // Another dependency's stand-in still unresolved on D+1: D is annotated, D+1 waits.
+    const waiting = run([{ ticker: 'AAA2', date: '2026-01-08' }]);
+    expect(waiting.annotate.map((a) => a.recorded.date)).toEqual(['2026-01-07']);
+    expect(waiting.deferred).toBe(1);
+    // On or before D: both wait. A ticker the version does not read: none waits.
+    expect(run([{ ticker: 'AAA2', date: '2026-01-02' }])).toMatchObject({
+      annotate: [],
+      deferred: 2,
+    });
+    expect(run([{ ticker: 'BBB', date: '2026-01-02' }]).annotate).toHaveLength(2);
   });
 
   it('reads only ISO 8601 instants with a zone', () => {

@@ -152,6 +152,8 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       // stand-in this run resolved never reads as "the engine decides differently").
       const c = await annotateStandInCorrections(db, runId);
       log.info(`Stand-in corrections: ${c.annotations} new annotations`);
+      // A correction waiting for another unresolved stand-in is annotated by a later run.
+      if (c.deferred > 0) log.info(`Stand-in corrections waiting: ${c.deferred}`);
       // Whether an entry used a corrected stand-in is unknown: nothing annotated on a guess;
       // the run is incomplete and the admins hear which.
       if (c.errors.length > 0) {

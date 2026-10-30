@@ -508,6 +508,11 @@ interface RecomputeDetail {
 /** A `stand_in_corrected` annotation's detail, as `annotateStandInCorrections` writes it. */
 export interface StandInCorrectedDetail {
   ticker: string;
+  /**
+   * The stand-in's date: the entry's own, or an earlier one its lookback read. Annotations
+   * written before this field existed were on the stand-in day's entry: read as the entry's date.
+   */
+  standInDate: TradingDate;
   /** |primary close / stand-in close - 1|, a fraction (above the layer B close tolerance). */
   deviation: number;
   recordedAllocation: string;
@@ -516,28 +521,41 @@ export interface StandInCorrectedDetail {
 }
 
 /**
- * The detail read back, or null when it is not one `annotateStandInCorrections` writes (a
- * deviation that is not a finite non-negative number, a missing allocation, or `differs` not
- * matching the two allocations): such an annotation is reported, never told with a guessed value.
+ * The detail of an annotation on `date` read back, or null when it is not one
+ * `annotateStandInCorrections` writes (a deviation that is not a finite non-negative number, a
+ * missing allocation, `differs` not matching the two allocations, a stand-in date that is not a
+ * date on or before the entry's): such an annotation is reported, never told with a guessed value.
  */
-export function standInDetail(detail: unknown): StandInCorrectedDetail | null {
+export function standInDetail(detail: unknown, date: TradingDate): StandInCorrectedDetail | null {
   const d = detail as Partial<Record<keyof StandInCorrectedDetail, unknown>> | null;
   if (!d || typeof d !== 'object') return null;
   const { ticker, deviation, recordedAllocation: rec, correctedAllocation: cor, differs } = d;
+  const standInDate = d.standInDate ?? date;
   if (typeof ticker !== 'string' || ticker === '') return null;
   if (typeof deviation !== 'number' || !Number.isFinite(deviation) || deviation < 0) return null;
   if (typeof rec !== 'string' || typeof cor !== 'string' || rec === '' || cor === '') return null;
   if (typeof differs !== 'boolean' || differs !== (rec !== cor)) return null;
-  return { ticker, deviation, recordedAllocation: rec, correctedAllocation: cor, differs };
+  if (typeof standInDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(standInDate)) return null;
+  if (standInDate > date) return null;
+  return {
+    ticker,
+    standInDate,
+    deviation,
+    recordedAllocation: rec,
+    correctedAllocation: cor,
+    differs,
+  };
 }
 
 /**
  * The stand-in correction alert's text (requirements 04, the stand-in rule 4): "D's signal used a
- * secondary price that was off by X; with the corrected price it would have been Y." It is about
- * a past day: the corrected allocation is never given as a signal or an instruction, and the
- * record is said to be annotated, not changed. The lines before the health line are cut to
- * `room` (the first lines kept); the health line (the version's latest recorded day) always ends
- * it. A channel too small even for the health line is cut at the end by `deliver`.
+ * secondary price that was off by X; with the corrected price it would have been Y." X is the
+ * stored deviation, |primary / stand-in - 1|, so it is worded as how far the primary's price
+ * differed from the stand-in. It is about a past day: the corrected allocation is never given as
+ * a signal or an instruction, and the record is said to be annotated, not changed. `more`: other
+ * corrections of the version told in the same message (counted, each annotated). The lines before
+ * the health line are cut to fit (the first lines kept); the health line (the version's latest
+ * recorded day) always ends it. A channel too small even for that is cut at the end by `deliver`.
  */
 export function standInCorrectedText(
   t: Translate,
@@ -548,6 +566,7 @@ export function standInCorrectedText(
     detail: StandInCorrectedDetail;
     /** The data health of the version's latest recorded day, or undefined without one. */
     health?: { status: string; date: TradingDate };
+    more?: number;
   },
   /** The channel's longest message. */
   max: number,
@@ -561,16 +580,26 @@ export function standInCorrectedText(
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(d.deviation);
-  const values = { strategy: o.name, date: o.date, ticker: d.ticker, deviation };
+  const values = {
+    strategy: o.name,
+    date: o.date,
+    ticker: d.ticker,
+    standInDate: d.standInDate,
+    deviation,
+  };
   const lines = [
     t('alerts.standInCorrected.title', values),
-    t('alerts.standInCorrected.body', values),
+    t(
+      d.standInDate === o.date ? 'alerts.standInCorrected.body' : 'alerts.standInCorrected.earlier',
+      values,
+    ),
     d.differs
       ? t('alerts.standInCorrected.differs', {
           recorded: name(d.recordedAllocation),
           corrected: name(d.correctedAllocation),
         })
       : t('alerts.standInCorrected.same', { recorded: name(d.recordedAllocation) }),
+    ...(o.more ? [t('alerts.standInCorrected.more', { count: o.more })] : []),
     t('alerts.standInCorrected.pastDay'),
   ].join('\n');
   // Unknown stays unknown: without a recorded day the status is `unknown`, never green.
@@ -582,17 +611,33 @@ export function standInCorrectedText(
 }
 
 export interface StandInAlertSummary extends AlertSummary {
-  /** Annotations whose detail does not read back (`standInDetail`): not told, reported. */
+  /**
+   * Annotations whose detail does not read back (`standInDetail`) and whose admin alert has not
+   * been delivered yet: the run is incomplete until it is.
+   */
   errors: string[];
+}
+
+/**
+ * The `alerts_sent` subject of one correction: version, ticker and, for a later entry than the
+ * stand-in day, the stand-in's date (with the date and type: once per version, entry date,
+ * ticker and stand-in date, as the annotations are). The stand-in day's own keeps the form it
+ * had before later entries were annotated, so what was told then is not told again.
+ */
+export function standInSubject(versionId: string, d: StandInCorrectedDetail, date: TradingDate) {
+  const base = `stand_in:${versionId}:${d.ticker}`;
+  return d.standInDate === date ? base : `${base}@${d.standInDate}`;
 }
 
 /**
  * Every `stand_in_corrected` annotation not yet told (requirements 04, the stand-in rule 4; 11:
  * every alert states the data health, in the recipient's language, idempotent). Driven by the
- * annotations and `alerts_sent`, so a failed delivery or a run that stopped is caught up at the
- * next run. One message per annotation, keyed (version and ticker, date, type): annotations are
- * once per version, date and ticker. A user's version goes to its owner's channels (as the
- * strategy alerts do); a library version (no owner) to the admins' channels. Not sent in a drill.
+ * annotations and `alerts_sent`, so a failed delivery, a run that stopped or a channel added
+ * later is caught up at the next run. A user's version goes to its owner's channels (as the
+ * strategy alerts do); a library version (no owner) to the admins' channels. Per channel and
+ * version one message: the newest correction (latest entry date) in full, the others counted,
+ * every key recorded once it is delivered. An annotation that does not read back is told to the
+ * admins once (keyed by its id), never with a guessed value. Not sent in a drill.
  */
 export async function sendStandInCorrections(
   db: Db,
@@ -606,43 +651,105 @@ export async function sendStandInCorrections(
     if (notes.length === 0) continue;
     const last = await lastEntry(db, version.id);
     const health = last && { status: last.dataStatus, date: last.date };
+    const readable: {
+      id: number;
+      date: TradingDate;
+      detail: StandInCorrectedDetail;
+      key: Alert['key'];
+    }[] = [];
     for (const a of notes) {
-      const detail = standInDetail(a.detail);
-      if (!detail) {
-        summary.errors.push(
-          `${version.name} (${version.id}) ${a.date}: stand-in correction annotation ${a.id} ` +
-            'does not read back; not told',
-        );
-        continue;
-      }
-      const key = {
-        subject: `stand_in:${version.id}:${detail.ticker}`,
-        date: a.date,
-        type: 'stand_in_corrected' as const,
-      };
-      const text = (t: Translate, language: string, channel: Target) =>
-        standInCorrectedText(
-          t,
-          language,
-          { name: version.name, date: a.date, detail, ...(health && { health }) },
-          o.notifiers.find((n) => n.info.key === channel.type)?.info.maxLength ?? Infinity,
-        );
-      if (!version.ownerId) {
-        // The status passed only spares the overall-health read: the message states the
-        // version's own latest day instead of the admins' health line.
-        await eachAdminChannel(db, o, 'unknown', async (t, channel, _line, language) => {
-          await deliver(db, o, channel, { key, text: text(t, language, channel) }, summary, t);
+      const detail = standInDetail(a.detail, a.date);
+      if (detail) {
+        const subject = standInSubject(version.id, detail, a.date);
+        readable.push({
+          id: a.id,
+          date: a.date,
+          detail,
+          key: { subject, date: a.date, type: 'stand_in_corrected' },
         });
         continue;
       }
-      const owner = await ownerOf(db, o, owners, version.ownerId);
-      for (const channel of owner.targets) {
-        const alert = { key, text: text(owner.t, owner.language, channel) };
-        await deliver(db, o, channel, alert, summary, owner.t);
-      }
+      await reportUnreadable(db, o, summary, { version, id: a.id, date: a.date });
     }
+    if (readable.length === 0) continue;
+    // Newest first: the latest entry date, then the latest annotation.
+    readable.sort((x, y) => (x.date === y.date ? y.id - x.id : x.date < y.date ? 1 : -1));
+    const tell = async (t: Translate, language: string, channel: Target) => {
+      const pending: typeof readable = [];
+      for (const n of readable) if (!(await alertSent(db, channel, n.key))) pending.push(n);
+      const [newest] = pending;
+      if (!newest) return;
+      const max = o.notifiers.find((n) => n.info.key === channel.type)?.info.maxLength ?? Infinity;
+      const text = standInCorrectedText(
+        t,
+        language,
+        {
+          name: version.name,
+          date: newest.date,
+          detail: newest.detail,
+          more: pending.length - 1,
+          ...(health && { health }),
+        },
+        max,
+      );
+      const keys = pending.map((n) => n.key);
+      await deliver(db, o, channel, { key: newest.key, keys, text }, summary, t);
+    };
+    if (!version.ownerId) {
+      // The status passed only spares the overall-health read: the message states the
+      // version's own latest day instead of the admins' health line.
+      await eachAdminChannel(db, o, 'unknown', (t, channel, _line, language) =>
+        tell(t, language, channel),
+      );
+      continue;
+    }
+    const owner = await ownerOf(db, o, owners, version.ownerId);
+    for (const channel of owner.targets) await tell(owner.t, owner.language, channel);
   }
   return summary;
+}
+
+/**
+ * An annotation that does not read back, told to the admins once (keyed by its id). The run is
+ * incomplete until that alert is on record for some admin channel (none yet, or every delivery
+ * failed): the error names the annotation, so the job-failure alert and job_runs.error do too.
+ */
+async function reportUnreadable(
+  db: Db,
+  o: AlertOptions,
+  summary: StandInAlertSummary,
+  a: { version: { id: string; name: string }; id: number; date: TradingDate },
+) {
+  const subject = `stand_in_unreadable:${a.id}`;
+  const sent = await sendAdminAlert(db, {
+    ...o,
+    date: a.date,
+    subject,
+    type: 'stand_in_corrected',
+    lines: (t) => [
+      t('alerts.standInUnreadable.title'),
+      t('alerts.standInUnreadable.body', {
+        version: `${a.version.name} (${a.version.id})`,
+        date: a.date,
+        id: String(a.id),
+      }),
+    ],
+  });
+  summary.sent += sent.sent;
+  summary.failed.push(...sent.failed);
+  const [told] = await db
+    .select({ id: schema.alertsSent.id })
+    .from(schema.alertsSent)
+    .where(
+      and(eq(schema.alertsSent.subject, subject), eq(schema.alertsSent.type, 'stand_in_corrected')),
+    )
+    .limit(1);
+  if (!told) {
+    summary.errors.push(
+      `${a.version.name} (${a.version.id}) ${a.date}: stand-in correction annotation ${a.id} ` +
+        'does not read back; not told, and the admins not told yet',
+    );
+  }
 }
 
 async function ownerOf(db: Db, o: AlertOptions, owners: Owners, ownerId: string) {

@@ -92,11 +92,17 @@
     },
     "standInCorrected": {
       "title": "{strategy}: correction to the signal of {date}",
-      "body": "The signal of {date} used a secondary price for {ticker} that was off by {deviation} from the primary's price, which arrived later.",
+      "body": "The signal of {date} used a secondary price for {ticker}; the primary's price, which arrived later, differed from it by {deviation}.",
+      "earlier": "The signal of {date} read a secondary price for {ticker} on {standInDate}; the primary's price, which arrived later, differed from it by {deviation}.",
       "differs": "Recorded allocation: {recorded}. With the corrected price it would have been {corrected}. The record is annotated, not changed.",
       "same": "Recorded allocation: {recorded}. With the corrected price it would have been the same: the signal would not have changed.",
+      "more": "Other corrections of this strategy not told before: {count} (each is annotated in the record).",
       "pastDay": "This is about a past day, not a new signal: the latest signal gives the current allocation.",
       "healthDate": "(Latest recorded day, {date}.)"
+    },
+    "standInUnreadable": {
+      "title": "Saku: a stand-in correction annotation cannot be read",
+      "body": "{version}, {date}: annotation {id} does not read back, so its correction is not told. The record is unchanged; find the cause."
     },
     "revisions": {
       "title": "Saku: the weekly refetch changed {count} stored values",
