@@ -936,9 +936,10 @@ export async function standInOn(db: Db, symbolId: number, date: TradingDate) {
 
 /**
  * Every stand-in the primary has replaced (resolved), with its ticker, oldest date first: what the
- * forward step checks for corrections still to annotate (requirements 04, the stand-in rule).
- * `createdAt` is when it was first recorded, `resolvedAt` when the primary replaced it (both ISO
- * 8601 instants, written by the process clock).
+ * stand-in correction step checks for corrections still to annotate (requirements 04, the
+ * stand-in rule). `runId` and `createdAt` are the run and time it was first recorded (a later run
+ * may replace its close while unresolved, not these), `resolvedRunId` and `resolvedAt` the run and
+ * time the primary replaced it (ISO 8601 instants, written by the process clock).
  */
 export async function resolvedStandIns(db: Db) {
   return db
@@ -946,7 +947,9 @@ export async function resolvedStandIns(db: Db) {
       ticker: symbols.ticker,
       date: standIns.date,
       deviation: standIns.deviation,
+      runId: standIns.runId,
       createdAt: standIns.createdAt,
+      resolvedRunId: standIns.resolvedRunId,
       resolvedAt: standIns.resolvedAt,
     })
     .from(standIns)

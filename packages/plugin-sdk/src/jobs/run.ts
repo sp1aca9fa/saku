@@ -30,7 +30,7 @@ import {
   sendStrategyAlerts,
 } from './alerts';
 import { anchor } from './anchor';
-import { forward, recompute } from './forward';
+import { annotateStandInCorrections, forward, recompute } from './forward';
 import {
   DAILY_OVERLAP,
   countsForRun,
@@ -147,6 +147,17 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     let valueRevisions: Parameters<typeof sendRevisions>[1]['revisions'] = [];
     /** The current engine must reproduce the record, or each difference is annotated and told. */
     const recomputeAndTell = async () => {
+      // First the corrected stand-ins (a day one explains is not a recompute difference, so a
+      // stand-in this run resolved never reads as "the engine decides differently").
+      const c = await annotateStandInCorrections(db, runId);
+      log.info(`Stand-in corrections: ${c.annotations} new annotations`);
+      // Whether an entry used a corrected stand-in is unknown: nothing annotated on a guess;
+      // the run is incomplete and the admins hear which.
+      if (c.errors.length > 0) {
+        log.warn('Stand-in corrections not checked', { errors: c.errors });
+        markIncomplete('stand-in corrections');
+        failures.push(...c.errors);
+      }
       const r = await recompute(db, { runId, code: o.code });
       log.info(`Recomputed ${r.checked} recorded days: ${r.differences.length} new differences`);
       if (r.differences.length > 0) {
@@ -279,9 +290,6 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       else {
         log.info(
           `Forward records: ${f.appended} new entries, ${f.safeStateDays} on the safe state`,
-          {
-            annotations: f.annotations,
-          },
         );
         for (const t of f.today) log.info(`${t.version}: ${t.allocation} (${t.dataStatus})`, t);
         // A stored version that no longer parses was skipped: the run is not complete, and the
@@ -294,13 +302,6 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
             notParsing.add(e.version);
             failures.push(`${e.version}: definition does not parse: ${e.error}`);
           }
-        }
-        // A corrected stand-in whether an entry used it is unknown: nothing annotated on a
-        // guess; the run is incomplete and the admins hear which.
-        if (f.standInErrors.length > 0) {
-          log.warn('Forward: stand-in corrections not checked', { errors: f.standInErrors });
-          markIncomplete('forward');
-          failures.push(...f.standInErrors);
         }
         // Undelivered alerts are retried at the next check (sent ones are not repeated).
         const sent = await sendStrategyAlerts(db, { ...alerting, sessions });

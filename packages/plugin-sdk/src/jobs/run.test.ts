@@ -36,6 +36,8 @@ const barSource = (
   broken = false,
   /** A close the source now reports differently (a late correction). */
   revise?: { date: string; factor: number },
+  /** A session the source has no bar for (yet). */
+  omit?: string,
 ): BarSource & { calls: number } => {
   const s = {
     info: testInfo(key, 'bar'),
@@ -45,7 +47,7 @@ const barSource = (
       if (broken) throw new Error(`${key}: HTTP 500`);
       const at = (i: number) => closes[i]! * (DATES[i] === revise?.date ? revise!.factor : 1);
       return DATES.flatMap((date, i) =>
-        date >= from && date <= to
+        date >= from && date <= to && date !== omit
           ? [
               {
                 date,
@@ -503,6 +505,115 @@ describe('a weekly run whose recompute cannot evaluate a version', () => {
     expect(run!.error).toContain(line);
     const failure = sent.find((m) => m.target === 'ops' && m.text.includes('did not finish'));
     expect(failure!.text.split('\n').filter((l) => l === `- ${line}`)).toHaveLength(1);
+  });
+});
+
+describe('a stand-in the primary later corrects', () => {
+  const DAY = '2026-01-15';
+  const run1 = (notifier: Notifier) =>
+    options(notifier, {
+      target: DAY,
+      now: new Date('2026-01-16T01:30:00Z'),
+      clock: () => new Date('2026-01-16T01:30:00Z'),
+      alerting: { ...options(notifier).alerting, date: DAY },
+    });
+  // Run 1: the primary lacks 01-15; the secondary's bar, 1% low, stands in. With it, AAA is
+  // below its 3-day average (Calm); on the primary's bar it is above (Risk on).
+  const withStandIn = () =>
+    plugins([
+      barSource('p', false, undefined, DAY),
+      barSource('s', false, { date: DAY, factor: 0.99 }),
+    ]);
+  type TestDb = Awaited<ReturnType<typeof setup>>['db'];
+  const notes = (db: TestDb, kind: string) =>
+    db.select().from(schema.forwardAnnotations).where(eq(schema.forwardAnnotations.kind, kind));
+
+  it('daily: annotates the entry that used it once, not the entry appended in the resolving run', async () => {
+    const { db, version } = await setup();
+    const { notifier, sent } = fakeNotifier();
+    await runJob(db, withStandIn(), run1(notifier));
+    const [stood] = await forwardRecord(db, version.id);
+    expect(stood).toMatchObject({ date: DAY, allocation: 'Calm', dataStatus: 'yellow' });
+    // Registered after run 1 (as of before 01-15's close): run 2, which resolves the stand-in,
+    // catches up 01-15 on the primary's bar.
+    const late = await registerVersion(db, {
+      ownerId: version.ownerId,
+      name: 'Late',
+      at: new Date('2026-01-14T22:00:00Z'),
+      strategy: (JSON.parse(version.canonicalJson) as { strategy: unknown }).strategy as never,
+    });
+    const r = await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier));
+    expect(r).toMatchObject({ ok: true });
+    expect((await forwardRecord(db, late.id)).map((e) => [e.date, e.allocation])).toEqual([
+      [DAY, 'Risk on'],
+      ['2026-01-16', 'Risk on'],
+    ]);
+    const corrected = await notes(db, 'stand_in_corrected');
+    expect(corrected.map((n) => [n.versionId, n.date])).toEqual([[version.id, DAY]]);
+    expect(corrected[0]!.detail).toMatchObject({
+      ticker: 'AAA',
+      recordedAllocation: 'Calm',
+      correctedAllocation: 'Risk on',
+      differs: true,
+    });
+    expect((corrected[0]!.detail as { deviation: number }).deviation).toBeCloseTo(1 / 0.99 - 1, 9);
+    // Explained by the correction, not told as an engine difference.
+    expect(await notes(db, 'recomputed')).toEqual([]);
+    expect(sent.some((m) => m.text.includes('decides'))).toBe(false);
+    // The record itself is untouched; a third run adds nothing.
+    expect((await forwardRecord(db, version.id))[0]).toEqual(stood);
+    await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier));
+    expect(await notes(db, 'stand_in_corrected')).toHaveLength(1);
+  });
+
+  it('weekly: the refetch resolves it; the correction is annotated before recompute', async () => {
+    const { db, version } = await setup();
+    const { notifier, sent } = fakeNotifier();
+    await runJob(db, withStandIn(), run1(notifier));
+    const r = await runJob(
+      db,
+      plugins([barSource('p'), barSource('s')]),
+      options(notifier, { job: 'weekly' }),
+    );
+    expect(r).toMatchObject({ ok: true });
+    const corrected = await notes(db, 'stand_in_corrected');
+    expect(
+      corrected.map((n) => [n.versionId, n.date, (n.detail as { differs: boolean }).differs]),
+    ).toEqual([[version.id, DAY, true]]);
+    // Without the correction first, recompute would annotate 01-15 and alert the admins.
+    expect(await notes(db, 'recomputed')).toEqual([]);
+    expect(sent.some((m) => m.text.includes('decides'))).toBe(false);
+  });
+
+  it('a stand-in timestamp that is not an instant: the run is incomplete, the admins told which', async () => {
+    const { db, version } = await setup();
+    const [aaa] = await db.select().from(schema.symbols).where(eq(schema.symbols.ticker, 'AAA'));
+    // Stored outside a run, resolved 1% off, its resolution time without a zone.
+    await db.insert(schema.standIns).values({
+      symbolId: aaa!.id,
+      date: DAY,
+      source: 's',
+      close: 99,
+      band: 0.005,
+      basis: 'unchecked',
+      createdAt: '2026-01-15T21:30:00.000Z',
+      primaryClose: 100,
+      deviation: 100 / 99 - 1,
+      resolvedAt: '2026-01-08 21:30:00',
+    });
+    const { notifier, sent } = fakeNotifier();
+    const r = await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier));
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('incomplete: stand-in corrections');
+    const line =
+      "AAA 2026-01-15: the stand-in's timestamps are not instants (created " +
+      '2026-01-15T21:30:00.000Z, resolved 2026-01-08 21:30:00); its correction is not annotated';
+    expect(r.error).toContain(line);
+    const failure = sent.find((m) => m.target === 'ops' && m.text.includes('did not finish'));
+    expect(failure!.text.split('\n')).toContain(`- ${line}`);
+    // Nothing annotated on a guess; the entries are recorded.
+    expect(await notes(db, 'stand_in_corrected')).toEqual([]);
+    expect((await forwardRecord(db, version.id)).map((e) => e.date)).toEqual([DAY, '2026-01-16']);
   });
 });
 

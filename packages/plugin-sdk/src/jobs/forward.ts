@@ -1,9 +1,8 @@
 // The daily forward record (requirements 05, A2): for every registered version, each trading day
 // since the last entry (catch-up) whose close came after registration, the decision with its
 // data health, chained to the previous entry. Nothing runs before `forward_records_from` is set
-// (the A1 gate). Stand-ins the primary later corrected are annotated, never edited, caught up
-// from the database (not one run's list), so a version skipped in the resolving run is annotated
-// in a later one.
+// (the A1 gate). Stand-ins the primary later corrected are annotated, never edited, by their own
+// step (`annotateStandInCorrections`), caught up from the database before every recompute.
 import {
   type RawBar,
   type StrategyDay,
@@ -48,7 +47,6 @@ export interface ForwardSummary {
   skipped?: string;
   appended: number;
   safeStateDays: number;
-  annotations: number;
   /** Today's decisions, for the log (and the alerts, later in A2). */
   today: { version: string; allocation: string; dataStatus: string; reasons: string[] }[];
   /**
@@ -58,12 +56,6 @@ export interface ForwardSummary {
    * once the definition parses again.
    */
   errors: { version: string; error: string }[];
-  /**
-   * Corrected stand-ins whether an entry used them is unknown (a stored timestamp that is not an
-   * ISO 8601 instant): nothing is annotated on a guess, the run is incomplete and the admins'
-   * job-failure alert names each one. One line each.
-   */
-  standInErrors: string[];
 }
 
 /**
@@ -106,10 +98,8 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   const summary: ForwardSummary = {
     appended: 0,
     safeStateDays: 0,
-    annotations: 0,
     today: [],
     errors: [],
-    standInErrors: [],
   };
   const from = await getSetting(db, 'forward_records_from');
   if (!from) return { ...summary, skipped: 'forward records not started (forward_records_from)' };
@@ -118,12 +108,6 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   const cashRate = await cashRateReader(db);
 
   const healthOn = (rows: Rows, date: TradingDate) => healthOf(db, symbolIds, rows, date);
-  // Resolved stand-ins off the primary by more than the layer B close tolerance (as verify
-  // reports them); those within it are not annotated.
-  const corrected = (await resolvedStandIns(db)).filter(
-    (s) => s.deviation !== null && s.deviation > TOLERANCE.close,
-  );
-  const standInErrors = new Set<string>();
 
   for (const version of await allVersions(db)) {
     const parsed = parseVersion(version);
@@ -189,24 +173,64 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
         });
       }
     }
+  }
+  return summary;
+}
 
-    // A stand-in the primary has since corrected: would the day's decision have differed?
-    const pending =
-      corrected.length > 0
-        ? standInCorrections({
-            version: `${version.name} (${version.id})`,
-            deps,
-            record: await forwardRecord(db, version.id),
-            corrected,
-            annotated: (await annotationsOf(db, version.id, 'stand_in_corrected')).map((a) => ({
-              date: a.date,
-              ticker: (a.detail as { ticker?: unknown }).ticker,
-            })),
-          })
-        : { annotate: [], errors: [] };
-    for (const e of pending.errors) standInErrors.add(e);
+export interface StandInCorrectionSummary {
+  /** Annotations added by this call. */
+  annotations: number;
+  /**
+   * Corrected stand-ins whether an entry used them is unknown (a stored timestamp that is not an
+   * ISO 8601 instant): nothing is annotated on a guess; the caller reports each line (the run is
+   * incomplete and the admins' job-failure alert names it).
+   */
+  errors: string[];
+}
+
+/**
+ * The stand-in correction step (requirements 04, the stand-in rule: forward records that used a
+ * stand-in are annotated once the primary arrives, never edited). For every registered version
+ * that parses, each resolved stand-in off the primary by more than the layer B close tolerance
+ * (as verify reports them; those within it are not annotated) on a ticker it depends on, whose
+ * recorded entry used the stand-in (`standInCorrections`), gets one `stand_in_corrected`
+ * annotation: the recorded allocation against the decision on the corrected bars (only bars
+ * dated <= the entry's date, all green: the primary's bar is there now).
+ *
+ * Caught up from `stand_ins` (not one run's list), so a version skipped in the resolving run is
+ * annotated in a later one; idempotent. Run it before every recompute (daily, weekly, `pnpm
+ * strategy recompute`): recompute skips the days a correction explains, so a resolved stand-in
+ * that flips a day is never told as "the engine decides differently". A version that does not
+ * parse is skipped here; the forward step and recompute report it.
+ */
+export async function annotateStandInCorrections(
+  db: Db,
+  runId: string | null,
+): Promise<StandInCorrectionSummary> {
+  const summary: StandInCorrectionSummary = { annotations: 0, errors: [] };
+  const corrected = (await resolvedStandIns(db)).filter(
+    (s) => s.deviation !== null && s.deviation > TOLERANCE.close,
+  );
+  if (corrected.length === 0) return summary;
+  const { loadRows, barsOf } = await reader(db);
+  const errors = new Set<string>();
+  for (const version of await allVersions(db)) {
+    const parsed = parseVersion(version);
+    if ('error' in parsed) continue;
+    const { strategy } = parsed;
+    const deps = dependencies(strategy);
+    const pending = standInCorrections({
+      version: `${version.name} (${version.id})`,
+      deps,
+      record: await forwardRecord(db, version.id),
+      corrected,
+      annotated: (await annotationsOf(db, version.id, 'stand_in_corrected')).map((a) => ({
+        date: a.date,
+        ticker: (a.detail as { ticker?: unknown }).ticker,
+      })),
+    });
+    for (const e of pending.errors) errors.add(e);
     for (const { standIn, recorded } of pending.annotate) {
-      // Only bars dated <= the entry's date, all green (the primary's bar is there now).
       const bars = barsOf(await loadRows(deps, standIn.date));
       const now = forwardDecision(strategy, standIn.date, bars, allGreen(deps));
       await annotate(db, {
@@ -215,17 +239,19 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
         kind: 'stand_in_corrected',
         detail: {
           ticker: standIn.ticker,
+          // Against the stand-in's last stored close: a later run may have replaced the close
+          // an entry used while the stand-in was unresolved (docs/data-pipeline.md).
           deviation: standIn.deviation,
           recordedAllocation: recorded.allocation,
           correctedAllocation: now.allocation,
           differs: now.allocation !== recorded.allocation,
         },
-        runId: o.runId,
+        runId,
       });
       summary.annotations++;
     }
   }
-  summary.standInErrors = [...standInErrors];
+  summary.errors = [...errors];
   return summary;
 }
 
@@ -234,7 +260,11 @@ export interface ResolvedStandIn {
   ticker: string;
   date: TradingDate;
   deviation: number | null;
+  /** The run that first recorded it (null for rows stored outside a run). */
+  runId: string | null;
   createdAt: string;
+  /** The run in which the primary replaced it. */
+  resolvedRunId: string | null;
   resolvedAt: string | null;
 }
 
@@ -256,16 +286,18 @@ export function instantOf(text: string | null): number {
  * annotations). One per stand-in on a ticker the version depends on, on a date it recorded,
  * whose entry used the stand-in, and not annotated yet for that date and ticker (idempotent).
  *
- * The entry used the stand-in when it was appended after the stand-in was first recorded and
- * before the primary resolved it: verify records and resolves stand-ins before the forward step
- * appends (runs hold the jobs lock), so an entry appended in the resolving run used the
- * primary's bar, and one appended before the stand-in existed used an earlier bar. A timestamp
- * that is not an instant leaves that unknown: an error, nothing annotated.
+ * Whether the entry used the stand-in is decided by run ids first, since verify records and
+ * resolves stand-ins before the forward step appends within a run (runs hold the jobs lock):
+ * an entry appended in the resolving run used the primary's bar; one appended in the run that
+ * first recorded the stand-in used it. Only an entry from another run (or without a run) is
+ * placed by time: it used the stand-in when appended at or after the stand-in was first recorded
+ * and before the primary resolved it (compared as instants). A timestamp that is not an instant
+ * then leaves that unknown: an error, nothing annotated.
  */
 export function standInCorrections(o: {
   version: string;
   deps: string[];
-  record: Pick<ForwardEntry, 'date' | 'allocation' | 'createdAt'>[];
+  record: Pick<ForwardEntry, 'date' | 'allocation' | 'createdAt' | 'runId'>[];
   corrected: ResolvedStandIn[];
   annotated: { date: string; ticker: unknown }[];
 }): {
@@ -280,6 +312,11 @@ export function standInCorrections(o: {
     const recorded = byDate.get(s.date);
     if (!recorded) continue;
     if (done.has(`${s.date} ${s.ticker}`)) continue;
+    if (recorded.runId !== null && recorded.runId === s.resolvedRunId) continue;
+    if (recorded.runId !== null && recorded.runId === s.runId) {
+      out.annotate.push({ standIn: s, recorded });
+      continue;
+    }
     const from = instantOf(s.createdAt);
     const until = instantOf(s.resolvedAt);
     if (Number.isNaN(from) || Number.isNaN(until)) {

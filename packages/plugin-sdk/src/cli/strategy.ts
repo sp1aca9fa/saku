@@ -7,8 +7,8 @@
 //   pnpm strategy show <version id> [--days 10]           the latest forward entries
 //   pnpm strategy verify                                   recompute every hash chain
 //   pnpm strategy recompute                                the current engine against the record
-//                                                          (differences annotated; the daily run
-//                                                          does this too)
+//                                                          (corrected stand-ins, then differences
+//                                                          annotated; the daily run does this too)
 //   pnpm journal add <version id> <signal date> done|skipped|delayed --user <username>
 //                    [--date <action date>] [--note <text>]
 //   pnpm journal list <version id> --user <username>
@@ -44,7 +44,7 @@ import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA, verifyToken } from '../jobs/anchor';
-import { recompute } from '../jobs/forward';
+import { annotateStandInCorrections, recompute } from '../jobs/forward';
 import { codeVersion } from '../code-version';
 import { loadPlugins, notifierContexts, providerUsageStore } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -146,6 +146,10 @@ if (tool === 'strategy' && command === 'check') {
   }
   process.exit(bad ? 1 : 0);
 } else if (tool === 'strategy' && command === 'recompute') {
+  // Corrected stand-ins first, as the runs do: a day one explains is not a recompute difference.
+  const c = await annotateStandInCorrections(db, null);
+  if (c.annotations) console.log(`${c.annotations} stand-in corrections annotated.`);
+  for (const e of c.errors) console.log(e);
   const r = await recompute(db, { runId: null, code: codeVersion() });
   for (const d of r.differences) {
     console.log(`${d.version} ${d.date}: recorded ${d.recorded}, now ${d.now} (annotated)`);
@@ -156,7 +160,7 @@ if (tool === 'strategy' && command === 'check') {
   }
   if (r.differences.length) console.log('The next daily run alerts the admins.');
   console.log(`${r.checked} recorded days, ${r.differences.length} new differences.`);
-  process.exit(r.differences.length || r.errors.length ? 1 : 0);
+  process.exit(r.differences.length || r.errors.length || c.errors.length ? 1 : 0);
 } else if (tool === 'journal' && command === 'add') {
   const [versionId, signalDate, action] = rest;
   if (!versionId || !signalDate || !isTradingDate(signalDate))
