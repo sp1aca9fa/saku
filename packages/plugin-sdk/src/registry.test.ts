@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  formerKeys,
   loadPlugins,
   notifierContexts,
   pluginContext,
@@ -135,6 +136,44 @@ describe('plug-in registry', () => {
     ).toThrow(/same limits/);
   });
 
+  it('formerKeys: per provider, the keys of plug-ins declaring it under another id', () => {
+    const keys = formerKeys([
+      { key: 'acme-bars', kind: 'bar', provider: 'acme' },
+      { key: 'acme-bars', kind: 'fx', provider: 'acme' },
+      { key: 'acme', kind: 'series', provider: 'acme' },
+      { key: 'acme-days', kind: 'calendar', provider: 'acme' },
+      { key: 'other', kind: 'bar' },
+    ]);
+    expect([...keys]).toEqual([['acme', ['acme-bars']]]);
+  });
+
+  it('providerQuotas: the guarded count loads the history of former keys too', async () => {
+    const asked: string[] = [];
+    const store: UsageStore = {
+      load: async (id) => {
+        asked.push(id);
+        return { requests: [], symbols: new Map() };
+      },
+      record: async () => {},
+    };
+    const quota = providerQuotas(store, undefined, new Map([['acme', ['acme-bars', 'acme-fx']]]));
+    const fetchImpl = (async () => new Response('{}')) as typeof fetch;
+    const a = new PoliteHttp({ fetchImpl, minDelayMs: 0 });
+    const b = new PoliteHttp({ fetchImpl, minDelayMs: 0 });
+    quota({ key: 'acme-bars', provider: 'acme' }, a);
+    quota({ key: 'acme-fx', provider: 'acme' }, b);
+    await b.json('https://example.test/a');
+    await a.json('https://example.test/a');
+    expect(asked).toEqual(['acme', 'acme-bars', 'acme-fx']);
+    // A client its context already guarded under the provider id gets them as well.
+    asked.length = 0;
+    const own = providerQuotas(undefined, undefined, new Map([['acme', ['acme-bars']]]));
+    const c = new PoliteHttp({ fetchImpl, usage: { provider: 'acme', store } });
+    own({ key: 'acme-bars', provider: 'acme' }, c);
+    await c.json('https://example.test/a');
+    expect(asked).toEqual(['acme', 'acme-bars']);
+  });
+
   it('a plug-in without limits can send (no declared limit)', async () => {
     const ctx = pluginContext(info, log, {
       env: {},
@@ -208,6 +247,26 @@ describe('notifierContexts', () => {
     }
     // Loaded once for the service (the channels share it), refused for both.
     expect(asked).toEqual(['fake']);
+  });
+
+  it('a channel the service refuses (429) stops only itself', async () => {
+    const notifier = {
+      info: { key: 'fake', kind: 'notifier' as const, name: 'Fake', termsUrl: 'x', maxLength: 10 },
+      validTarget: () => true,
+      send: async () => {},
+    };
+    const contexts = notifierContexts({ info() {}, warn() {} }, undefined, {
+      minDelayMs: 0,
+      fetchImpl: (async (url: string) =>
+        new Response('ok', { status: url.endsWith('/1') ? 429 : 200 })) as typeof fetch,
+    });
+    const c1 = contexts(notifier, 'c1');
+    const c2 = contexts(notifier, 'c2');
+    const c3 = contexts(notifier, 'c3');
+    await expect(c1.http.text('https://example.test/1')).rejects.toThrow(/HTTP 429/);
+    await expect(c2.http.text('https://example.test/2')).resolves.toBe('ok');
+    await expect(c2.http.text('https://example.test/1')).rejects.toThrow(/HTTP 429/);
+    await expect(c3.http.text('https://example.test/3')).resolves.toBe('ok');
   });
 
   it('channels of one service share its pace: together never above 80% of the limit', async () => {

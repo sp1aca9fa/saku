@@ -361,17 +361,20 @@ describe('ingest: quota guard across runs', () => {
      * A bar source (5 requests per ticker) and a series source (4 per series) on one fake clock;
      * `provider` set on both or neither. 80% of 10 per minute is 8.
      */
-    function pair(provider: string | undefined) {
+    function pair(
+      provider: string | undefined,
+      limits: PluginInfo['limits'] = { perMinute: 10 },
+      answer: (url: string) => Response = () => new Response('{}'),
+    ) {
       let clock = Date.parse('2026-01-17T01:00:00Z');
       const times: number[] = [];
-      const limits = { perMinute: 10 };
-      const ask = async (ctx: { http: PoliteHttp }, n: number) => {
-        for (let k = 0; k < n; k++) await ctx.http.json('https://example.test/x');
+      const ask = async (ctx: { http: PoliteHttp }, n: number, path: string) => {
+        for (let k = 0; k < n; k++) await ctx.http.json(`https://example.test/${path}`);
       };
       const bars: BarSource = {
         info: { ...info('acme-bars'), limits, ...(provider && { provider }) },
         async fetchBars(_t, _f, to, ctx) {
-          await ask(ctx, 5);
+          await ask(ctx, 5, 'bars');
           return [bar(to, 1)];
         },
       };
@@ -383,7 +386,7 @@ describe('ingest: quota guard across runs', () => {
           ...(provider && { provider }),
         },
         async fetchSeries(_id, _f, to, ctx) {
-          await ask(ctx, 4);
+          await ask(ctx, 4, 'series');
           return [{ date: to, value: 1 }];
         },
       };
@@ -395,15 +398,16 @@ describe('ingest: quota guard across runs', () => {
             clock += ms;
           },
           wallClock: () => 0,
-          fetchImpl: (async () => {
+          fetchImpl: (async (url: string) => {
             times.push(clock);
-            return new Response('{}');
+            return answer(url);
           }) as typeof fetch,
         }),
         now: new Date(),
         log,
       });
       return {
+        start: Date.parse('2026-01-17T01:00:00Z'),
         plugins: { ...emptyPlugins(), bars: [bars], series: [series] },
         context,
         times,
@@ -466,6 +470,129 @@ describe('ingest: quota guard across runs', () => {
         now: p.now,
       });
       expect(second.every((x) => x.stopped === undefined)).toBe(true);
+      expect(busiest(p.times)).toBeLessThanOrEqual(8);
+    });
+
+    it('a 429 to one source stops every source of the provider; a 403 only its own', async () => {
+      const db = await setup();
+      const p = pair('acme', undefined, () => new Response('', { status: 429 }));
+      const { usage, recorded } = blank();
+      const r = await ingest(db, p.plugins, {
+        ...options('daily'),
+        context: p.context,
+        now: p.now,
+        usage,
+      });
+      expect(r[0]!.stopped).toMatch(/HTTP 429 for https:\/\/example.test\/bars/);
+      expect(r[1]!.stopped).toMatch(/refused another source .*HTTP 429/);
+      expect(p.times).toHaveLength(1);
+      expect(recorded).toHaveLength(1);
+      // A 403 can refuse one endpoint or plan: the other source goes on.
+      const q = pair('acme', undefined, (url) =>
+        url.endsWith('/bars') ? new Response('not in plan', { status: 403 }) : new Response('{}'),
+      );
+      const s = await ingest(db, q.plugins, {
+        ...options('daily'),
+        context: q.context,
+        now: q.now,
+        usage,
+      });
+      expect(s[0]!.stopped).toMatch(/HTTP 403/);
+      expect(s[1]).toMatchObject({ ok: ['S1', 'S2', 'S3'] });
+    });
+
+    it('a provider newly declared: history stored under the old keys still paces and refuses', async () => {
+      const db = await setup();
+      const p = pair('acme', { perMinute: 10, symbolsPerMonth: 2 });
+      // Stored before the plug-ins declared 'acme': 8 requests (80% of 10) in the last minute,
+      // and BBB this month (80% of 2 symbols is 1), under the bar plug-in's own key.
+      const before = p.start - 1000;
+      await recordProviderRequest(db, { provider: 'acme-bars', at: before, symbol: 'BBB' });
+      for (let k = 0; k < 7; k++) {
+        await recordProviderRequest(db, { provider: 'acme-bars', at: before, symbol: null });
+      }
+      const r = await ingest(db, p.plugins, {
+        ...options('daily'),
+        context: p.context,
+        now: p.now,
+      });
+      expect(r[0]).toMatchObject({ ok: ['BBB'], failed: [{ item: 'AAA' }] });
+      expect(r[0]!.failed[0]!.error).toMatch(/1 of 2 symbols per 31 days used .*AAA is new/);
+      // The stored minute (its bucket ends 1 ms before the run) is full: the first request waits.
+      expect(p.times[0]).toBe(p.start + 60_000);
+      expect(busiest([...Array(8).fill(p.start - 1), ...p.times])).toBe(8);
+      // New rows only under the provider id; the old key's rows are left as stored.
+      const rows = await db.select().from(schema.providerUsage);
+      const minutes = (id: string) =>
+        rows
+          .filter((x) => x.provider === id && x.windowType === 'minute')
+          .reduce((n, x) => n + x.requestCount, 0);
+      expect(minutes('acme-bars')).toBe(8);
+      expect(minutes('acme')).toBe(p.times.length);
+      expect(new Set(rows.map((x) => x.provider))).toEqual(new Set(['acme', 'acme-bars']));
+    });
+
+    it('fault: unknown history stops every source of the provider, sending nothing', async () => {
+      const db = await setup();
+      const p = pair('acme');
+      const asked: string[] = [];
+      const usage: UsageStore = {
+        load: async (id) => {
+          asked.push(id);
+          throw new Error('database locked');
+        },
+        record: async () => {},
+      };
+      const r = await ingest(db, p.plugins, {
+        ...options('daily'),
+        context: p.context,
+        now: p.now,
+        usage,
+      });
+      expect(r.map((x) => x.ok.length)).toEqual([0, 0]);
+      for (const x of r)
+        expect(x.stopped).toMatch(/earlier requests of acme unknown: database locked/);
+      expect(p.times).toHaveLength(0);
+      expect(asked).toEqual(['acme']);
+    });
+
+    it('fault: a record failure on the second source leaves the first’s counts intact', async () => {
+      const db = await setup();
+      const p = pair('acme');
+      const rows: { provider: string; at: number }[] = [];
+      let failing = true;
+      const usage: UsageStore = {
+        load: async (id) => ({
+          requests: rows.filter((x) => x.provider === id).map((x) => x.at),
+          symbols: new Map(),
+        }),
+        record: async (provider, at) => {
+          // The bars' 10 requests are recorded; the series' first one cannot be.
+          if (failing && rows.length === 10) throw new Error('disk full');
+          rows.push({ provider, at });
+        },
+      };
+      const first = await ingest(db, p.plugins, {
+        ...options('daily'),
+        context: p.context,
+        now: p.now,
+        usage,
+      });
+      expect(first[0]).toMatchObject({ ok: ['AAA', 'BBB'] });
+      expect(first[0]!.stopped).toBeUndefined();
+      expect(first[1]!.stopped).toMatch(/request of acme not recorded: disk full/);
+      expect(p.times).toHaveLength(10);
+      expect(rows).toHaveLength(10);
+      // The next run counts the first source's requests: together still never above 8 a minute.
+      failing = false;
+      const second = await ingest(db, p.plugins, {
+        ...options('daily'),
+        context: p.context,
+        now: p.now,
+        usage,
+      });
+      expect(second.every((x) => x.stopped === undefined)).toBe(true);
+      expect(p.times).toHaveLength(32);
       expect(busiest(p.times)).toBeLessThanOrEqual(8);
     });
 

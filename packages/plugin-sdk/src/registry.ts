@@ -84,8 +84,9 @@ export function issuerPublishesOf(issuers: IssuerSource[] = []): Record<string, 
  *
  * A declared provider id has the form of a key, and plug-ins of one provider (`providerOf`,
  * notifiers by their key) declare the same limits: they share one count of requests, which
- * cannot honor two different limits (requirements 04 "Quota guard"). Calendar plug-ins send no
- * requests and are left out of this.
+ * cannot honor two different limits (requirements 04 "Quota guard"). Notifiers are grouped too:
+ * `provider_usage` is one namespace, so a notifier key equal to a data provider id is one count
+ * and must declare the same limits. Calendar plug-ins send no requests and are left out of this.
  */
 export function validateInfos(
   infos: (Pick<PluginInfo | NotifierInfo, 'key' | 'kind' | 'termsUrl' | 'limits'> &
@@ -152,15 +153,39 @@ export function providerOf(info: Pick<PluginInfo, 'key'> & Pick<Partial<PluginIn
 }
 
 /**
- * Within one run, the clients of all plug-ins of one provider share one count (`PoliteHttp.share`):
+ * Per provider id, the keys of the loaded plug-ins that declare it under another id: their
+ * requests were stored under those keys before they declared the provider, and still count
+ * (`PoliteHttp.alsoCount`). Calendars send no requests and are left out.
+ */
+export function formerKeys(
+  infos: (Pick<PluginInfo, 'key' | 'kind'> & Pick<Partial<PluginInfo>, 'provider'>)[],
+): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const info of infos) {
+    if (info.kind === 'calendar' || info.provider === undefined || info.provider === info.key) {
+      continue;
+    }
+    const keys = out.get(info.provider) ?? [];
+    if (!keys.includes(info.key)) keys.push(info.key);
+    out.set(info.provider, keys);
+  }
+  return out;
+}
+
+/**
+ * Within one run, the clients of all plug-ins of one provider share one count (`PoliteHttp.share`)
+ * and one block (a 429 or a challenge page answered to any stops them all; a 403 only its own):
  * the first client of a provider is guarded (with `usage`, unless its context already did) and
  * the later ones join it. Returns the function to call with each source's client before it sends
  * anything; it throws when a client cannot join (another provider's guard, different limits), so
- * that source sends nothing. `clock`: the run's clock, when injected.
+ * that source sends nothing. `clock`: the run's clock, when injected. `former`: per provider id,
+ * the keys its plug-ins were counted under before they declared it (`formerKeys` of the loaded
+ * plug-ins), whose stored history the guarded count loads too.
  */
 export function providerQuotas(
   usage?: UsageStore,
   clock?: () => number,
+  former: Map<string, string[]> = new Map(),
 ): (
   info: Pick<PluginInfo, 'key'> & Pick<Partial<PluginInfo>, 'provider'>,
   http: PoliteHttp,
@@ -177,6 +202,8 @@ export function providerQuotas(
       return;
     }
     if (usage && !http.guarded) http.guard({ provider, store: usage }, clock);
+    const keys = former.get(provider) ?? [];
+    if (http.guarded && keys.length > 0) http.alsoCount(keys);
     first.set(provider, http);
   };
 }
@@ -252,8 +279,9 @@ export function pluginContext(
 
 /**
  * Contexts for notifiers in one run: one client per channel, so a channel the service refuses
- * (403, 429) stops only itself; all of a notifier's channels share one count of requests, so the
- * service's pace and limits apply to them together (as they are recorded). No automatic retry,
+ * (403, 429, a challenge) stops only itself (`ownBlocks`); all of a notifier's channels share one
+ * count of requests, so the service's pace and limits apply to them together (as they are
+ * recorded). No automatic retry,
  * since a resent POST could deliver an alert twice (what failed is tried again at the next
  * check). `usage`: the quota guard's store, so the service's limits hold across runs (counted
  * under the notifier's key). `http`: client options (tests: a fake fetch and clock).
@@ -272,7 +300,7 @@ export function notifierContexts(
     if (!ctx) {
       const peer = first.get(notifier.info.key);
       ctx = pluginContext(notifier.info, log, {
-        http: { ...http, retries: 0, ...(peer && { shareQuotaWith: peer }) },
+        http: { ...http, retries: 0, ownBlocks: true, ...(peer && { shareQuotaWith: peer }) },
         ...(usage && { usage }),
       });
       if (!peer) first.set(notifier.info.key, ctx.http);

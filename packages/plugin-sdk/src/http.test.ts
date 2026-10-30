@@ -388,7 +388,7 @@ describe('PoliteHttp quota guard', () => {
     expect(() => fresh.guard({ provider: 'p', store })).toThrow(/already attached/);
   });
 
-  it('clients sharing a count: one ledger, guard, clock and symbols; refusals stay per client', async () => {
+  it('clients sharing a count: one ledger, guard, clock, symbols and block', async () => {
     const { store, rows } = memoryStore();
     const at = { now: 1_000_000 };
     let blockSecond = false;
@@ -425,11 +425,118 @@ describe('PoliteHttp quota guard', () => {
     await expect(third.json('https://example.test/c')).rejects.toThrow(
       /4 of 5 requests per minute/,
     );
-    // A block stops only the client it was answered to.
+    // A 429 is the provider's: it stops every client sharing the count, sending nothing more.
     at.now += 60_001;
     blockSecond = true;
     await expect(second.json('https://example.test/b')).rejects.toBeInstanceOf(BlockedError);
-    await first.json('https://example.test/a');
+    const recorded = rows.length;
+    const refused = first.json('https://example.test/a');
+    await expect(refused).rejects.toBeInstanceOf(BlockedError);
+    await expect(refused).rejects.toThrow(/refused another source .*HTTP 429 for .*\/b/);
+    await expect(second.json('https://example.test/b')).rejects.toThrow(/stopped for this run/);
+    expect(rows).toHaveLength(recorded);
+  });
+
+  it('a challenge page stops every client sharing the count; a 403 only its own', async () => {
+    const page = () => new Response('<title>Just a moment...</title>');
+    const forbidden = () => new Response('plan does not include this', { status: 403 });
+    const pair = (answer: () => Response) => {
+      const calls: string[] = [];
+      const fetchImpl = (async (url: string) => {
+        calls.push(url);
+        return url.includes('/b') ? answer() : ok();
+      }) as typeof fetch;
+      const first = new PoliteHttp({ fetchImpl, minDelayMs: 0 });
+      const second = new PoliteHttp({ fetchImpl, minDelayMs: 0, shareQuotaWith: first });
+      return { first, second, calls };
+    };
+    const challenged = pair(page);
+    await expect(challenged.second.text('https://example.test/b')).rejects.toBeInstanceOf(
+      BlockedError,
+    );
+    await expect(challenged.first.json('https://example.test/a')).rejects.toThrow(/challenge page/);
+    expect(challenged.calls).toHaveLength(1);
+    // A 403 can refuse one endpoint or plan: the sibling goes on.
+    const refused = pair(forbidden);
+    await expect(refused.second.json('https://example.test/b')).rejects.toThrow(/HTTP 403/);
+    await expect(refused.first.json('https://example.test/a')).resolves.toEqual({ a: 1 });
+    await expect(refused.second.json('https://example.test/b')).rejects.toThrow(/stopped/);
+  });
+
+  it('ownBlocks: a client that opted out keeps its refusals and ignores the others’', async () => {
+    const fetchImpl = (async (url: string) =>
+      url.includes('/b') ? new Response('', { status: 429 }) : ok()) as typeof fetch;
+    const first = new PoliteHttp({ fetchImpl, minDelayMs: 0 });
+    const second = new PoliteHttp({ fetchImpl, minDelayMs: 0 });
+    second.share(first, { ownBlocks: true });
+    const third = new PoliteHttp({
+      fetchImpl,
+      minDelayMs: 0,
+      shareQuotaWith: first,
+      ownBlocks: true,
+    });
+    await expect(second.json('https://example.test/b')).rejects.toBeInstanceOf(BlockedError);
+    await expect(first.json('https://example.test/a')).resolves.toEqual({ a: 1 });
+    await expect(third.json('https://example.test/a')).resolves.toEqual({ a: 1 });
+    // The first client's 429 stops itself; the opted-out ones go on.
+    await expect(first.json('https://example.test/b')).rejects.toBeInstanceOf(BlockedError);
+    await expect(third.json('https://example.test/a')).resolves.toEqual({ a: 1 });
+    await expect(second.json('https://example.test/a')).rejects.toThrow(/HTTP 429/);
+  });
+
+  it('counts the history stored under former keys; records under the provider id only', async () => {
+    const { store, rows } = memoryStore();
+    const at = { now: 10_000_000 };
+    // Stored under the plug-in's key before it declared the provider.
+    rows.push({ provider: 'acme-bars', at: at.now - 1000, symbol: 'OLD' });
+    rows.push({ provider: 'acme-bars', at: at.now - 900, symbol: null });
+    const limits = { perMinute: 3, symbolsPerMonth: 2 };
+    const sleeps: number[] = [];
+    const http = new PoliteHttp({
+      limits,
+      minDelayMs: 0,
+      wallClock: () => 0,
+      fetchImpl: ok as unknown as typeof fetch,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        at.now += ms;
+      },
+    });
+    http.guard({ provider: 'acme', store }, () => at.now);
+    http.alsoCount(['acme-bars', 'acme']);
+    // 80% of 2 symbols is 1: OLD counted under the old key, so a new one is refused.
+    await expect(http.forSymbol('NEW')).rejects.toBeInstanceOf(SymbolQuotaError);
+    await http.forSymbol('OLD');
+    // 80% of 3 per minute is 2, both used under the old key: the first request waits until the
+    // older one (1 s ago) leaves the minute.
+    await http.json('https://example.test/a');
+    expect(sleeps).toEqual([59_001]);
+    expect(rows.slice(2).map((r) => [r.provider, r.symbol])).toEqual([['acme', 'OLD']]);
+    expect(() => http.alsoCount(['late'])).toThrow(/after requests/);
+    expect(() => new PoliteHttp().alsoCount(['x'])).toThrow(/quota guard/);
+  });
+
+  it('history unknown under a former key sends nothing', async () => {
+    const { store } = memoryStore();
+    const failing: UsageStore = {
+      load: async (id, now) => {
+        if (id === 'acme-bars') throw new Error('database locked');
+        return store.load(id, now);
+      },
+      record: store.record,
+    };
+    const calls: string[] = [];
+    const http = new PoliteHttp({
+      usage: { provider: 'acme', store: failing, formerKeys: ['acme-bars'] },
+      fetchImpl: (async (url: string) => {
+        calls.push(url);
+        return ok();
+      }) as typeof fetch,
+    });
+    await expect(http.json('https://example.test/a')).rejects.toThrow(
+      /acme \(stored under acme-bars\) unknown: database locked/,
+    );
+    expect(calls).toHaveLength(0);
   });
 
   it('refuses to share after a request, across providers or limits', async () => {

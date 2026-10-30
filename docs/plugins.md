@@ -59,8 +59,11 @@ the descriptions to the database. The fields:
   Plug-ins of one provider (its bars and its FX, two plug-ins on one key) declare the same
   `provider` and the same `limits`; loading refuses a set where they differ. Their requests then
   share one count: in a run their clients are paced together, and across runs the usage is
-  stored under the provider id. Same form as a key; keep it once usage is stored (a new id
-  starts without history).
+  stored under the provider id. Usage a plug-in stored under its key before it declared the
+  provider still counts (loaded with the provider's); new usage goes under the provider id only.
+  Same form as a key; keep it once usage is stored (changing one provider id to another starts
+  without the old id's history). Notifier keys share this namespace: a notifier whose key equals
+  a data provider id counts with it, so it must not equal one unless their limits match.
 - `keyEnv`: the environment variable(s) holding the key, read from `.env`.
 - `termsUrl`: the provider's terms.
 - `noAi`: the terms forbid giving its data to AI models (left out of MCP and AI exports).
@@ -93,11 +96,15 @@ data within the asked range; a later run's window covers the date.
   when the wait would be too long.
 - It retries server errors and timeouts with backoff.
 - It stops that source for the run on 403, 429 or a captcha or challenge page, and never works
-  around a block. A 4xx error carries a short excerpt of the provider's reason.
+  around a block: a 429 or a challenge page stops every source of that provider for the run,
+  since a sibling sending on would work around it; a 403 stops only the source it was answered
+  to (it can refuse one endpoint or plan). A 4xx error carries a short excerpt of the provider's
+  reason.
 - Keys and tokens in URLs are masked in errors and logs. Prefer sending a key in a header.
 - Sources run one after another, each with its own client. The clients of one provider
-  (`provider`) share one count of requests and symbols, so together they stay under 80%; a
-  block stops only the source it was answered to.
+  (`provider`) share one count of requests and symbols, so together they stay under 80%. A
+  notifier's channels share their service's count, but a refusal stops only the channel it was
+  answered to.
 
 ## Start from the template
 

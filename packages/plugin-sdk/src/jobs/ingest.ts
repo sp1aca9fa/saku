@@ -7,9 +7,12 @@
 // Quota guard (requirements 04): every source's client counts its provider's requests across runs
 // (the database's `provider_usage`, unless the context already has a store, under the provider id:
 // `PluginInfo.provider`, default the key), on the run's clock when one is injected. The clients of
-// all sources of one provider share one count in the run, so together they stay under 80%. A bar, meta or issuer fetch names its symbol first, so a provider's
-// symbols-per-month limit holds: a new symbol it refuses fails that item only (symbols already
-// counted are still fetched); a request window it cannot wait out stops the source like a block.
+// all sources of one provider share one count in the run, so together they stay under 80%, and
+// one block: a 429 or a challenge page stops them all (a 403 only its own). History stored under a
+// plug-in's key before it declared its provider still counts. A bar, meta or issuer fetch names
+// its symbol first, so a provider's symbols-per-month limit holds: a new symbol it refuses fails
+// that item only (symbols already counted are still fetched); a request window it cannot wait out
+// stops the source like a block.
 import type { TradingDate } from '@saku/core';
 import {
   type Db,
@@ -30,7 +33,13 @@ import {
   SymbolQuotaError,
   type UsageStore,
 } from '../http';
-import { type LoadedPlugins, providerQuotas, providerUsageStore } from '../registry';
+import {
+  type LoadedPlugins,
+  allInfos,
+  formerKeys,
+  providerQuotas,
+  providerUsageStore,
+} from '../registry';
 import type { IssuerSource, Logger, PluginContext, PluginInfo } from '../types';
 import type { IssuerAvailability } from './verify';
 
@@ -199,8 +208,13 @@ export const countsForRun = (r: SourceReport): boolean => r.kind !== 'issuer';
 export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
   const now = o.now ?? (() => new Date());
   const reports: SourceReport[] = [];
-  // One count per provider for the whole run, guarded across runs on the run's clock.
-  const quota = providerQuotas(o.usage ?? providerUsageStore(db), o.now && (() => now().getTime()));
+  // One count per provider for the whole run, guarded across runs on the run's clock, with the
+  // history its plug-ins stored under their own keys before they declared the provider.
+  const quota = providerQuotas(
+    o.usage ?? providerUsageStore(db),
+    o.now && (() => now().getTime()),
+    formerKeys(allInfos(plugins)),
+  );
   const dailyFrom = o.sessions.before(o.sessions.onOrBefore(o.to), DAILY_OVERLAP);
   const wanted = (inception?: string | null) =>
     o.mode === 'daily'

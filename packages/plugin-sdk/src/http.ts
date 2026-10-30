@@ -10,7 +10,10 @@
 // that is unknown (the store fails) sends nothing: the source stops for the run.
 //
 // One provider, one count: the clients of all plug-ins with the same provider id (`share`) keep
-// one ledger in a run, and the store counts under the provider id across runs.
+// one ledger in a run, and the store counts under the provider id across runs. A 429 or a
+// challenge page answered to any of them stops them all for the run: the provider blocked us, and
+// a sibling sending on would work around the block (requirements 15). A 403 stops only the client
+// it was answered to (it can refuse one endpoint or plan, not the provider).
 import type { ProviderLimits } from './types';
 
 /** The provider refused us (403, 429, a challenge page): the source stops for this run. */
@@ -107,16 +110,33 @@ export function redactUrl(url: string): string {
   return url.replace(SECRET_PARAMS, '$1***');
 }
 
+/** The quota guard: the store and the provider id requests are counted under across runs. */
+export interface UsageGuard {
+  provider: string;
+  store: UsageStore;
+  /**
+   * Other ids whose stored history counts for this provider too: the keys its plug-ins were
+   * counted under before they declared it (`alsoCount`). Loaded with the provider's history and
+   * merged; new requests are recorded under the provider id only.
+   */
+  formerKeys?: readonly string[];
+}
+
 export interface PoliteHttpOptions {
   limits?: ProviderLimits;
   /** The quota guard's store and the provider id its requests are counted under. */
-  usage?: { provider: string; store: UsageStore };
+  usage?: UsageGuard;
   /**
    * Another client of the same provider whose request and symbol counts this one shares (paced
-   * together), e.g. the channels of one notifier service; refusals (403, 429) stay per client.
-   * See `share`.
+   * together). See `share`; `ownBlocks` is its opt-out of shared blocks.
    */
   shareQuotaWith?: PoliteHttp;
+  /**
+   * With `shareQuotaWith`: a 429 or a challenge page stops only this client, and refusals
+   * answered to the clients it shares a count with do not stop it (the channels of one notifier
+   * service: the service refuses one channel, e.g. one webhook, not the account).
+   */
+  ownBlocks?: boolean;
   /** Pause between any two requests. */
   minDelayMs?: number;
   /** Longest the client waits for a limit window to free up before giving up for the run. */
@@ -151,14 +171,24 @@ interface Ledger {
   /** The stored history, loaded once before the first request or symbol check. */
   loaded?: Promise<void>;
   /** The quota guard's store and the provider id the requests are counted under. */
-  usage?: { provider: string; store: UsageStore };
+  usage?: UsageGuard;
   /** The clock the windows are read on and this run's times are kept on. */
   clock: () => number;
+  /**
+   * The provider refused (429, a challenge page): every client sharing this ledger stops for the
+   * run, except those that opted out (`ownBlocks`). `by`: the client it was answered to.
+   */
+  blocked?: { reason: string; by: PoliteHttp };
 }
 
 export class PoliteHttp {
+  /** Why this client alone stopped: a 403, or any refusal when it keeps its own blocks. */
   private blocked: string | null = null;
-  private readonly o: Required<Omit<PoliteHttpOptions, 'usage' | 'shareQuotaWith' | 'clock'>>;
+  /** Whether refusals stay with this client instead of stopping its whole ledger (`ownBlocks`). */
+  private ownBlocks: boolean;
+  private readonly o: Required<
+    Omit<PoliteHttpOptions, 'usage' | 'shareQuotaWith' | 'clock' | 'ownBlocks'>
+  >;
   private readonly secrets: string[];
   private ledger: Ledger;
   /** The symbol the next requests are for (`forSymbol`), recorded with each. */
@@ -172,6 +202,7 @@ export class PoliteHttp {
       ...(options.usage && { usage: options.usage }),
     };
     this.secrets = (options.secrets ?? []).filter((s) => s.length >= 4);
+    this.ownBlocks = options.ownBlocks ?? false;
     this.o = {
       minDelayMs: 500,
       maxWaitMs: 120_000,
@@ -194,11 +225,15 @@ export class PoliteHttp {
    * sends anything, so their requests together stay under 80% of each limit (requirements 04
    * "Quota guard"): one ledger, one pace (the minimum gap counts from either's last request),
    * one quota guard (attached to either, it counts for all) and one clock (the peer's, the one
-   * the shared times are kept on). Refusals (403, 429, a challenge) stay per client. Refused: a
-   * client that already sent or loaded its history, a different provider (or a guarded client
-   * joining an unguarded one), different limits (one count cannot honor two).
+   * the shared times are kept on). One block too: a 429 or a challenge page answered to any of
+   * them stops all of them for the run (requirements 15: never work around a block). A 403 stays
+   * with the client it was answered to (one endpoint or plan refused, not the provider).
+   * `ownBlocks`: the opt-out for clients a service refuses one by one (a notifier's channels):
+   * every refusal stays with this client, and the others' do not stop it. Refused: a client that
+   * already sent or loaded its history, a different provider (or a guarded client joining an
+   * unguarded one), different limits (one count cannot honor two).
    */
-  share(peer: PoliteHttp): void {
+  share(peer: PoliteHttp, o: { ownBlocks?: boolean } = {}): void {
     if (peer === this) return;
     if (this.ledger.loaded || this.sent.length > 0) {
       throw new Error('a shared quota is joined before any request');
@@ -214,10 +249,11 @@ export class PoliteHttp {
       );
     }
     this.ledger = peer.ledger;
+    if (o.ownBlocks) this.ownBlocks = true;
   }
 
   /** The quota guard of this client's ledger (shared by the clients of one provider). */
-  private get usage(): { provider: string; store: UsageStore } | undefined {
+  private get usage(): UsageGuard | undefined {
     return this.ledger.usage;
   }
 
@@ -245,13 +281,30 @@ export class PoliteHttp {
    * source's client). `clock`: the run's clock, so an injected one sets the windows. Attached to
    * one of the clients sharing a count (`share`), it guards them all.
    */
-  guard(usage: { provider: string; store: UsageStore }, clock?: () => number): void {
+  guard(usage: UsageGuard, clock?: () => number): void {
     if (this.usage) throw new Error(`quota guard already attached (${this.usage.provider})`);
     if (this.ledger.loaded || this.sent.length > 0) {
       throw new Error('quota guard attached after requests were sent');
     }
     this.ledger.usage = usage;
     if (clock) this.ledger.clock = clock;
+  }
+
+  /**
+   * Counts the stored history under other ids for the guarded provider too: the keys its
+   * plug-ins were counted under before they declared it, so declaring a provider never forgets
+   * their earlier requests and symbols. Before the history is loaded; new requests are still
+   * recorded under the provider id only. For the clients sharing the count, like the guard.
+   */
+  alsoCount(formerKeys: readonly string[]): void {
+    const usage = this.usage;
+    if (!usage) throw new Error('former keys need a quota guard');
+    if (this.ledger.loaded || this.sent.length > 0) {
+      throw new Error('former keys added after requests were sent');
+    }
+    const keys = new Set([...(usage.formerKeys ?? []), ...formerKeys]);
+    keys.delete(usage.provider);
+    this.ledger.usage = { ...usage, formerKeys: [...keys] };
   }
 
   /**
@@ -278,26 +331,36 @@ export class PoliteHttp {
     this.symbol = symbol;
   }
 
-  /** Loads the stored history once; unknown history sends nothing (QuotaError). */
+  /**
+   * Loads the stored history once, under the provider id and each former key (`alsoCount`),
+   * merged: every stored request counts, and each symbol from its latest time under any id.
+   * Unknown history (any of them fails) sends nothing (QuotaError).
+   */
   private ready(): Promise<void> {
     const usage = this.usage;
     if (!usage) return Promise.resolve();
     this.ledger.loaded ??= (async () => {
-      let h: UsageHistory;
-      try {
-        // Read (and pruned) at the earlier of the two clocks, the mirror of recording at the
-        // later: an injected clock ahead of the system one never prunes or skips rows that are
-        // still inside a real window. The windows then filter on the run's clock.
-        h = await usage.store.load(
-          usage.provider,
-          Math.min(this.ledger.clock(), this.o.wallClock()),
-        );
-      } catch (e) {
-        throw new QuotaError(`earlier requests of ${usage.provider} unknown: ${message(e)}`);
+      const histories: UsageHistory[] = [];
+      for (const id of [usage.provider, ...(usage.formerKeys ?? [])]) {
+        try {
+          // Read (and pruned) at the earlier of the two clocks, the mirror of recording at the
+          // later: an injected clock ahead of the system one never prunes or skips rows that are
+          // still inside a real window. The windows then filter on the run's clock.
+          histories.push(
+            await usage.store.load(id, Math.min(this.ledger.clock(), this.o.wallClock())),
+          );
+        } catch (e) {
+          const under = id === usage.provider ? '' : ` (stored under ${id})`;
+          throw new QuotaError(
+            `earlier requests of ${usage.provider}${under} unknown: ${message(e)}`,
+          );
+        }
       }
-      this.ledger.sent.push(...h.requests);
+      for (const h of histories) {
+        this.ledger.sent.push(...h.requests);
+        for (const [s, at] of h.symbols) this.noteSymbol(s, at);
+      }
       this.ledger.sent.sort((a, b) => a - b);
-      for (const [s, at] of h.symbols) this.noteSymbol(s, at);
     })();
     return this.ledger.loaded;
   }
@@ -360,9 +423,28 @@ export class PoliteHttp {
 
   private checkChallenge(body: string, url: string): void {
     if (body.length < 50_000 && CHALLENGE_MARKERS.some((m) => m.test(body))) {
-      this.blocked = `challenge page at ${this.shown(url)}`;
-      throw new BlockedError(this.blocked);
+      throw this.stop(`challenge page at ${this.shown(url)}`, true);
     }
+  }
+
+  /**
+   * Stops this client for the run; `providerWide` (a 429, a challenge page) stops every client
+   * sharing its count too, unless this one keeps its own blocks (`ownBlocks`).
+   */
+  private stop(reason: string, providerWide: boolean): BlockedError {
+    if (providerWide && !this.ownBlocks) this.ledger.blocked = { reason, by: this };
+    else this.blocked = reason;
+    return new BlockedError(reason);
+  }
+
+  /** Why this client may send nothing more in this run, or null. */
+  private stoppedBecause(): string | null {
+    if (this.blocked) return this.blocked;
+    const shared = this.ledger.blocked;
+    if (!shared || this.ownBlocks) return null;
+    return shared.by === this
+      ? shared.reason
+      : `the provider refused another source sharing its count (${shared.reason})`;
   }
 
   /** Masks a value in every later error (for a secret that is part of a URL's path). */
@@ -397,7 +479,8 @@ export class PoliteHttp {
     const shown = this.shown(url);
     await this.ready();
     for (let attempt = 0; ; attempt++) {
-      if (this.blocked) throw new BlockedError(`stopped for this run: ${this.blocked}`);
+      const stopped = this.stoppedBecause();
+      if (stopped) throw new BlockedError(`stopped for this run: ${stopped}`);
       await this.pace();
       await this.note(this.ledger.clock());
       let res: Response;
@@ -417,9 +500,12 @@ export class PoliteHttp {
       }
       if (res.status === 403 || res.status === 429) {
         // A 403 says why it refused (e.g. a plan limit), masked and cut like any 4xx excerpt.
+        // A 429 is the provider's (stops all its clients); a 403 can refuse one endpoint or plan.
         const detail = res.status === 403 ? await this.excerpt(res, url) : undefined;
-        this.blocked = `HTTP ${res.status} for ${shown}${detail ? `: ${detail}` : ''}`;
-        throw new BlockedError(this.blocked);
+        throw this.stop(
+          `HTTP ${res.status} for ${shown}${detail ? `: ${detail}` : ''}`,
+          res.status === 429,
+        );
       }
       if (res.status >= 500 && attempt < this.o.retries) {
         await this.o.sleep(2 ** attempt * 2000);

@@ -102,8 +102,12 @@ describe('probe', () => {
       let clock = 1_000_000;
       const times: number[] = [];
       const recorded: string[] = [];
+      const loaded: string[] = [];
       const store: UsageStore = {
-        load: async () => ({ requests: [], symbols: new Map() }),
+        load: async (id) => {
+          loaded.push(id);
+          return { requests: [], symbols: new Map() };
+        },
         record: async (p) => {
           recorded.push(p);
         },
@@ -144,13 +148,15 @@ describe('probe', () => {
           file,
         },
       );
-      return { lines, times, recorded };
+      return { lines, times, recorded, loaded };
     };
     // 80% of 2 per minute is 1: the second source waits out the first one's minute.
     const shared = await run('acme');
     expect(shared.lines.every((l) => l.error === undefined)).toBe(true);
     expect(shared.times).toEqual([1_000_000, 1_060_001]);
     expect(shared.recorded).toEqual(['acme', 'acme']);
+    // Loaded once for the provider, with what its plug-ins stored under their keys before.
+    expect(shared.loaded).toEqual(['acme', 'acme-a', 'acme-b']);
     // Default: each key is its own provider, paced alone.
     const apart = await run(undefined);
     expect(apart.times).toEqual([1_000_000, 1_000_000]);

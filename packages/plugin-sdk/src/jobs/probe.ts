@@ -3,11 +3,12 @@
 // file. The first time a date appears, and the last time its values change, give the times.
 // The CLI gives each source a client with the quota guard's store, so probe requests count
 // toward the provider's limits across runs like any other; within the probe, the clients of one
-// provider share one count (`providerQuotas`).
+// provider share one count and one block (`providerQuotas`), with the history stored under their
+// keys before they declared the provider.
 import { stateDir } from '@saku/db/env';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { type LoadedPlugins, providerQuotas } from '../registry';
+import { type LoadedPlugins, allInfos, formerKeys, providerQuotas } from '../registry';
 import type { PluginContext, PluginInfo } from '../types';
 
 export interface ProbeLine {
@@ -36,7 +37,7 @@ export async function probe(
   const now = o.now ?? (() => new Date());
   const lines: ProbeLine[] = [];
   // No store here: the contexts carry it (a context without one is counted in the run only).
-  const quota = providerQuotas();
+  const quota = providerQuotas(undefined, undefined, formerKeys(allInfos(plugins)));
   for (const source of plugins.bars) {
     const base = { source: source.info.key, ticker: o.ticker };
     try {
