@@ -26,7 +26,7 @@ import { backupDatabase, backupDir, localDay, pruneBackups } from '@saku/db/back
 import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { codeVersion } from '../code-version';
-import { PoliteHttp } from '../http';
+import { HttpError, PoliteHttp } from '../http';
 import { lock, readStamp, writeStamp } from '../jobs/lock';
 import { jobLogger } from '../jobs/log';
 import { probe } from '../jobs/probe';
@@ -176,7 +176,10 @@ async function heartbeat(envName = 'HEALTHCHECK_URL'): Promise<boolean> {
     await new PoliteHttp({ retries: 2 }).text(url);
     return true;
   } catch (e) {
-    log.warn('Heartbeat ping failed', { check: envName, error: String(e) });
+    // The check's URL is its secret: the error is logged without it.
+    const error =
+      e instanceof HttpError ? `HTTP ${e.status}` : e instanceof Error ? e.name : 'error';
+    log.warn('Heartbeat ping failed', { check: envName, error });
     return false;
   }
 }

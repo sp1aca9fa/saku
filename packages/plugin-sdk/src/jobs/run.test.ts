@@ -133,8 +133,8 @@ function options(
     tsa: { authorities: [] },
     code: 'test',
     afterDaily: async () => void hooks.push('backup'),
-    onComplete: async () => {
-      hooks.push('heartbeat');
+    onComplete: async (job) => {
+      hooks.push(`heartbeat:${job}`);
       return true;
     },
     hooks,
@@ -151,7 +151,7 @@ describe('a daily run', () => {
     const o = options(notifier);
     const r = await runJob(db, plugins([barSource('p'), barSource('s')]), o);
     expect(r).toMatchObject({ ok: true });
-    expect(o.hooks).toEqual(['backup', 'heartbeat']);
+    expect(o.hooks).toEqual(['backup', 'heartbeat:daily']);
     const record = await forwardRecord(db, version.id);
     expect(record.map((e) => [e.date, e.allocation, e.dataStatus])).toEqual([
       ['2026-01-15', 'Risk on', 'green'],
@@ -242,7 +242,7 @@ describe('a daily run', () => {
     );
     expect(r).toMatchObject({ ok: true });
     // No backup (the daily run's); the weekly heartbeat after full success.
-    expect(o.hooks).toEqual(['heartbeat']);
+    expect(o.hooks).toEqual(['heartbeat:weekly']);
     const runs = await db.select().from(schema.jobRuns);
     expect(runs.find((x) => x.jobType === 'weekly')).toMatchObject({ heartbeatSent: true });
     const ops = sent.filter((m) => m.target === 'ops').map((m) => m.text);
