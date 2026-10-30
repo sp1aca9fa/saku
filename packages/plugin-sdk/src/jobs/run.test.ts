@@ -4,6 +4,7 @@ import type { RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   addChannel,
+  appendForward,
   createUser,
   forwardRecord,
   registerVersion,
@@ -246,6 +247,10 @@ describe('a daily run', () => {
     expect(o.hooks).toEqual(['backup']);
     const failure = sent.find((m) => m.target === 'ops' && m.text.includes('did not finish'));
     expect(failure?.text).toContain(`Old (${broken.id}): definition does not parse`);
+    // Named once: recompute meets the same version and does not repeat it.
+    const once = `Old (${broken.id}): definition does not parse`;
+    expect(r.error!.split(once)).toHaveLength(2);
+    expect(failure!.text.split(once)).toHaveLength(2);
     // Nothing is guessed for it; the good version is still recorded.
     expect(await forwardRecord(db, broken.id)).toEqual([]);
     expect((await forwardRecord(db, version.id)).map((e) => e.date)).toEqual([
@@ -299,6 +304,68 @@ describe('a daily run', () => {
       ['core_vs_reference', 1],
       ['incremental_vs_full', 1],
     ]);
+  });
+});
+
+describe('a weekly run whose recompute cannot evaluate a version', () => {
+  it('names the version, its id and the reason once, in job_runs.error and the alert', async () => {
+    const { db, version } = await setup();
+    // A recorded version whose ticker has no bars any more: the engine throws on it.
+    const gone = await registerVersion(db, {
+      ownerId: version.ownerId,
+      name: 'Gone',
+      at: new Date('2026-01-12T22:00:00Z'),
+      strategy: {
+        name: 'Gone',
+        account: 'taxable',
+        safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [
+          {
+            id: 'A',
+            type: 'compare',
+            left: { indicator: 'price', ticker: 'ZZZ' },
+            op: '>',
+            right: { indicator: 'sma', ticker: 'ZZZ', length: 3 },
+          },
+        ],
+        allocations: [
+          { name: 'Risk on', when: { all: ['A'] }, holdings: [{ ticker: 'ZZZ', weight: 100 }] },
+          { name: 'Calm', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        ],
+      },
+    });
+    await appendForward(
+      db,
+      gone,
+      {
+        date: '2026-01-13',
+        allocation: 'Calm',
+        holdings: [{ ticker: 'CASH_USD', weight: 100 }],
+        safeStateApplied: false,
+        dataStatus: 'green',
+        equity: 1,
+        detail: { reasons: [], signals: { A: false } },
+      },
+      null,
+    );
+    const { notifier, sent } = fakeNotifier();
+    const r = await runJob(
+      db,
+      plugins([barSource('p'), barSource('s')]),
+      options(notifier, { job: 'weekly' }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('incomplete: recompute');
+    const line = `Gone (${gone.id}): recompute could not evaluate: No bars for ZZZ.`;
+    expect(r.error!.split(line)).toHaveLength(2);
+    const [run] = await db
+      .select()
+      .from(schema.jobRuns)
+      .where(eq(schema.jobRuns.jobType, 'weekly'));
+    expect(run!.error).toContain(line);
+    const failure = sent.find((m) => m.target === 'ops' && m.text.includes('did not finish'));
+    expect(failure!.text.split('\n').filter((l) => l === `- ${line}`)).toHaveLength(1);
   });
 });
 

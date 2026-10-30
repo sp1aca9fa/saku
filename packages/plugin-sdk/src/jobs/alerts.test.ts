@@ -18,7 +18,9 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  JOB_FAILURE_LINE_LENGTH,
   describeReason,
+  jobFailureLines,
   sendDataHealthAdmin,
   sendJobFailure,
   sendRevisions,
@@ -58,10 +60,10 @@ const strategy = {
   allocations: [{ name: 'Calm', holdings: [{ ticker: 'CASH_USD', weight: 100 }] }],
 };
 
-function fakeNotifier(fail = false) {
+function fakeNotifier(fail = false, maxLength = 1000) {
   const sent: { target: string; text: string }[] = [];
   const notifier: Notifier = {
-    info: { key: 'fake', kind: 'notifier', name: 'Fake', termsUrl: 'x', maxLength: 1000 },
+    info: { key: 'fake', kind: 'notifier', name: 'Fake', termsUrl: 'x', maxLength },
     validTarget: () => true,
     send: async (target, text) => {
       if (fail) throw new Error('Fake: HTTP 500');
@@ -282,7 +284,7 @@ describe('admin alerts', () => {
     const { db, owner } = await setup();
     await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
     const { notifier, sent } = fakeNotifier();
-    const o = { ...options(notifier, '2026-01-05'), job: 'daily', error: 'x' };
+    const o = { ...options(notifier, '2026-01-05'), job: 'daily', failures: ['x'] };
     expect((await sendJobFailure(db, o)).sent).toBe(0);
     await setSetting(db, 'forward_records_from', '2026-01-05');
     expect((await sendJobFailure(db, o)).sent).toBe(1);
@@ -357,7 +359,7 @@ describe('admin alerts', () => {
     const o = {
       ...options(notifier, '2026-01-05'),
       job: 'daily',
-      error: 'incomplete: tiingo\nstack',
+      failures: ['incomplete: tiingo'],
     };
     expect((await sendJobFailure(db, o)).sent).toBe(1);
     expect((await sendJobFailure(db, o)).sent).toBe(0);
@@ -366,11 +368,103 @@ describe('admin alerts', () => {
         target: 'ops',
         text: [
           'Saku: the daily run for 2026-01-05 did not finish',
-          'Reason: incomplete: tiingo. It runs again at the next hourly check. The job log on the server has the details.',
+          'What failed (1):',
+          '- incomplete: tiingo',
+          'It runs again at the next hourly check. The job log on the server has the details.',
           'Data health: unknown (the run did not finish).',
         ].join('\n'),
       },
     ]);
+  });
+
+  it('lists 5 failures one per line and counts the rest exactly (EN, JA)', async () => {
+    const failures = Array.from({ length: 7 }, (_, i) => `Version ${i + 1} (v${i + 1}): broken`);
+    for (const [language, more] of [
+      [
+        'en',
+        "...and 2 more. The full list is in the run's error (job_runs.error) and the job log on the server.",
+      ],
+      [
+        'ja',
+        'ほか 2 件。全件は実行記録のエラー欄(job_runs.error)とサーバーのジョブログにあります。',
+      ],
+    ] as const) {
+      const { db, owner } = await setup(language);
+      await setSetting(db, 'forward_records_from', '2026-01-05');
+      await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+      const { notifier, sent } = fakeNotifier(false, 2000);
+      const o = { ...options(notifier, '2026-01-05'), job: 'daily', failures };
+      expect((await sendJobFailure(db, o)).sent).toBe(1);
+      const t = translator(language);
+      expect(sent[0]!.text.split('\n')).toEqual([
+        t('alerts.jobFailure.title', { job: 'daily', date: '2026-01-05' }),
+        t('alerts.jobFailure.failed', { count: 7 }),
+        ...failures.slice(0, 5).map((f) => `- ${f}`),
+        more,
+        t('alerts.jobFailure.body'),
+        t('alerts.health.unknown'),
+      ]);
+    }
+  });
+
+  it('cuts a very long reason on its own line with a mark, keeping the next one', () => {
+    const t = translator('en');
+    const long = `AAA: ${'x'.repeat(500)}\n    at stack line`;
+    const lines = jobFailureLines(
+      t,
+      { job: 'daily', date: '2026-01-05', failures: [long, 'incomplete: s'] },
+      Infinity,
+    );
+    expect(lines[2]).toHaveLength(JOB_FAILURE_LINE_LENGTH);
+    expect(lines[2]).toMatch(/^- AAA: x+…$/);
+    expect(lines[3]).toBe('- incomplete: s');
+    // A newline inside a reason never starts a line of its own; an empty reason is not blank.
+    const flat = jobFailureLines(
+      t,
+      { job: 'daily', date: '2026-01-05', failures: ['a\n  b', '  '] },
+      Infinity,
+    );
+    expect(flat.slice(2, 4)).toEqual(['- a b', '- unknown']);
+    // No stated reason: still a failure, never an empty list.
+    expect(
+      jobFailureLines(t, { job: 'daily', date: '2026-01-05', failures: [] }, Infinity),
+    ).toEqual([
+      t('alerts.jobFailure.title', { job: 'daily', date: '2026-01-05' }),
+      t('alerts.jobFailure.failed', { count: 1 }),
+      '- unknown',
+      t('alerts.jobFailure.body'),
+    ]);
+  });
+
+  it('fits the smallest notifier (Discord 2000) as listed, and lists fewer on a smaller one', async () => {
+    // Worst case: every line at its longest, the longest health line, both languages.
+    const failures = Array.from({ length: 9 }, () => 'x'.repeat(5000));
+    for (const language of ['en', 'ja']) {
+      const t = translator(language);
+      const health = Math.max(
+        ...['green', 'yellow', 'red', 'unknown'].map(
+          (s) =>
+            `${t(`alerts.health.${s}`)} ${t('alerts.healthDate', { date: '2026-01-05' })}`.length,
+        ),
+      );
+      const lines = jobFailureLines(t, { job: 'weekly', date: '2026-01-05', failures }, Infinity);
+      expect(lines.filter((l) => l.startsWith('- '))).toHaveLength(5);
+      expect(lines.join('\n').length + 1 + health).toBeLessThanOrEqual(2000);
+    }
+    // A 1000-character channel: fewer lines listed, the rest counted, nothing cut at the end.
+    const { db, owner } = await setup();
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const { notifier, sent } = fakeNotifier(false, 1000);
+    const o = { ...options(notifier, '2026-01-05'), job: 'daily', failures };
+    expect((await sendJobFailure(db, o)).sent).toBe(1);
+    const text = sent[0]!.text;
+    expect(text.length).toBeLessThanOrEqual(1000);
+    expect(text.endsWith('Data health: unknown (the run did not finish).')).toBe(true);
+    const shown = text.split('\n').filter((l) => l.startsWith('- ')).length;
+    expect(shown).toBeGreaterThan(0);
+    expect(shown).toBeLessThan(5);
+    expect(text).toContain(`...and ${9 - shown} more.`);
   });
 });
 

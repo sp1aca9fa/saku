@@ -172,7 +172,11 @@ describe('forward', () => {
     const r = await recompute(db, { runId, code: 'c1' });
     expect(r.checked).toBe(2);
     expect(r.errors).toEqual([
-      { version: `Old (${broken.id})`, error: expect.stringContaining('"AAA" is listed twice') },
+      {
+        version: `Old (${broken.id})`,
+        kind: 'parse',
+        error: expect.stringContaining('"AAA" is listed twice'),
+      },
     ]);
   });
 

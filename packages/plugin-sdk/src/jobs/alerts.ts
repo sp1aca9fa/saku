@@ -206,7 +206,12 @@ export async function sendAdminAlert(
   o: AlertOptions & {
     subject: string;
     type: AlertType;
-    lines: (t: Translate) => string[];
+    /**
+     * The message's lines before the health line. `room`: the characters they may take on this
+     * channel (its notifier's longest message less the health line), for a message that fits
+     * itself rather than being cut at the end.
+     */
+    lines: (t: Translate, room: number) => string[];
     /** The data health it states; default: the latest overall grade on record. */
     health?: string;
   },
@@ -214,7 +219,9 @@ export async function sendAdminAlert(
   const summary: AlertSummary = { sent: 0, failed: [] };
   const key = { subject: o.subject, date: o.date, type: o.type };
   await eachAdminChannel(db, o, o.health, async (t, channel, healthLine) => {
-    const text = [...o.lines(t), healthLine].join('\n');
+    // No notifier for the channel: deliver reports it; the room is then irrelevant.
+    const max = o.notifiers.find((n) => n.info.key === channel.type)?.info.maxLength ?? Infinity;
+    const text = [...o.lines(t, max - healthLine.length - 1), healthLine].join('\n');
     await deliver(db, o, channel, { key, text }, summary);
   });
   return summary;
@@ -242,21 +249,65 @@ async function eachAdminChannel(
   }
 }
 
-/** A job that did not finish, once per job and day. */
+/** Failures listed one per line in the job-failure alert; the rest are counted. */
+export const JOB_FAILURE_LINES = 5;
+/** The longest failure line (with its mark), so one long reason cannot crowd out the others. */
+export const JOB_FAILURE_LINE_LENGTH = 200;
+
+/**
+ * A job that did not finish, once per job and day (requirements 11: job failures to admins).
+ * Each failure is one line, in the run's order, up to JOB_FAILURE_LINES of at most
+ * JOB_FAILURE_LINE_LENGTH characters (a longer one ends with "…"); the rest are counted exactly
+ * ("and N more"), never dropped silently. The full list stays in job_runs.error and the log.
+ */
 export function sendJobFailure(
   db: Db,
-  o: AlertOptions & { job: string; error: string; health?: string },
+  o: AlertOptions & { job: string; failures: string[]; health?: string },
 ): Promise<AlertSummary> {
   return sendAdminAlert(db, {
     ...o,
     subject: o.job,
     type: 'job_failure',
     health: o.health ?? 'unknown',
-    lines: (t) => [
-      t('alerts.jobFailure.title', { job: o.job, date: o.date }),
-      t('alerts.jobFailure.body', { error: o.error.split('\n')[0]!.slice(0, 300) }),
-    ],
+    lines: (t, room) =>
+      jobFailureLines(t, { job: o.job, date: o.date, failures: o.failures }, room),
   });
+}
+
+/**
+ * The job-failure lines within `room` characters (joined by newlines). When the listed lines do
+ * not fit the channel, fewer are listed and more are counted, so the count line always arrives;
+ * only a channel too small for the title, count and closing line is cut by `deliver`.
+ */
+export function jobFailureLines(
+  t: Translate,
+  o: { job: string; date: TradingDate; failures: string[] },
+  room: number,
+): string[] {
+  // A run that failed without a stated reason still failed: it is never shown as nothing.
+  const failures = o.failures.length > 0 ? o.failures : ['unknown'];
+  const items = failures.map((f) => `- ${oneLine(f, JOB_FAILURE_LINE_LENGTH - 2)}`);
+  let shown = Math.min(items.length, JOB_FAILURE_LINES);
+  for (;;) {
+    const hidden = items.length - shown;
+    const lines = [
+      t('alerts.jobFailure.title', { job: o.job, date: o.date }),
+      t('alerts.jobFailure.failed', { count: items.length }),
+      ...items.slice(0, shown),
+      ...(hidden > 0 ? [t('alerts.jobFailure.more', { count: hidden })] : []),
+      t('alerts.jobFailure.body'),
+    ];
+    if (shown === 0 || lines.join('\n').length <= room) return lines;
+    shown--;
+  }
+}
+
+/** One line of at most `max` characters: whitespace runs (newlines too) as one space, "…" if cut. */
+function oneLine(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim() || 'unknown';
+  if (flat.length <= max) return flat;
+  // Not between the halves of a surrogate pair.
+  return `${flat.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, '')}…`;
 }
 
 /** The day's data is not green overall: what is not, for the admins. */

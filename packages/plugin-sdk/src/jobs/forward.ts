@@ -272,8 +272,12 @@ export interface RecomputeSummary {
   checked: number;
   /** New differences, each annotated (recorded entries are never edited). */
   differences: { version: string; date: TradingDate; recorded: string; now: string }[];
-  /** Versions the current engine could not evaluate at all (nothing annotated for them). */
-  errors: { version: string; error: string }[];
+  /**
+   * Versions the current engine could not evaluate at all (nothing annotated for them), as
+   * `name (id)`: `parse` when the stored definition no longer parses, `evaluate` when it parses
+   * but the engine throws on it.
+   */
+  errors: { version: string; kind: 'parse' | 'evaluate'; error: string }[];
 }
 
 /**
@@ -295,7 +299,11 @@ export async function recompute(
     // record yet (the forward step skipped it too), so the run is incomplete.
     const parsed = parseVersion(version);
     if ('error' in parsed) {
-      summary.errors.push({ version: `${version.name} (${version.id})`, error: parsed.error });
+      summary.errors.push({
+        version: `${version.name} (${version.id})`,
+        kind: 'parse',
+        error: parsed.error,
+      });
       continue;
     }
     const { strategy } = parsed;
@@ -310,6 +318,7 @@ export async function recompute(
       // Not an engine difference to annotate day by day: a failure to report.
       summary.errors.push({
         version: `${version.name} (${version.id})`,
+        kind: 'evaluate',
         error: e instanceof Error ? e.message : String(e),
       });
       continue;

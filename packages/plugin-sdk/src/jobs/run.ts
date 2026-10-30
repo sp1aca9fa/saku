@@ -85,6 +85,19 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
   let error: string | undefined;
   let heartbeatSent = false;
   let health: string | undefined;
+  // What did not finish (source keys, steps) and what failed (one line each, in run order):
+  // job_runs.error and the admins' alert list them all (the alert counts what it cannot show).
+  const incomplete: string[] = [];
+  const markIncomplete = (what: string) => {
+    if (!incomplete.includes(what)) incomplete.push(what);
+  };
+  const failures: string[] = [];
+  const collected = () => [
+    ...(incomplete.length ? [`incomplete: ${incomplete.join(', ')}`] : []),
+    ...failures,
+  ];
+  /** The failure lines the admins are told (a thrown error by its first line). */
+  let told: string[] = [];
   try {
     const infos = allInfos(plugins);
     await savePluginInfos(db, infos, now);
@@ -133,11 +146,8 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     const checkedSessions =
       o.seriesSessions ??
       fail('No us-fed calendar plug-in is loaded (the cash series is checked on it).');
-    let incomplete: string[] = [];
-    const markIncomplete = (what: string) => {
-      if (!incomplete.includes(what)) incomplete.push(what);
-    };
-    const failures: string[] = [];
+    /** Versions the forward step named as not parsing (recompute does not name them again). */
+    const notParsing = new Set<string>();
     /** Series and FX values the sources now report differently (bar revisions are in the db). */
     let valueRevisions: Parameters<typeof sendRevisions>[1]['revisions'] = [];
     /** The current engine must reproduce the record, or each difference is annotated and told. */
@@ -150,6 +160,16 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       if (r.errors.length > 0) {
         log.warn('Recompute could not evaluate', { errors: r.errors });
         markIncomplete('recompute');
+        // Each version named with its reason, like the forward step's; a version that step
+        // already named as not parsing in this run is not repeated.
+        for (const e of r.errors) {
+          if (e.kind === 'parse' && notParsing.has(e.version)) continue;
+          failures.push(
+            e.kind === 'parse'
+              ? `${e.version}: definition does not parse: ${e.error}`
+              : `${e.version}: recompute could not evaluate: ${e.error}`,
+          );
+        }
       }
       // Every annotated difference not yet told (also those found by `pnpm strategy recompute`).
       const told = await sendRecomputeDiffers(db, alerting);
@@ -206,7 +226,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         ...told(r, r.withdrawnValues, 'withdrawn'),
       ]);
       const failing = reports.filter((r) => r.stopped || r.failed.length > 0);
-      incomplete = failing.filter(countsForRun).map((r) => r.source);
+      incomplete.push(...failing.filter(countsForRun).map((r) => r.source));
       // Best effort (issuer data): logged, graded yellow by verify (the fund's staleness and the
       // day's `issuer_unavailable`, which the admins are told), the run still complete.
       for (const r of failing.filter((x) => !countsForRun(x))) {
@@ -276,8 +296,10 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         if (f.errors.length > 0) {
           log.warn('Forward: versions that do not parse were skipped', { errors: f.errors });
           markIncomplete('forward');
-          for (const e of f.errors)
+          for (const e of f.errors) {
+            notParsing.add(e.version);
             failures.push(`${e.version}: definition does not parse: ${e.error}`);
+          }
         }
         // Undelivered alerts are retried at the next check (sent ones are not repeated).
         const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
@@ -366,17 +388,18 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     if (job === 'daily') await o.afterDaily?.();
     ok = incomplete.length === 0 && failures.length === 0;
     if (!ok) {
-      error = [
-        ...(incomplete.length ? [`incomplete: ${incomplete.join(', ')}`] : []),
-        ...failures,
-      ].join('; ');
+      told = collected();
+      error = told.join('; ');
     }
     if (ok && (job === 'daily' || job === 'weekly'))
       heartbeatSent = (await o.onComplete?.(job)) ?? false;
   } catch (e) {
     ok = false;
-    error = e instanceof Error ? (e.stack ?? e.message) : String(e);
-    log.warn('Run failed', { error });
+    const thrown = e instanceof Error ? (e.stack ?? e.message) : String(e);
+    log.warn('Run failed', { error: thrown });
+    // What failed before the throw is kept, the thrown error last (in full: its stack).
+    told = [...collected(), thrown.split('\n')[0]!];
+    error = [...collected(), thrown].join('; ');
   } finally {
     try {
       await finishRun(db, runId, { ok, error, datesProcessed: [target], heartbeatSent });
@@ -384,13 +407,14 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       // Still tell the admins below; the run row stays as started.
       ok = false;
       log.warn('Run not recorded', { error: String(e) });
+      told = [...told, `run not recorded: ${String(e).split('\n')[0]}`];
     }
     if (!ok) {
       try {
         const sent = await sendJobFailure(db, {
           ...alerting,
           job,
-          error: error ?? 'unknown',
+          failures: told,
           ...(health && { health }),
         });
         if (sent.failed.length) log.warn('Admin alert not delivered', { failed: sent.failed });

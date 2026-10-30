@@ -937,7 +937,7 @@ describe('fault injection (layer F)', () => {
       );
       expect(r.alert).toContain('Data health: yellow (computed with a warning).');
       expect(r.adminAlerts.join('\n')).toContain(
-        `Saku: the daily run for ${TARGET} did not finish\nReason: incomplete: p.`,
+        `Saku: the daily run for ${TARGET} did not finish\nWhat failed (1):\n- incomplete: p\n`,
       );
     });
 
@@ -965,7 +965,7 @@ describe('fault injection (layer F)', () => {
           allocation: 'Risk on',
         });
         expect(x.reasons).toEqual(['SPY:stand_in@s1', 'SSO:stand_in@s1']);
-        expect(x.adminAlerts.join('\n')).toContain('Reason: incomplete: p.');
+        expect(x.adminAlerts.join('\n')).toContain('What failed (1):\n- incomplete: p\n');
       }
       expect(await health(r)).toEqual(await health(down));
     });
