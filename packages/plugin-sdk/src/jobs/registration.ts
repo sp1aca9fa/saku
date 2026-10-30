@@ -10,18 +10,22 @@
 // - Every ticker the strategy depends on (its signals and holdings, as core `dependencies`, and the
 //   holdings of its declared safe state, which it holds on red days) must be an active symbol.
 // - Each such symbol must have passed the data checks over its full history (03 intro: "usable
-//   only after passing the data quality checks (04) over its full history"). Read as: the latest
-//   finished full-history pass (bootstrap, weekly or checks run) that graded the symbol
-//   (`health_coverage`)
-//   - succeeded (a pass that failed may have stopped on a calculation or data fault; an older
-//     pass is never used instead of it),
-//   - stored its grades completely (an overall `data_health` row: verify stores the coverage,
-//     then the symbol rows, then the overall rows, so one overall row means every symbol row is
-//     stored),
-//   - graded from the symbol's first stored canonical bar or earlier,
-//   - graded through `through` (the latest session whose data is final at registration, the
-//     daily target: the conservative bound) and through the symbol's last stored canonical bar,
-//   - and graded no day of the symbol red. Yellow days are allowed (computed with a warning, 04).
+//   only after passing the data quality checks (04) over its full history"). Read as:
+//   - no stored canonical bar of the symbol graded red or not graded at all (`bars.status`, the
+//     per-date grade the forward record reads, rewritten by every run that grades the date, daily
+//     runs included; NULL is unknown, never green);
+//   - the latest full-history run (bootstrap, weekly or checks, by start, whatever its status)
+//     succeeded (one that failed may have stopped on a calculation or data fault; one still
+//     marked running was interrupted, since registration holds the jobs lock; an older pass is
+//     never used instead of it) and graded the symbol (`health_coverage`), and it
+//     - stored its grades completely (an overall `data_health` row: verify stores the coverage,
+//       then the symbol rows, then the overall rows, so one overall row means every symbol row
+//       is stored),
+//     - graded from the symbol's first stored canonical bar or earlier (bars before it, kept
+//       from an earlier primary, are graded by no check),
+//     - graded through `through` (the latest session whose data is final at registration, the
+//       daily target: the conservative bound) and through the symbol's last stored canonical bar,
+//     - and graded no day of the symbol red. Yellow is allowed (computed with a warning, 04).
 // Unknown stays unknown: no pass, a stale pass or a pass that cannot be read refuses.
 //
 // Not checked here: the cash rate. Series (the cash rate, index series, FX) are graded for
@@ -36,7 +40,7 @@ import {
   parseTicker,
 } from '@saku/core';
 import { type Db, activeSymbols, getSetting, schema } from '@saku/db';
-import { and, desc, eq, inArray, isNotNull, isNull, max, min } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, max, min } from 'drizzle-orm';
 
 /** Full-history passes (they store `health_coverage`). */
 const FULL = ['bootstrap', 'weekly', 'checks'] as const;
@@ -78,11 +82,46 @@ export async function registrationProblems(
   if (missing.length) {
     problems.push(`Not in the universe: ${missing.join(', ')} (pnpm symbols import).`);
   }
-  for (const ticker of tickers) {
-    const id = known.get(ticker);
-    if (id !== undefined) problems.push(...(await symbolProblems(db, ticker, id, o.through)));
+
+  // The latest full-history run, whatever its status: one that failed, or is still marked
+  // running (interrupted: registration holds the jobs lock), decides; never an older one.
+  const r = schema.jobRuns;
+  const [run] = await db
+    .select({ id: r.id, jobType: r.jobType, status: r.status, dates: r.datesProcessed })
+    .from(r)
+    .where(inArray(r.jobType, [...FULL]))
+    .orderBy(desc(r.startedAt))
+    .limit(1);
+  const pass: Pass | undefined = run && {
+    ...run,
+    which: `the latest full check (run ${run.id}, ${run.jobType}${run.dates?.[0] ? ` for ${run.dates[0]}` : ''})`,
+  };
+  const used = tickers.filter((t) => known.has(t));
+  if (pass && used.length > 0 && pass.status !== 'success') {
+    problems.push(
+      `${capitalized(pass.which)} ${pass.status === 'running' ? 'was interrupted (it never finished)' : 'did not succeed'}; ` +
+        'fix what it reported, then run pnpm verify (full) again.',
+    );
+  }
+  for (const ticker of used) {
+    problems.push(...(await symbolProblems(db, ticker, known.get(ticker)!, o.through, pass)));
   }
   return problems;
+}
+
+interface Pass {
+  id: string;
+  status: string;
+  /** How the messages name it. */
+  which: string;
+}
+
+const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/** `n` dates as a list: the first `LISTED`, then how many more. */
+function listed(dates: string[]): string {
+  const more = dates.length > LISTED ? `, and ${dates.length - LISTED} more` : '';
+  return `${dates.slice(0, LISTED).join(', ')}${more}`;
 }
 
 async function symbolProblems(
@@ -90,62 +129,98 @@ async function symbolProblems(
   ticker: string,
   symbolId: number,
   through: TradingDate,
+  pass: Pass | undefined,
 ): Promise<string[]> {
+  const b = schema.bars;
   const [bars] = await db
-    .select({ first: min(schema.bars.date), last: max(schema.bars.date) })
-    .from(schema.bars)
-    .where(eq(schema.bars.symbolId, symbolId));
+    .select({ first: min(b.date), last: max(b.date) })
+    .from(b)
+    .where(eq(b.symbolId, symbolId));
   if (!bars?.first || !bars.last) {
     return [`${ticker}: no stored bars; run pnpm bootstrap, then pnpm verify.`];
   }
+  const problems: string[] = [];
+
+  // Each stored bar's grade as the latest run that graded it set it (what the forward record
+  // reads; a daily run after the pass rewrites it): no red one, whatever the pass found.
+  const redBars = (
+    await db
+      .select({ date: b.date })
+      .from(b)
+      .where(and(eq(b.symbolId, symbolId), eq(b.status, 'red')))
+      .orderBy(b.date)
+  ).map((x) => x.date);
+  if (redBars.length > 0) {
+    problems.push(
+      `${ticker}: ${redBars.length} stored ${redBars.length === 1 ? 'bar is' : 'bars are'} graded red: ` +
+        `${listed(redBars)}. Its data has not passed the checks (pnpm health --date <date> explains a day).`,
+    );
+  }
+
+  // A bar no run has graded (status NULL) is unknown, never taken as green.
+  const ungraded = (
+    await db
+      .select({ date: b.date })
+      .from(b)
+      .where(and(eq(b.symbolId, symbolId), isNull(b.status)))
+      .orderBy(b.date)
+  ).map((x) => x.date);
+  if (ungraded.length > 0) {
+    problems.push(
+      `${ticker}: ${ungraded.length} stored ${ungraded.length === 1 ? 'bar is' : 'bars are'} not graded: ` +
+        `${listed(ungraded)}. Run pnpm verify (full).`,
+    );
+  }
+
+  if (!pass) {
+    problems.push(
+      `${ticker}: its full history has not been checked; run pnpm verify (full) first.`,
+    );
+    return problems;
+  }
+  if (pass.status !== 'success') return problems; // Said once for every ticker.
 
   const c = schema.healthCoverage;
-  const r = schema.jobRuns;
-  const [pass] = await db
-    .select({
-      runId: r.id,
-      jobType: r.jobType,
-      status: r.status,
-      dates: r.datesProcessed,
-      from: c.fromDate,
-      to: c.toDate,
-    })
+  const [coverage] = await db
+    .select({ from: c.fromDate, to: c.toDate })
     .from(c)
-    .innerJoin(r, eq(r.id, c.runId))
-    .where(and(eq(c.symbolId, symbolId), isNotNull(r.finishedAt), inArray(r.jobType, [...FULL])))
-    .orderBy(desc(r.startedAt))
-    .limit(1);
-  if (!pass) {
-    return [`${ticker}: its full history has not been checked; run pnpm verify (full) first.`];
-  }
-  const which = `the latest full check (run ${pass.runId}, ${pass.jobType}${pass.dates?.[0] ? ` for ${pass.dates[0]}` : ''})`;
-  if (pass.status !== 'success') {
-    return [
-      `${ticker}: ${which} did not succeed; fix what it reported, then run pnpm verify (full) again.`,
-    ];
+    .where(and(eq(c.runId, pass.id), eq(c.symbolId, symbolId)));
+  if (!coverage) {
+    problems.push(`${ticker}: ${pass.which} did not grade it; run pnpm verify (full) again.`);
+    return problems;
   }
   const [overall] = await db
     .select({ id: schema.dataHealth.id })
     .from(schema.dataHealth)
-    .where(and(eq(schema.dataHealth.runId, pass.runId), isNull(schema.dataHealth.symbolId)))
+    .where(and(eq(schema.dataHealth.runId, pass.id), isNull(schema.dataHealth.symbolId)))
     .limit(1);
-  if (!isTradingDate(pass.from) || !isTradingDate(pass.to) || pass.from > pass.to || !overall) {
-    return [
-      `${ticker}: ${which} cannot be read (its grades are incomplete); run pnpm verify (full) again.`,
-    ];
+  if (
+    !isTradingDate(coverage.from) ||
+    !isTradingDate(coverage.to) ||
+    coverage.from > coverage.to ||
+    !overall
+  ) {
+    problems.push(
+      `${ticker}: ${pass.which} cannot be read (its grades are incomplete); run pnpm verify (full) again.`,
+    );
+    return problems;
   }
 
-  const problems: string[] = [];
-  if (pass.from > bars.first) {
+  if (coverage.from > bars.first) {
+    // Verify grades a symbol from its primary source's history; canonical bars before it (kept
+    // from an earlier primary, e.g. after a change of primary) are graded by no check.
     problems.push(
-      `${ticker}: ${which} graded from ${pass.from}, but its stored history starts ${bars.first}; ` +
-        'run pnpm verify (full) again.',
+      `${ticker}: its stored bars from ${bars.first} to before ${coverage.from} are graded by no ` +
+        "check: they are older than the primary source's history (kept from an earlier primary, " +
+        'e.g. after a change of primary). An admin gives the checks that history: a primary ' +
+        'source that has it (pnpm sources set bars <key> primary, then pnpm bootstrap), or the ' +
+        'history imported as a source with a role (pnpm csv import), then pnpm verify (full).',
     );
   }
   const end = bars.last > through ? bars.last : through;
-  if (pass.to < end) {
+  if (coverage.to < end) {
     problems.push(
-      `${ticker}: ${which} graded through ${pass.to}; registration needs it through ${end} ` +
+      `${ticker}: ${pass.which} graded through ${coverage.to}; registration needs it through ${end} ` +
         (bars.last < through
           ? '(the latest final session, not stored yet). After its daily run (pnpm daily), '
           : '(its latest stored bar). ') +
@@ -157,21 +232,17 @@ async function symbolProblems(
     .from(schema.dataHealth)
     .where(
       and(
-        eq(schema.dataHealth.runId, pass.runId),
+        eq(schema.dataHealth.runId, pass.id),
         eq(schema.dataHealth.symbolId, symbolId),
         eq(schema.dataHealth.status, 'red'),
       ),
     )
     .orderBy(schema.dataHealth.date);
   if (red.length > 0) {
-    const shown = red
-      .slice(0, LISTED)
-      .map((d) => `${d.date}${d.reasons.length ? ` (${d.reasons.join(', ')})` : ''}`);
-    const more = red.length > LISTED ? `, and ${red.length - LISTED} more` : '';
     problems.push(
       `${ticker}: ${red.length} red ${red.length === 1 ? 'day' : 'days'} in its history ` +
-        `(${which}): ${shown.join(', ')}${more}. Its data has not passed the checks ` +
-        '(pnpm health --date <date> explains a day).',
+        `(${pass.which}): ${listed(red.map((d) => `${d.date}${d.reasons.length ? ` (${d.reasons.join(', ')})` : ''}`))}. ` +
+        'Its data has not passed the checks (pnpm health --date <date> explains a day).',
     );
   }
   return problems;

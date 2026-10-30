@@ -33,7 +33,6 @@ import {
   getSetting,
   getUserByUsername,
   journalOf,
-  registerVersion,
   schema,
   setChannelEnabled,
   sha256,
@@ -46,9 +45,7 @@ import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA, verifyToken } from '../jobs/anchor';
-import { annotateStandInCorrections, recompute } from '../jobs/forward';
-import { lock } from '../jobs/lock';
-import { registrationProblems } from '../jobs/registration';
+import { type CommandOutput, recomputeRecords, registerStrategy } from '../jobs/strategy-commands';
 import { dailyAfterOf, dailyTarget } from '../jobs/target';
 import { codeVersion } from '../code-version';
 import { loadPlugins, notifierContexts, providerUsageStore } from '../registry';
@@ -61,27 +58,16 @@ const flag = (name: string) => {
   const i = rest.indexOf(`--${name}`);
   return i >= 0 ? rest[i + 1] : undefined;
 };
-/** Releases the jobs lock when this command holds it. */
-let release: (() => void) | undefined;
-const exit = (code: number): never => {
-  release?.();
-  process.exit(code);
-};
 const fail = (message: string): never => {
   console.error(message);
-  return exit(1);
+  process.exit(1);
 };
-
-/**
- * Commands that read check results or write annotations take the jobs lock, so they never run
- * during a job (half-rebuilt bars, duplicate append-only annotations).
- */
-function takeJobsLock() {
-  const held = lock('jobs');
-  if ('heldBy' in held)
-    fail(`A job is running (process ${held.heldBy}); try again when it is done.`);
-  release = (held as { release: () => void }).release;
-}
+/** Prints a command's output and exits with its code. */
+const finish = (o: CommandOutput): never => {
+  for (const line of o.stdout) console.log(line);
+  for (const line of o.stderr) console.error(line);
+  process.exit(o.exitCode);
+};
 
 const db = createDb(dbConfigFromEnv());
 await exitIfUnmigrated(db);
@@ -124,16 +110,7 @@ if (tool === 'strategy' && command === 'check') {
   } catch (e) {
     fail(e instanceof Error ? e.message : String(e));
   }
-  takeJobsLock();
-  try {
-    const problems = await registrationProblems(db, s, { through: through! });
-    if (problems.length) fail(`Not registered:\n${problems.map((p) => `- ${p}`).join('\n')}`);
-    const v = await registerVersion(db, { ownerId, name: s.name, strategy: s });
-    console.log(`Registered ${s.name}: version ${v.id}, hash ${v.hash}.`);
-    console.log('Its forward record starts with the first close after now.');
-  } finally {
-    release?.();
-  }
+  finish(await registerStrategy(db, { strategy: s, ownerId, through: through! }));
 } else if (tool === 'strategy' && command === 'list') {
   for (const v of await allVersions(db)) {
     const record = await forwardRecord(db, v.id);
@@ -180,26 +157,7 @@ if (tool === 'strategy' && command === 'check') {
   }
   process.exit(bad ? 1 : 0);
 } else if (tool === 'strategy' && command === 'recompute') {
-  takeJobsLock();
-  try {
-    // Corrected stand-ins first, as the runs do: a day one explains is not a recompute difference.
-    const c = await annotateStandInCorrections(db, null);
-    if (c.annotations) console.log(`${c.annotations} stand-in corrections annotated.`);
-    for (const e of c.errors) console.log(e);
-    const r = await recompute(db, { runId: null, code: codeVersion() });
-    for (const d of r.differences) {
-      console.log(`${d.version} ${d.date}: recorded ${d.recorded}, now ${d.now} (annotated)`);
-    }
-    for (const e of r.errors) {
-      const what = e.kind === 'parse' ? 'definition does not parse' : 'could not evaluate';
-      console.log(`${e.version}: ${what} (${e.error})`);
-    }
-    if (r.differences.length) console.log('The next daily run alerts the admins.');
-    console.log(`${r.checked} recorded days, ${r.differences.length} new differences.`);
-    exit(r.differences.length || r.errors.length || c.errors.length ? 1 : 0);
-  } finally {
-    release?.();
-  }
+  finish(await recomputeRecords(db, { code: codeVersion() }));
 } else if (tool === 'journal' && command === 'add') {
   const [versionId, signalDate, action] = rest;
   if (!versionId || !signalDate || !isTradingDate(signalDate))

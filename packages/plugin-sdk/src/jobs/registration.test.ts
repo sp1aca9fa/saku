@@ -12,7 +12,7 @@ import {
   upsertSymbols,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { SAME_CLOSE_REFUSAL, registrationProblems, registrationTickers } from './registration';
 import { verify } from './verify';
@@ -65,9 +65,15 @@ async function setup(o: { tickers?: string[]; recordsFrom?: boolean } = {}) {
   const ids: Record<string, number> = {};
   for (const t of tickers) {
     ids[t] = (await symbolId(db, t))!;
-    await db
-      .insert(schema.bars)
-      .values(D.map((date) => ({ symbolId: ids[t]!, date, close: 1, source: 'p' })));
+    await db.insert(schema.bars).values(
+      D.map((date) => ({
+        symbolId: ids[t]!,
+        date,
+        close: 1,
+        source: 'p',
+        status: 'green' as const,
+      })),
+    );
   }
   if (o.recordsFrom !== false) await setSetting(db, 'forward_records_from', D[0]);
   /**
@@ -160,7 +166,7 @@ describe('registrationProblems', () => {
     expect(registrationTickers(strategy({ safe: 'CASH_USD' }))).toEqual(['AAA']);
     await pass({ only: ['AAA'] });
     expect(await check(db, strategy({ safe: 'BBB' }))).toEqual([
-      expect.stringMatching(/^BBB: its full history has not been checked/),
+      expect.stringMatching(/^BBB: the latest full check \(run .+\) did not grade it/),
     ]);
   });
 
@@ -182,7 +188,9 @@ describe('registrationProblems', () => {
     const { db, pass } = await setup();
     await pass({ from: D[1] });
     expect(await check(db)).toEqual([
-      expect.stringMatching(/graded from 2026-01-06, but its stored history starts 2026-01-05/),
+      expect.stringMatching(
+        /^AAA: its stored bars from 2026-01-05 to before 2026-01-06 are graded by no check: .*earlier primary.*An admin/,
+      ),
     ]);
   });
 
@@ -205,9 +213,15 @@ describe('registrationProblems', () => {
     await setSetting(many, 'forward_records_from', D[0]);
     const id = (await symbolId(many, 'AAA'))!;
     const days = sessions.between('2026-01-02', '2026-01-20');
-    await many
-      .insert(schema.bars)
-      .values(days.map((date) => ({ symbolId: id, date, close: 1, source: 'p' })));
+    await many.insert(schema.bars).values(
+      days.map((date) => ({
+        symbolId: id,
+        date,
+        close: 1,
+        source: 'p',
+        status: 'green' as const,
+      })),
+    );
     const r = await run(many, 'weekly', days.at(-1)!);
     await many
       .insert(schema.healthCoverage)
@@ -234,19 +248,80 @@ describe('registrationProblems', () => {
     expect(listed!.match(/primary_missing/g)).toHaveLength(10);
   });
 
-  it('reads only the latest finished pass: a later red one refuses, an unfinished one is ignored', async () => {
+  it('reads only the latest full run: a later red one refuses, so does an interrupted one', async () => {
     const { db, pass } = await setup();
     await pass();
     await pass({ rows: [{ ticker: 'AAA', date: D[0], status: 'red', reasons: ['x'] }] });
     expect(await check(db)).toEqual([expect.stringMatching(/^AAA: 1 red day in its history/)]);
 
+    // Still marked running (registration holds the jobs lock, so it was interrupted).
     const { db: db2, pass: pass2 } = await setup();
     await pass2();
-    await pass2({
-      finished: false,
-      rows: [{ ticker: 'AAA', date: D[0], status: 'red', reasons: ['x'] }],
-    });
-    expect(await check(db2)).toEqual([]);
+    await pass2({ finished: false });
+    expect(await check(db2)).toEqual([
+      expect.stringMatching(/^The latest full check \(run .+, checks\) was interrupted/),
+    ]);
+  });
+
+  it('refuses a later failed full run without coverage, never falling back', async () => {
+    const { db, pass } = await setup();
+    await pass();
+    await run(db, 'weekly', LAST, { ok: false });
+    expect(await check(db)).toEqual([
+      expect.stringMatching(
+        /^The latest full check \(run .+, weekly for 2026-01-08\) did not succeed/,
+      ),
+    ]);
+  });
+
+  it('refuses stored bars graded red, whatever the pass found (a later daily run grades them)', async () => {
+    const { db, ids, pass } = await setup();
+    await pass();
+    await db
+      .update(schema.bars)
+      .set({ status: 'red' })
+      .where(and(eq(schema.bars.symbolId, ids.AAA!), eq(schema.bars.date, D[3])));
+    expect(await check(db)).toEqual([
+      'AAA: 1 stored bar is graded red: 2026-01-08. Its data has not passed the checks (pnpm health --date <date> explains a day).',
+    ]);
+    await db.update(schema.bars).set({ status: 'red' }).where(eq(schema.bars.symbolId, ids.AAA!));
+    await db.update(schema.bars).set({ status: 'yellow' }).where(eq(schema.bars.date, D[0]));
+    expect(await check(db)).toEqual([
+      expect.stringMatching(
+        /^AAA: 3 stored bars are graded red: 2026-01-06, 2026-01-07, 2026-01-08\./,
+      ),
+    ]);
+  });
+
+  it('refuses stored bars no run has graded (unknown, not green)', async () => {
+    const { db, ids, pass } = await setup();
+    await pass();
+    await db
+      .update(schema.bars)
+      .set({ status: null })
+      .where(and(eq(schema.bars.symbolId, ids.AAA!), eq(schema.bars.date, D[1])));
+    expect(await check(db)).toEqual([
+      'AAA: 1 stored bar is not graded: 2026-01-06. Run pnpm verify (full).',
+    ]);
+    await db.update(schema.bars).set({ status: null }).where(eq(schema.bars.symbolId, ids.AAA!));
+    expect(await check(db)).toEqual([
+      'AAA: 4 stored bars are not graded: 2026-01-05, 2026-01-06, 2026-01-07, 2026-01-08. Run pnpm verify (full).',
+    ]);
+  });
+
+  it('lists the first 10 red bars and a count', async () => {
+    const db = await testDb();
+    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    const id = (await symbolId(db, 'AAA'))!;
+    const days = sessions.between('2026-01-02', '2026-01-20');
+    await db
+      .insert(schema.bars)
+      .values(
+        days.map((date) => ({ symbolId: id, date, close: 1, source: 'p', status: 'red' as const })),
+      );
+    const [p] = (await check(db, strategy(), days.at(-1)!)).filter((x) => x.startsWith('AAA'));
+    expect(p).toMatch(/^AAA: 13 stored bars are graded red: .*, and 3 more\./);
+    expect(p!.match(/2026-01-/g)).toHaveLength(10);
   });
 
   it('refuses when the latest pass failed, never falling back to an older one', async () => {
@@ -254,7 +329,7 @@ describe('registrationProblems', () => {
     await pass();
     await pass({ ok: false });
     expect(await check(db)).toEqual([
-      expect.stringMatching(/^AAA: the latest full check \(run .+\) did not succeed/),
+      expect.stringMatching(/^The latest full check \(run .+\) did not succeed/),
     ]);
   });
 
@@ -326,7 +401,9 @@ describe('registrationProblems on what verify stores', () => {
     const { db, id } = await verified([...closes.slice(0, 3), 110]);
     const red = await db.select().from(schema.dataHealth).where(eq(schema.dataHealth.runId, id));
     expect(red.some((r) => r.symbolId !== null && r.status === 'red')).toBe(true);
+    // Both the bar's grade and the pass's red day.
     expect(await check(db)).toEqual([
+      'AAA: 1 stored bar is graded red: 2026-01-08. Its data has not passed the checks (pnpm health --date <date> explains a day).',
       expect.stringMatching(/^AAA: 1 red day in its history .*: 2026-01-08 \(B\.close_match@s\)/),
     ]);
   });
