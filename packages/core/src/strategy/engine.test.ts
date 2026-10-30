@@ -183,6 +183,20 @@ describe('Strategy schema', () => {
         allocations: [{ name: 'a', holdings: [{ ticker: 'X', weight: 60 }] }],
       }),
     ).toThrow(/add up to 100/);
+    expect(() =>
+      Strategy.parse({
+        ...base,
+        allocations: [
+          {
+            name: 'a',
+            holdings: [
+              { ticker: 'X', weight: 50 },
+              { ticker: 'X', weight: 50 },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/at most once/);
   });
 
   it('defaults to next-day execution', () => {

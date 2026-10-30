@@ -48,6 +48,10 @@ const holdings = z
   .min(1)
   .refine((hs) => Math.abs(hs.reduce((s, h) => s + h.weight, 0) - 100) < 1e-9, {
     message: 'weights must add up to 100',
+  })
+  // A ticker listed twice would trade only one of its weights (the trade keeps one per ticker).
+  .refine((hs) => new Set(hs.map((h) => h.ticker)).size === hs.length, {
+    message: 'each ticker at most once per allocation',
   });
 
 export const Condition = z
