@@ -37,7 +37,15 @@ import { probe } from '../jobs/probe';
 import { runJob } from '../jobs/run';
 import { GATE, type SpikeReport, spikeFrom, spikeReport, verdict } from '../jobs/spike';
 import { dailyAfterOf, dailyTarget } from '../jobs/target';
-import { loadPlugins, notifierContexts, pluginContext, providerUsageStore } from '../registry';
+import {
+  allInfos,
+  loadPlugins,
+  notifierContexts,
+  pluginContext,
+  providerUsageStore,
+  savePluginInfos,
+  savedPluginInfos,
+} from '../registry';
 import { assertServerOnly } from '../server-only';
 import { USAGE, parseJobArgs } from './jobs-args';
 
@@ -119,11 +127,14 @@ if (job === 'probe') {
   const ticker = process.env.SAKU_PROBE_TICKER?.trim() || (await activeSymbols(db))[0]?.ticker;
   if (!ticker) throw new Error('No symbols: run pnpm symbols import first.');
   const today = sessions.onOrBefore(tradingDateOf(now));
+  // Saved first, like a run: a provider id the probe sends under is remembered when it changes.
+  await savePluginInfos(db, allInfos(plugins), now);
   const lines = await probe(plugins, {
     ticker,
     from: sessions.before(today, 2),
     to: today,
     context: (info) => pluginContext(info, log, { usage: providerUsageStore(db), finalAfter }),
+    saved: await savedPluginInfos(db),
   });
   for (const l of lines.filter((l) => l.error)) log.warn(`probe ${l.source}: ${l.error}`);
   held.release();

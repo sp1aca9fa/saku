@@ -1,5 +1,5 @@
 import { Sessions } from '@saku/data';
-import { schema } from '@saku/db';
+import { recordProviderRequest, schema } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +14,7 @@ import {
   providerQuotas,
   providerUsageStore,
   savePluginInfos,
+  savedPluginInfos,
   validateInfos,
 } from './registry';
 import { PoliteHttp, QuotaError, type UsageStore } from './http';
@@ -160,6 +161,59 @@ describe('plug-in registry', () => {
     expect([...keys]).toEqual([['acme', ['acme-bars']]]);
   });
 
+  it('formerKeys: provider ids from the saved descriptions (renamed, removed, added)', () => {
+    const saved = [
+      { key: 'acme-bars', kind: 'bar', description: { key: 'acme-bars', provider: 'acme' } },
+      {
+        key: 'acme-fx',
+        kind: 'fx',
+        description: { key: 'acme-fx', provider: 'acme-corp', formerProviders: ['acme-old'] },
+      },
+      { key: 'solo', kind: 'bar', description: { key: 'solo', provider: 'solo-co' } },
+      { key: 'fresh', kind: 'bar', description: { key: 'fresh' } },
+      { key: 'days', kind: 'calendar', description: { key: 'days', provider: 'x-days' } },
+      // Another kind under the same key: not this plug-in's row.
+      { key: 'fresh', kind: 'fx', description: { key: 'fresh', provider: 'elsewhere' } },
+      // A removed plug-in's row is not read (even unreadable).
+      { key: 'gone', kind: 'bar', description: 'garbage' },
+    ];
+    const keys = formerKeys(
+      [
+        // Renamed acme to acme-corp; the fx plug-in was already saved under it.
+        { key: 'acme-bars', kind: 'bar', provider: 'acme-corp' },
+        { key: 'acme-fx', kind: 'fx', provider: 'acme-corp' },
+        // Removed: back to the key.
+        { key: 'solo', kind: 'bar' },
+        // Added: the key counts (as before).
+        { key: 'fresh', kind: 'bar', provider: 'fresh-co' },
+        { key: 'days', kind: 'calendar' },
+      ],
+      saved,
+    );
+    expect([...keys]).toEqual([
+      ['acme-corp', ['acme-bars', 'acme', 'acme-fx', 'acme-old']],
+      ['solo', ['solo-co']],
+      ['fresh-co', ['fresh']],
+    ]);
+  });
+
+  it('fault: an unreadable saved description of a loaded plug-in throws (history unknown)', () => {
+    const loaded = [{ key: 'acme-bars', kind: 'bar' as const }];
+    for (const description of [
+      null,
+      'text',
+      [],
+      { provider: 7 },
+      { provider: 'Bad Id' },
+      { formerProviders: 'acme' },
+      { formerProviders: ['acme', 3] },
+    ]) {
+      expect(() => formerKeys(loaded, [{ key: 'acme-bars', kind: 'bar', description }])).toThrow(
+        /bar acme-bars unreadable/,
+      );
+    }
+  });
+
   it('providerQuotas: the guarded count loads the history of former keys too', async () => {
     const asked: string[] = [];
     const store: UsageStore = {
@@ -209,6 +263,102 @@ describe('plug-in registry', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ savedAt: '2026-01-02T00:00:00.000Z' });
     expect((rows[0]!.description as PluginInfo).name).toBe('Renamed');
+  });
+
+  describe('saved provider ids', () => {
+    const at = (iso: string) => new Date(iso);
+    const stored = (db: Awaited<ReturnType<typeof testDb>>) =>
+      savedPluginInfos(db).then((rows) =>
+        rows.map((r) => r.description as Record<string, unknown>),
+      );
+
+    it('a renamed provider id is saved as former while its usage counts, merged across saves', async () => {
+      const db = await testDb();
+      const bars: PluginInfo = { ...info, provider: 'acme' };
+      await savePluginInfos(db, [bars], at('2026-01-01T00:00:00Z'));
+      await recordProviderRequest(db, {
+        provider: 'acme',
+        at: Date.parse('2026-01-01T12:00:00Z'),
+        symbol: 'AAA',
+      });
+      // Renamed: acme is remembered (its symbol counts for 31 days).
+      await savePluginInfos(db, [{ ...bars, provider: 'acme-corp' }], at('2026-01-02T00:00:00Z'));
+      expect((await stored(db))[0]).toMatchObject({
+        provider: 'acme-corp',
+        formerProviders: ['acme'],
+      });
+      // Renamed again after acme-corp stored usage: both kept.
+      await recordProviderRequest(db, {
+        provider: 'acme-corp',
+        at: Date.parse('2026-01-02T12:00:00Z'),
+        symbol: 'BBB',
+      });
+      await savePluginInfos(db, [{ ...bars, provider: 'acme-x' }], at('2026-01-03T00:00:00Z'));
+      expect((await stored(db))[0]).toMatchObject({ formerProviders: ['acme', 'acme-corp'] });
+      // A save that changes nothing keeps them.
+      await savePluginInfos(db, [{ ...bars, provider: 'acme-x' }], at('2026-01-04T00:00:00Z'));
+      expect((await stored(db))[0]).toMatchObject({ formerProviders: ['acme', 'acme-corp'] });
+      // Back to acme: it is the provider again, not a former id; acme-x never stored usage.
+      await savePluginInfos(db, [bars], at('2026-01-05T00:00:00Z'));
+      expect((await stored(db))[0]).toMatchObject({
+        provider: 'acme',
+        formerProviders: ['acme-corp'],
+      });
+    });
+
+    it('an old id is dropped once no window counts its rows; a removed id goes back to the key', async () => {
+      const db = await testDb();
+      await savePluginInfos(db, [{ ...info, provider: 'acme' }], at('2026-01-01T00:00:00Z'));
+      await recordProviderRequest(db, {
+        provider: 'acme',
+        at: Date.parse('2026-01-01T12:00:00Z'),
+        symbol: 'AAA',
+      });
+      // Removed (back to the key): acme still counts on day 31.
+      await savePluginInfos(db, [info], at('2026-02-01T00:00:00Z'));
+      expect((await stored(db))[0]).toMatchObject({ formerProviders: ['acme'] });
+      expect((await stored(db))[0]!.provider).toBeUndefined();
+      // Day 33: the symbol's day is outside 31 days and no request is in the last day.
+      await savePluginInfos(db, [info], at('2026-02-03T00:00:00Z'));
+      expect((await stored(db))[0]!.formerProviders).toBeUndefined();
+      // Rows without a symbol count only for a day.
+      const db2 = await testDb();
+      await savePluginInfos(db2, [{ ...info, provider: 'acme' }], at('2026-01-01T00:00:00Z'));
+      await recordProviderRequest(db2, {
+        provider: 'acme',
+        at: Date.parse('2026-01-01T12:00:00Z'),
+        symbol: null,
+      });
+      await savePluginInfos(db2, [info], at('2026-01-02T11:00:00Z'));
+      expect((await stored(db2))[0]).toMatchObject({ formerProviders: ['acme'] });
+      await savePluginInfos(db2, [info], at('2026-01-02T13:00:00Z'));
+      expect((await stored(db2))[0]!.formerProviders).toBeUndefined();
+    });
+
+    it('a calendar gets no former ids; an unreadable saved description stops the save', async () => {
+      const db = await testDb();
+      const days: PluginInfo = { ...info, key: 'days', kind: 'calendar', provider: 'x-days' };
+      await savePluginInfos(db, [days], at('2026-01-01T00:00:00Z'));
+      await recordProviderRequest(db, {
+        provider: 'x-days',
+        at: Date.parse('2026-01-01T01:00:00Z'),
+        symbol: 'A',
+      });
+      await savePluginInfos(db, [{ ...days, provider: undefined }], at('2026-01-01T02:00:00Z'));
+      expect((await stored(db))[0]!.formerProviders).toBeUndefined();
+      await db
+        .update(schema.pluginInfo)
+        .set({ description: { key: 'days', provider: 'NOT AN ID' } });
+      await expect(
+        savePluginInfos(db, [{ ...info, key: 'days', kind: 'bar' }, days]),
+      ).resolves.toBeUndefined();
+      await db.delete(schema.pluginInfo);
+      await savePluginInfos(db, [info], at('2026-01-01T00:00:00Z'));
+      await db.update(schema.pluginInfo).set({ description: { key: 'example', provider: 3 } });
+      await expect(savePluginInfos(db, [info], at('2026-01-01T01:00:00Z'))).rejects.toThrow(
+        /bar example unreadable/,
+      );
+    });
   });
 
   it('hands over the key, and stops when it is missing', () => {

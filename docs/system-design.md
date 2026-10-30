@@ -122,7 +122,7 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `backup_codes`, `login_attempts` | | Auth |
 | `app_settings` | key, value | Install-wide admin settings (base currency, time zone, languages, regime, ...) |
 | `user_settings` | owner_id, example_amount, defaults (json) | Per user |
-| `plugin_info` | key, kind, description (json), saved_at | Written by each job run |
+| `plugin_info` | key, kind, description (json), saved_at | Written by each job run; the description also keeps `formerProviders` (provider ids it was saved under before, while their usage still counts) |
 | `source_roles` | data_kind, plugin_key, role, position | Admin's choice |
 | `symbols` | id, ticker, tier, asset_class, leverage_factor, underlying_symbol_id, index_series, issuer, inception_date, active | Leverage, underlying and index series drive layer C |
 | `bars_raw` | symbol_id, date, source, open, high, low, close, close_is_split_adjusted, volume, div_cash, split_factor, provider_adj_close, fetched_at; PK (symbol_id, date, source) | Never deleted |

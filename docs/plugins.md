@@ -61,8 +61,12 @@ the descriptions to the database. The fields:
   share one count: in a run their clients are paced together, and across runs the usage is
   stored under the provider id. Usage a plug-in stored under its key before it declared the
   provider still counts (loaded with the provider's); new usage goes under the provider id only.
-  Same form as a key; keep it once usage is stored (changing one provider id to another starts
-  without the old id's history). Notifier keys share this namespace: a notifier whose key equals
+  Same form as a key. Changing or removing it later keeps the old id's usage counting: each run
+  (and `pnpm plugins`, `pnpm probe`) saves the plug-in's description with the provider ids it
+  was saved under before (`formerProviders`), and the quota guard loads their stored requests
+  and symbols with the new id's. An old id is remembered while it still has usage the windows
+  count (requests in the last day, symbols in the last 31 days) and dropped after; a saved
+  description that cannot be read stops the run (its history unknown). Notifier keys share this namespace: a notifier whose key equals
   a data provider id counts with it, so it must not equal one unless their limits match.
 - `keyEnv`: the environment variable(s) holding the key, read from `.env`.
 - `termsUrl`: the provider's terms.

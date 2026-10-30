@@ -163,6 +163,43 @@ describe('probe', () => {
     expect(apart.recorded).toEqual(['acme-a', 'acme-b']);
   });
 
+  it('a renamed provider id: the old id from the saved description still counts', async () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'saku-probe-')), 'probe.jsonl');
+    const loaded: string[] = [];
+    // OLD was requested this month under the old id only.
+    const store: UsageStore = {
+      load: async (id) => {
+        loaded.push(id);
+        return { requests: [], symbols: new Map(id === 'acme' ? [['OLD', Date.now()]] : []) };
+      },
+      record: async () => {},
+    };
+    const fetching: BarSource = {
+      info: { ...source('a', async () => []).info, provider: 'acme-corp' },
+      fetchBars: async (_t, _f, to, ctx) => {
+        await ctx.http.json('https://example.test/bars');
+        return [{ date: to, close: 1, closeIsSplitAdjusted: false, divCash: 0, splitFactor: 1 }];
+      },
+    };
+    const lines = await probe(
+      { ...emptyPlugins(), bars: [fetching] },
+      {
+        ticker: 'AAA',
+        from: '2026-01-01',
+        to: '2026-01-05',
+        context: (info) =>
+          pluginContext({ ...info, limits: { symbolsPerMonth: 1 } }, quiet, {
+            usage: store,
+            http: { minDelayMs: 0, fetchImpl: (async () => new Response('{}')) as typeof fetch },
+          }),
+        file,
+        saved: [{ key: 'a', kind: 'bar', description: { key: 'a', provider: 'acme' } }],
+      },
+    );
+    expect(lines[0]).toMatchObject({ error: expect.stringMatching(/symbols/) });
+    expect(loaded).toEqual(['acme-corp', 'a', 'acme']);
+  });
+
   it('finds when a bar first appeared and last changed', () => {
     const l = (at: string, close: number) => ({ at, source: 'a', ticker: 'AAA', date: 'd', close });
     expect(finalization([l('t1', 10), l('t2', 10.1), l('t3', 10.1), l('t4', 10.1)])).toEqual([

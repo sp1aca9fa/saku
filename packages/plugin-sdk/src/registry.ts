@@ -153,21 +153,79 @@ export function providerOf(info: Pick<PluginInfo, 'key'> & Pick<Partial<PluginIn
 }
 
 /**
- * Per provider id, the keys of the loaded plug-ins that declare it under another id: their
- * requests were stored under those keys before they declared the provider, and still count
- * (`PoliteHttp.alsoCount`). Calendars send no requests and are left out.
+ * A plug-in's saved description as read back from `plugin_info` (unknown shape until checked).
+ * Saved descriptions carry `formerProviders`: the other provider ids its requests were stored
+ * under (see `savePluginInfos`).
+ */
+export interface SavedPluginInfo {
+  key: string;
+  kind: string;
+  description: unknown;
+}
+
+/** The descriptions the last run saved (a removed plug-in keeps its row). */
+export async function savedPluginInfos(db: Db): Promise<SavedPluginInfo[]> {
+  return db
+    .select({
+      key: schema.pluginInfo.key,
+      kind: schema.pluginInfo.kind,
+      description: schema.pluginInfo.description,
+    })
+    .from(schema.pluginInfo);
+}
+
+/**
+ * The provider ids a saved description says the plug-in's requests were stored under: its saved
+ * provider (`provider`, default the key) and the former ids saved with it. An unreadable
+ * description throws: those ids, so that history, would be unknown (requirements 04 "Quota
+ * guard": unknown history sends nothing).
+ */
+function savedProviderIds(saved: SavedPluginInfo): string[] {
+  const d = saved.description;
+  const unreadable = () =>
+    new Error(
+      `Saved description of ${saved.kind} ${saved.key} unreadable: the provider ids its usage is stored under are unknown.`,
+    );
+  if (d === null || typeof d !== 'object' || Array.isArray(d)) throw unreadable();
+  const { provider, formerProviders } = d as Record<string, unknown>;
+  if (provider !== undefined && (typeof provider !== 'string' || !KEY.test(provider))) {
+    throw unreadable();
+  }
+  if (
+    formerProviders !== undefined &&
+    (!Array.isArray(formerProviders) ||
+      formerProviders.some((id) => typeof id !== 'string' || !KEY.test(id)))
+  ) {
+    throw unreadable();
+  }
+  return [(provider as string | undefined) ?? saved.key, ...((formerProviders as string[]) ?? [])];
+}
+
+/**
+ * Per provider id, the other ids the loaded plug-ins' requests were stored under, whose stored
+ * history still counts for it (`PoliteHttp.alsoCount`; requirements 04 "Quota guard"):
+ * - the key of a plug-in that declares a provider (its requests went under its key before);
+ * - from its saved description (`saved`, matched by key and kind), the provider id it was saved
+ *   with and the former ids saved with that (`savePluginInfos`), when they differ from the
+ *   current one: a renamed provider id (acme to acme-corp) or a removed one (acme to the key)
+ *   still counts the old id's rows.
+ * Calendars send no requests and are left out. An unreadable saved description of a loaded
+ * plug-in throws (its history unknown).
  */
 export function formerKeys(
   infos: (Pick<PluginInfo, 'key' | 'kind'> & Pick<Partial<PluginInfo>, 'provider'>)[],
+  saved: readonly SavedPluginInfo[] = [],
 ): Map<string, string[]> {
   const out = new Map<string, string[]>();
   for (const info of infos) {
-    if (info.kind === 'calendar' || info.provider === undefined || info.provider === info.key) {
-      continue;
-    }
-    const keys = out.get(info.provider) ?? [];
-    if (!keys.includes(info.key)) keys.push(info.key);
-    out.set(info.provider, keys);
+    if (info.kind === 'calendar') continue;
+    const provider = providerOf(info);
+    const row = saved.find((s) => s.key === info.key && s.kind === info.kind);
+    const ids = [info.key, ...(row ? savedProviderIds(row) : [])].filter((id) => id !== provider);
+    if (ids.length === 0) continue;
+    const keys = out.get(provider) ?? [];
+    for (const id of ids) if (!keys.includes(id)) keys.push(id);
+    out.set(provider, keys);
   }
   return out;
 }
@@ -208,16 +266,48 @@ export function providerQuotas(
   };
 }
 
-/** Saves every plug-in's description (done by each job run); Settings lists them from here. */
+/**
+ * Saves every plug-in's description (done by each job run and `pnpm plugins`); Settings lists
+ * them from here. A provider id changed or removed must not drop the usage stored under the old
+ * one (requirements 04 "Quota guard"), so each description is saved with `formerProviders`: the
+ * provider ids of its saved description (its saved provider and former ids) other than its
+ * current one, merged across saves. An id is kept while the quota guard would still count rows
+ * stored under it (requests in the last day or symbols in the last 31 days, read at the earlier
+ * of `now` and the system clock, like the guard) and dropped once none are left: it is
+ * remembered as long as its usage can count, and no longer. An unreadable saved description
+ * throws (its ids unknown). Calendars send no requests and get none.
+ */
 export async function savePluginInfos(db: Db, infos: PluginInfo[], now = new Date()) {
   const savedAt = now.toISOString();
+  const saved = await savedPluginInfos(db);
+  const readAt = Math.min(now.getTime(), Date.now());
+  const counts = new Map<string, boolean>();
+  const stillCounts = async (id: string) => {
+    let c = counts.get(id);
+    if (c === undefined) {
+      const h = await providerUsageSince(db, id, readAt);
+      c = h.requests.length > 0 || h.symbols.size > 0;
+      counts.set(id, c);
+    }
+    return c;
+  };
   for (const info of infos) {
+    const row = saved.find((s) => s.key === info.key && s.kind === info.kind);
+    const former: string[] = [];
+    if (row && info.kind !== 'calendar') {
+      for (const id of savedProviderIds(row)) {
+        if (id !== providerOf(info) && !former.includes(id) && (await stillCounts(id))) {
+          former.push(id);
+        }
+      }
+    }
+    const description = former.length > 0 ? { ...info, formerProviders: former.sort() } : info;
     await db
       .insert(schema.pluginInfo)
-      .values({ key: info.key, kind: info.kind, description: info, savedAt })
+      .values({ key: info.key, kind: info.kind, description, savedAt })
       .onConflictDoUpdate({
         target: [schema.pluginInfo.key, schema.pluginInfo.kind],
-        set: { description: info, savedAt },
+        set: { description, savedAt },
       });
   }
 }

@@ -4,11 +4,18 @@
 // The CLI gives each source a client with the quota guard's store, so probe requests count
 // toward the provider's limits across runs like any other; within the probe, the clients of one
 // provider share one count and one block (`providerQuotas`), with the history stored under their
-// keys before they declared the provider.
+// keys before they declared the provider and under provider ids they were saved with before
+// (`saved`, see `formerKeys`).
 import { stateDir } from '@saku/db/env';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { type LoadedPlugins, allInfos, formerKeys, providerQuotas } from '../registry';
+import {
+  type LoadedPlugins,
+  type SavedPluginInfo,
+  allInfos,
+  formerKeys,
+  providerQuotas,
+} from '../registry';
 import type { PluginContext, PluginInfo } from '../types';
 
 export interface ProbeLine {
@@ -32,12 +39,14 @@ export async function probe(
     context: (info: PluginInfo) => PluginContext;
     now?: () => Date;
     file?: string;
+    /** The saved plug-in descriptions (`savedPluginInfos`): former provider ids still count. */
+    saved?: readonly SavedPluginInfo[];
   },
 ): Promise<ProbeLine[]> {
   const now = o.now ?? (() => new Date());
   const lines: ProbeLine[] = [];
   // No store here: the contexts carry it (a context without one is counted in the run only).
-  const quota = providerQuotas(undefined, undefined, formerKeys(allInfos(plugins)));
+  const quota = providerQuotas(undefined, undefined, formerKeys(allInfos(plugins), o.saved));
   for (const source of plugins.bars) {
     const base = { source: source.info.key, ticker: o.ticker };
     try {

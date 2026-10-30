@@ -60,8 +60,9 @@ export interface PluginInfo {
    * The provider whose limits the plug-in's requests count against (requirements 04 "Quota
    * guard"); default: the key. Plug-ins of one provider (e.g. its bars and its FX) declare the
    * same id and the same `limits`, so their requests together stay under 80% of each limit, in a
-   * run and across runs (the stored usage is counted under it). Same form as a key; keep it once
-   * usage is stored, since a new id starts with no history.
+   * run and across runs (the stored usage is counted under it). Same form as a key. Changing or
+   * removing it keeps the old id's stored usage counting (remembered in the saved description,
+   * `savePluginInfos`) for as long as the quota guard's windows can count it.
    */
   provider?: string;
   limits?: ProviderLimits;

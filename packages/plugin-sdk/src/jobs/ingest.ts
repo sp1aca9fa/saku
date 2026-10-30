@@ -9,7 +9,8 @@
 // `PluginInfo.provider`, default the key), on the run's clock when one is injected. The clients of
 // all sources of one provider share one count in the run, so together they stay under 80%, and
 // one block: a 429 or a challenge page stops them all (a 403 only its own). History stored under a
-// plug-in's key before it declared its provider still counts. A bar, meta or issuer fetch names
+// plug-in's key before it declared its provider, or under a provider id it declared before (its
+// saved description, `formerKeys`), still counts. A bar, meta or issuer fetch names
 // its symbol first, so a provider's symbols-per-month limit holds: a new symbol it refuses fails
 // that item only (symbols already counted are still fetched); a request window it cannot wait out
 // stops the source like a block.
@@ -39,6 +40,7 @@ import {
   formerKeys,
   providerQuotas,
   providerUsageStore,
+  savedPluginInfos,
 } from '../registry';
 import type { IssuerSource, Logger, PluginContext, PluginInfo } from '../types';
 import type { IssuerAvailability } from './verify';
@@ -209,11 +211,12 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
   const now = o.now ?? (() => new Date());
   const reports: SourceReport[] = [];
   // One count per provider for the whole run, guarded across runs on the run's clock, with the
-  // history its plug-ins stored under their own keys before they declared the provider.
+  // history its plug-ins stored under their own keys before they declared the provider and under
+  // the provider ids they were saved with before (a renamed or removed id).
   const quota = providerQuotas(
     o.usage ?? providerUsageStore(db),
     o.now && (() => now().getTime()),
-    formerKeys(allInfos(plugins)),
+    formerKeys(allInfos(plugins), await savedPluginInfos(db)),
   );
   const dailyFrom = o.sessions.before(o.sessions.onOrBefore(o.to), DAILY_OVERLAP);
   const wanted = (inception?: string | null) =>

@@ -11,7 +11,7 @@ import { testDb } from '@saku/db/testing';
 import { Sessions } from '@saku/data';
 import { describe, expect, it } from 'vitest';
 import { BlockedError, PoliteHttp, type UsageStore } from '../http';
-import { emptyPlugins } from '../registry';
+import { allInfos, emptyPlugins, providerUsageStore, savePluginInfos } from '../registry';
 import type {
   BarSource,
   FxSource,
@@ -530,6 +530,103 @@ describe('ingest: quota guard across runs', () => {
       expect(minutes('acme-bars')).toBe(8);
       expect(minutes('acme')).toBe(p.times.length);
       expect(new Set(rows.map((x) => x.provider))).toEqual(new Set(['acme', 'acme-bars']));
+    });
+
+    /**
+     * The plug-ins first saved under `from` (undefined: their keys) with usage stored under it at
+     * the run's start: 8 requests (80% of 10 per minute) in the last minute and BBB this month
+     * (80% of 2 symbols is 1) under the bar plug-in's provider id. Returns the plug-ins now
+     * declaring `to`, and a store over the database that notes which ids were loaded.
+     */
+    async function changed(from: string | undefined, to: string | undefined) {
+      const db = await setup();
+      const old = pair(from, { perMinute: 10, symbolsPerMonth: 2 });
+      await savePluginInfos(db, allInfos(old.plugins), new Date(old.start - 60_000));
+      const before = old.start - 1000;
+      const oldId = from ?? 'acme-bars';
+      await recordProviderRequest(db, { provider: oldId, at: before, symbol: 'BBB' });
+      for (let k = 0; k < 7; k++) {
+        await recordProviderRequest(db, { provider: oldId, at: before, symbol: null });
+      }
+      const p = pair(to, { perMinute: 10, symbolsPerMonth: 2 });
+      const asked: string[] = [];
+      const real = providerUsageStore(db);
+      const usage: UsageStore = {
+        load: (id, now) => {
+          asked.push(id);
+          return real.load(id, now);
+        },
+        record: real.record,
+      };
+      /** A run as `runJob` does it: the descriptions saved first, then the ingest. */
+      const run = async () => {
+        await savePluginInfos(db, allInfos(p.plugins), p.now());
+        return ingest(db, p.plugins, {
+          ...options('daily'),
+          context: p.context,
+          now: p.now,
+          usage,
+        });
+      };
+      return { db, p, asked, run };
+    }
+
+    it('a provider id renamed: the old id’s stored usage still paces and refuses', async () => {
+      const { p, asked, run } = await changed('acme', 'acme-corp');
+      const r = await run();
+      expect(r[0]).toMatchObject({ ok: ['BBB'], failed: [{ item: 'AAA' }] });
+      expect(r[0]!.failed[0]!.error).toMatch(/1 of 2 symbols per 31 days used .*AAA is new/);
+      // The stored minute is full: the first request waits for it to pass.
+      expect(p.times[0]).toBe(p.start + 60_000);
+      expect(busiest([...Array(8).fill(p.start - 1), ...p.times])).toBe(8);
+      expect(asked).toEqual(['acme-corp', 'acme-bars', 'acme', 'acme-series']);
+    });
+
+    it('a provider id renamed: two runs later the old id still counts', async () => {
+      const { db, asked, run } = await changed('acme', 'acme-corp');
+      await run();
+      asked.length = 0;
+      const second = await run();
+      // The first run's save kept acme as a former id; the second run loads it again.
+      expect(asked).toContain('acme');
+      expect(second[0]).toMatchObject({ failed: [{ item: 'AAA' }] });
+      const saved = await db.select().from(schema.pluginInfo);
+      for (const row of saved) {
+        expect(row.description).toMatchObject({
+          formerProviders: expect.arrayContaining(['acme']),
+        });
+      }
+    });
+
+    it('a provider id removed (back to the keys): the old id’s stored usage still counts', async () => {
+      const { p, asked, run } = await changed('acme', undefined);
+      const r = await run();
+      expect(r[0]).toMatchObject({ ok: ['BBB'], failed: [{ item: 'AAA' }] });
+      expect(p.times[0]).toBe(p.start + 60_000);
+      expect(asked).toEqual(['acme-bars', 'acme', 'acme-series', 'acme']);
+    });
+
+    it('fault: a former id whose history cannot be loaded stops the source, sending nothing', async () => {
+      const { db, p } = await changed('acme', 'acme-corp');
+      await savePluginInfos(db, allInfos(p.plugins), p.now());
+      const real = providerUsageStore(db);
+      const usage: UsageStore = {
+        load: async (id, now) => {
+          if (id === 'acme') throw new Error('database locked');
+          return real.load(id, now);
+        },
+        record: real.record,
+      };
+      const r = await ingest(db, p.plugins, {
+        ...options('daily'),
+        context: p.context,
+        now: p.now,
+        usage,
+      });
+      for (const x of r) {
+        expect(x.stopped).toMatch(/earlier requests of acme-corp \(stored under acme\) unknown/);
+      }
+      expect(p.times).toHaveLength(0);
     });
 
     it('fault: unknown history stops every source of the provider, sending nothing', async () => {
