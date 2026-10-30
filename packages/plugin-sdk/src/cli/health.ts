@@ -18,8 +18,9 @@
 //                                               that check's non-green dates (at most 200 shown;
 //                                               --symbol day: the results about the day, FX)
 //
-// Exit code 0 only when the run finished, stored something and has no non-green check result
-// and no non-green health row; 1 otherwise.
+// Exit code 0 only when the run succeeded and stored the overall row of its target (complete),
+// its per-check counts agree with its stored results, and it has no non-green check result and
+// no non-green health row (`runSummary(...).allGreen`); 1 otherwise.
 import { type Translate, languages, translator } from '@saku/content';
 import { Sessions } from '@saku/data';
 import { existsSync } from 'node:fs';
@@ -41,8 +42,10 @@ import {
   DAY,
   NO_REASON,
   type SummaryRun,
+  checkSources,
   defaultSummaryRun,
   findRun,
+  gradedRange,
   groupDates,
   nonGreenChecks,
   reasonCode,
@@ -198,6 +201,17 @@ async function summary(
       else if (a.symbol === DAY) symbolId = null;
       else fail(`No symbol ${a.symbol}.`);
     }
+    if (a.source !== undefined) {
+      // A full run stores only non-green results: a source with none of this check is unknown.
+      const sources = await checkSources(db, run.id, a.check);
+      if (!sources.includes(a.source)) {
+        const named = sources.map((x) => x ?? 'none');
+        fail(
+          `Run ${run.id} stored no result of check ${a.check} from source ${a.source}.` +
+            (named.length ? ` Sources with results: ${named.join(', ')}.` : ''),
+        );
+      }
+    }
   }
   const error = run.error?.split('\n')[0]?.trim();
   console.log(
@@ -217,10 +231,21 @@ async function summary(
   }
 
   const s = await runSummary(db, run);
-  const greenText = s.green === undefined ? 'green not stored (unknown)' : `green ${s.green}`;
+  if (!s.complete) {
+    const why = {
+      not_success: `the run did not succeed (${run.status})`,
+      no_target: 'the run names no target date',
+      no_target_row: `no overall health row for its target ${run.target}`,
+    }[s.incomplete!];
+    console.log(`Incomplete: not all rows stored (${why}). Nothing here confirms green.`);
+  }
+  const greenText =
+    s.green === undefined
+      ? `green unknown (${s.complete ? 'not stored' : 'incomplete run'})`
+      : `green ${s.green}`;
   console.log(`Check results: red ${s.nonGreen.red}, yellow ${s.nonGreen.yellow}, ${greenText}.`);
   const nonGreenStored = s.nonGreen.red + s.nonGreen.yellow;
-  if (s.summaryNonGreen !== undefined && s.summaryNonGreen !== nonGreenStored) {
+  if (!s.countsAgree) {
     console.log(
       `Warning: the run's per-check counts say ${s.summaryNonGreen} results were not green, ` +
         `but ${nonGreenStored} are stored.`,
@@ -230,7 +255,7 @@ async function summary(
     `Health rows not green: days red ${s.health.day.red}, yellow ${s.health.day.yellow}; ` +
       `symbol-days red ${s.health.symbol.red}, yellow ${s.health.symbol.yellow}.`,
   );
-  const exit = s.allGreen && run.finishedAt !== null ? 0 : 1;
+  const exit = s.allGreen ? 0 : 1;
 
   if (a.check === undefined) {
     console.log('');
@@ -256,16 +281,16 @@ async function summary(
     console.log('');
     if (s.healthGroups.length === 0) console.log('Health rows: none not green.');
     else {
-      // The status is the row's (the worst of its reasons); a row with several reasons is
-      // counted under each of them.
+      // A row with several reasons is counted under each; a reason whose own status is not
+      // known is shown with the status of its rows ("in a red row"), never as its own.
       console.log(
-        'Health rows not green, by stored reason (status of the row; a row with several ' +
-          'reasons counts under each):',
+        'Health rows not green, by stored reason (a row with several reasons counts under each; ' +
+          '"in a red row": the reason\'s own status is not known):',
       );
       const rows = [
         ['status', 'symbol', 'count', 'first', 'last', 'code', 'reason'],
         ...s.healthGroups.map((g) => [
-          g.status,
+          g.known ? g.status : `in a ${g.status} row`,
           g.symbol,
           String(g.count),
           g.first,
@@ -291,6 +316,15 @@ async function summary(
     ...(a.source !== undefined ? [`source ${a.source}`] : []),
   ].join(', ');
   if (total === 0) {
+    if (symbolId !== undefined) {
+      const range = await gradedRange(db, run, symbolId);
+      if (!range) {
+        console.log(`${a.symbol} was not graded by this run.`);
+        return 1;
+      }
+      console.log(`No non-green result for ${what} (graded ${range.from} to ${range.to}).`);
+      return exit;
+    }
     console.log(`No non-green result for ${what}.`);
     return exit;
   }

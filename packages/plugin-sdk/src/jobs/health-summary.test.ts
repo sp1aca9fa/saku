@@ -9,7 +9,9 @@ import {
   compareGroups,
   compareHealthGroups,
   defaultSummaryRun,
+  checkSources,
   findRun,
+  gradedRange,
   groupDates,
   nonGreenChecks,
   reasonCode,
@@ -108,7 +110,7 @@ describe('defaultSummaryRun', () => {
 
 describe('runSummary', () => {
   it('groups by status, layer, check, symbol or the day, and source; red first, then count', async () => {
-    const { db, ids, result, summaryRow } = await setup();
+    const { db, ids, result, summaryRow, health } = await setup();
     const id = await run(db, 'bootstrap', '2026-01-09');
     for (const date of ['2026-01-05', '2026-01-06', '2026-01-07']) {
       await result(id, { date, status: 'yellow', check: 'single', layer: 'A', source: 'p' });
@@ -129,12 +131,13 @@ describe('runSummary', () => {
     await summaryRow(id, 'close_match', 100, 95);
     await summaryRow(id, 'single', 50, 47);
     await summaryRow(id, 'fx_match', 10, 9);
+    await health(id, '2026-01-09', null, 'red');
     const s = await runSummary(db, (await findRun(db, id))!);
     expect(s.nonGreen).toEqual({ red: 4, yellow: 5 });
     expect(s.green).toBe(151);
     // The per-check counts agree with what is stored (9 non-green).
     expect(s.summaryNonGreen).toBe(9);
-    expect(s.allGreen).toBe(false);
+    expect(s).toMatchObject({ countsAgree: true, complete: true, allGreen: false });
     expect(
       s.groups.map((g) => [
         g.status,
@@ -186,6 +189,7 @@ describe('runSummary', () => {
     await result(daily, { date: '2026-01-06', status: 'green' });
     await result(daily, { date: '2026-01-05', status: 'green' });
     await result(daily, { date: '2026-01-06', status: 'yellow' });
+    await health(daily, '2026-01-06', null, 'yellow');
     expect(await runSummary(db, (await findRun(db, daily))!)).toMatchObject({
       green: 2,
       nonGreen: { red: 0, yellow: 1 },
@@ -205,6 +209,93 @@ describe('runSummary', () => {
   });
 });
 
+describe('runSummary completeness and the exit rule', () => {
+  it('a failed run that stored only part (counts, no overall row) is incomplete', async () => {
+    const { db, result, summaryRow } = await setup();
+    const id = await run(db, 'bootstrap', '2026-01-06', { ok: false });
+    await summaryRow(id, 'close_match', 10, 10);
+    const s = await runSummary(db, (await findRun(db, id))!);
+    expect(s).toMatchObject({ complete: false, incomplete: 'not_success', allGreen: false });
+    // Green is unknown for an incomplete run, never taken from partial counts.
+    expect(s.green).toBeUndefined();
+    // Still running: incomplete too.
+    const going = await run(db, 'weekly', '2026-01-06', { finished: false });
+    await result(going, { date: '2026-01-05', status: 'yellow' });
+    expect(await runSummary(db, (await findRun(db, going))!)).toMatchObject({
+      complete: false,
+      incomplete: 'not_success',
+      allGreen: false,
+    });
+  });
+
+  it('a successful run without the overall row of its target is incomplete', async () => {
+    const { db, health, summaryRow } = await setup();
+    const id = await run(db, 'checks', '2026-01-06');
+    await summaryRow(id, 'close_match', 10, 10);
+    // An overall row of an earlier date is not the target's.
+    await health(id, '2026-01-05', null, 'green');
+    const s = await runSummary(db, (await findRun(db, id))!);
+    expect(s).toMatchObject({ complete: false, incomplete: 'no_target_row', allGreen: false });
+    expect(s.green).toBeUndefined();
+    await health(id, '2026-01-06', null, 'green');
+    expect(await runSummary(db, (await findRun(db, id))!)).toMatchObject({
+      complete: true,
+      green: 10,
+      allGreen: true,
+    });
+  });
+
+  it('per-check counts that disagree with the stored results are never all green', async () => {
+    const { db, health, summaryRow } = await setup();
+    const id = await run(db, 'weekly', '2026-01-06');
+    await health(id, '2026-01-06', null, 'green');
+    // The counts say one result was not green, but none is stored.
+    await summaryRow(id, 'close_match', 10, 9);
+    const s = await runSummary(db, (await findRun(db, id))!);
+    expect(s).toMatchObject({
+      complete: true,
+      summaryNonGreen: 1,
+      nonGreen: { red: 0, yellow: 0 },
+      countsAgree: false,
+      allGreen: false,
+    });
+  });
+});
+
+describe('the run a --check listing reads', () => {
+  it('knows the sources of a check in the run, from any stored result', async () => {
+    const { db, result } = await setup();
+    const id = await run(db, 'daily', '2026-01-06');
+    await result(id, { date: '2026-01-06', status: 'green', source: 's3' });
+    await result(id, { date: '2026-01-06', status: 'red', source: 's2' });
+    await result(id, { date: '2026-01-06', status: 'red', check: 'other', source: 's9' });
+    await result(id, { date: '2026-01-06', status: 'red', layer: 'C', source: null });
+    expect(await checkSources(db, id, 'close_match')).toEqual([null, 's2', 's3']);
+    expect(await checkSources(db, id, 'nope')).toEqual([]);
+  });
+
+  it('a symbol outside the run is not graded by it, never "no non-green result"', async () => {
+    const { db, ids, health } = await setup();
+    const full = await run(db, 'bootstrap', '2026-01-08');
+    await db
+      .insert(schema.healthCoverage)
+      .values({ runId: full, symbolId: ids.AAA, fromDate: '2026-01-05', toDate: '2026-01-08' });
+    await health(full, '2026-01-06', null, 'green');
+    await health(full, '2026-01-08', null, 'green');
+    const r = (await findRun(db, full))!;
+    expect(await gradedRange(db, r, ids.AAA)).toEqual({ from: '2026-01-05', to: '2026-01-08' });
+    expect(await gradedRange(db, r, ids.BBB)).toBeUndefined();
+    expect(await gradedRange(db, r, null)).toEqual({ from: '2026-01-06', to: '2026-01-08' });
+    // A daily run: the symbol's stored rows.
+    const daily = await run(db, 'daily', '2026-01-08');
+    await health(daily, '2026-01-07', ids.BBB, 'green');
+    const d = (await findRun(db, daily))!;
+    expect(await gradedRange(db, d, ids.BBB)).toEqual({ from: '2026-01-07', to: '2026-01-07' });
+    expect(await gradedRange(db, d, ids.AAA)).toBeUndefined();
+    expect(await gradedRange(db, d, null)).toBeUndefined();
+  });
+});
+
 describe('runSummary health groups', () => {
   it("groups the run's own non-green health rows by status, stored reason and symbol", async () => {
     const { db, ids } = await setup();
@@ -218,7 +309,7 @@ describe('runSummary health groups', () => {
     const id = await run(db, 'bootstrap', '2026-01-09');
     await row(id, '2026-01-05', ids.AAA, 'yellow', ['single_source']);
     await row(id, '2026-01-07', ids.AAA, 'yellow', ['single_source']);
-    // Two reasons: counted under each, with the row's status.
+    // Two reasons: counted under each, each with its own status.
     await row(id, '2026-01-06', ids.AAA, 'red', ['primary_missing', 'single_source']);
     await row(id, '2026-01-06', null, 'red', ['AAA', 'SP500:stale(7)@src']);
     await row(id, '2026-01-08', null, 'yellow', ['AAA']);
@@ -231,19 +322,68 @@ describe('runSummary health groups', () => {
 
     const s = await runSummary(db, (await findRun(db, id))!);
     expect(
-      s.healthGroups.map((g) => [g.status, g.reason, g.symbol, g.count, g.first, g.last]),
+      s.healthGroups.map((g) => [g.status, g.known, g.reason, g.symbol, g.count, g.first, g.last]),
     ).toEqual([
-      ['red', NO_REASON, 'BBB', 1, '2026-01-09', '2026-01-09'],
-      ['red', 'AAA', DAY, 1, '2026-01-06', '2026-01-06'],
-      ['red', 'SP500:stale(7)@src', DAY, 1, '2026-01-06', '2026-01-06'],
-      ['red', 'primary_missing', 'AAA', 1, '2026-01-06', '2026-01-06'],
-      ['red', 'single_source', 'AAA', 1, '2026-01-06', '2026-01-06'],
-      ['yellow', 'single_source', 'AAA', 2, '2026-01-05', '2026-01-07'],
-      ['yellow', 'AAA', DAY, 1, '2026-01-08', '2026-01-08'],
+      // AAA's own row that day is red; 7 days behind is red.
+      ['red', true, 'AAA', DAY, 1, '2026-01-06', '2026-01-06'],
+      ['red', true, 'SP500:stale(7)@src', DAY, 1, '2026-01-06', '2026-01-06'],
+      ['red', true, 'primary_missing', 'AAA', 1, '2026-01-06', '2026-01-06'],
+      ['red', false, NO_REASON, 'BBB', 1, '2026-01-09', '2026-01-09'],
+      // single_source is yellow, also on the red row.
+      ['yellow', true, 'single_source', 'AAA', 3, '2026-01-05', '2026-01-07'],
+      // AAA has no row of this run on 2026-01-08: unknown, shown in a yellow row.
+      ['yellow', false, 'AAA', DAY, 1, '2026-01-08', '2026-01-08'],
     ]);
     expect(s.health).toEqual({ day: { red: 1, yellow: 1 }, symbol: { red: 2, yellow: 2 } });
     expect(s.groups).toEqual([]);
     expect(s.allGreen).toBe(false);
+  });
+
+  it("derives each reason's own status from the same run, and never guesses one", async () => {
+    const { db, ids, result } = await setup();
+    const row = (date: string, symbol: number | null, status: HealthStatus, reasons: string[]) =>
+      db.insert(schema.dataHealth).values({ runId: id, date, symbolId: symbol, status, reasons });
+    const id = await run(db, 'daily', '2026-01-06');
+    // The same run's results: AAA's close_match is yellow, the FX check red.
+    await result(id, { date: '2026-01-06', status: 'yellow', symbol: ids.AAA, source: 's2' });
+    await result(id, {
+      date: '2026-01-06',
+      status: 'red',
+      check: 'fx_match',
+      symbol: null,
+      source: 'fx2',
+    });
+    // Another run's red result for the same key is not used.
+    const other = await run(db, 'daily', '2026-01-06');
+    await result(other, { date: '2026-01-05', status: 'red', symbol: ids.AAA, source: 's2' });
+    await row('2026-01-06', ids.AAA, 'red', [
+      'B.close_match@s2',
+      'stand_in_refused:too_far',
+      'stand_in@s3',
+    ]);
+    // A check code without a matching result of this run (that date): unknown.
+    await row('2026-01-05', ids.AAA, 'red', ['B.close_match@s2', 'something_new']);
+    await row('2026-01-06', null, 'red', [
+      'USDJPY:B.fx_match@fx2',
+      'USDJPY:B.fx_unavailable@fx2',
+      'DTB3:stale(3)@src',
+      'issuer_unavailable@iss',
+    ]);
+    const s = await runSummary(db, (await findRun(db, id))!);
+    const by = Object.fromEntries(
+      s.healthGroups.map((g) => [`${g.symbol} ${g.reason} ${g.first}`, [g.status, g.known]]),
+    );
+    expect(by).toEqual({
+      'AAA B.close_match@s2 2026-01-06': ['yellow', true],
+      'AAA stand_in_refused:too_far 2026-01-06': ['red', true],
+      'AAA stand_in@s3 2026-01-06': ['yellow', true],
+      'AAA B.close_match@s2 2026-01-05': ['red', false],
+      'AAA something_new 2026-01-05': ['red', false],
+      'day USDJPY:B.fx_match@fx2 2026-01-06': ['red', true],
+      'day USDJPY:B.fx_unavailable@fx2 2026-01-06': ['yellow', true],
+      'day DTB3:stale(3)@src 2026-01-06': ['yellow', true],
+      'day issuer_unavailable@iss 2026-01-06': ['yellow', true],
+    });
   });
 
   it('has no health groups when every row is green', async () => {
@@ -255,9 +395,10 @@ describe('runSummary health groups', () => {
     expect(s.allGreen).toBe(true);
   });
 
-  it('orders red before yellow, then by count, reason and symbol', () => {
-    const g = (status: HealthStatus, count: number, reason: string) => ({
+  it('orders red, in a red row, yellow, in a yellow row; then by count, reason and symbol', () => {
+    const g = (status: HealthStatus, count: number, reason: string, known = true) => ({
       status,
+      known,
       reason,
       symbol: DAY,
       count,
@@ -265,10 +406,22 @@ describe('runSummary health groups', () => {
       last: '2026-01-05',
     });
     expect(
-      [g('yellow', 9, 'a'), g('red', 1, 'b'), g('red', 1, 'a'), g('red', 3, 'z')].sort(
-        compareHealthGroups,
-      ),
-    ).toEqual([g('red', 3, 'z'), g('red', 1, 'a'), g('red', 1, 'b'), g('yellow', 9, 'a')]);
+      [
+        g('yellow', 1, 'u', false),
+        g('yellow', 9, 'a'),
+        g('red', 50, 'u', false),
+        g('red', 1, 'b'),
+        g('red', 1, 'a'),
+        g('red', 3, 'z'),
+      ].sort(compareHealthGroups),
+    ).toEqual([
+      g('red', 3, 'z'),
+      g('red', 1, 'a'),
+      g('red', 1, 'b'),
+      g('red', 50, 'u', false),
+      g('yellow', 9, 'a'),
+      g('yellow', 1, 'u', false),
+    ]);
   });
 });
 
