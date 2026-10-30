@@ -1,5 +1,8 @@
 // A whole daily run with in-memory plug-ins (no network): ingest, checks, forward record,
 // alerts, and how an incomplete run is reported.
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
@@ -167,6 +170,34 @@ describe('a daily run', () => {
     expect(sent[0]!.text).toContain('First recorded allocation: Risk on (signal of 2026-01-16).');
     const [run] = await db.select().from(schema.jobRuns);
     expect(run).toMatchObject({ status: 'success', heartbeatSent: true });
+  });
+
+  it('a full disk is told to the admins; a failed measurement never fails the run', async () => {
+    const { db } = await setup();
+    const { notifier, sent } = fakeNotifier();
+    const dir = mkdtempSync(join(tmpdir(), 'saku-run-'));
+    const file = join(dir, 'x.db');
+    writeFileSync(file, 'x');
+    const full = options(notifier, {
+      databaseUrl: `file:${file}`,
+      statfs: async () => ({ bsize: 1, blocks: 1000, bavail: 200 }),
+    });
+    expect(await runJob(db, plugins([barSource('p'), barSource('s')]), full)).toMatchObject({
+      ok: true,
+    });
+    const ops = sent.filter((m) => m.target === 'ops').map((m) => m.text);
+    expect(ops.some((t) => t.startsWith('Saku: the server disk is 80.0% full'))).toBe(true);
+
+    const { db: db2 } = await setup();
+    const broken = options(fakeNotifier().notifier, {
+      databaseUrl: `file:${file}`,
+      statfs: async () => {
+        throw new Error('no statfs');
+      },
+    });
+    expect(await runJob(db2, plugins([barSource('p'), barSource('s')]), broken)).toMatchObject({
+      ok: true,
+    });
   });
 
   it('a failing source leaves it incomplete: no heartbeat, the admins are told', async () => {

@@ -54,6 +54,7 @@ import {
   runSummary,
   sourceRefusal,
 } from '../jobs/health-summary';
+import { diskLine, measureDisk } from '../jobs/disk';
 import { loadPlugins } from '../registry';
 import { assertServerOnly } from '../server-only';
 import { parseHealthArgs } from './health-args';
@@ -106,6 +107,11 @@ const sessions = new Sessions(calendar);
 
 const run = await latestRun(db);
 console.log(header(run));
+try {
+  console.log(diskLine(await measureDisk(config.url)));
+} catch (e) {
+  console.log(`Database and disk: not measured (${e instanceof Error ? e.message : String(e)}).`);
+}
 
 const end =
   (args.mode === 'days' ? args.date : undefined) ??

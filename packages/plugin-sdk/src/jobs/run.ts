@@ -16,12 +16,14 @@ import {
   sourceRolesOf,
   startRun,
 } from '@saku/db';
+import { diskWarns, measureDisk, type Statfs } from './disk';
 import { type LoadedPlugins, allInfos, issuerPublishesOf, savePluginInfos } from '../registry';
 import { DATA_KIND, assignedOnly, dataKindOf, unassigned } from '../roles';
 import type { Logger, PluginContext, PluginInfo } from '../types';
 import {
   type AlertOptions,
   sendDataHealthAdmin,
+  sendDiskSpace,
   sendIntegrityFailed,
   sendJobFailure,
   sendParityFailed,
@@ -63,6 +65,10 @@ export interface RunOptions {
   tsa: { authorities: string[]; caFile?: string };
   /** The checked-out commit (named in recompute annotations). */
   code: string;
+  /** The database URL whose disk the daily run checks (none: not checked). */
+  databaseUrl?: string;
+  /** For tests: replaces the disk's statfs. */
+  statfs?: Statfs;
   /** The testfol parity cases (`plugins/test/testfol`); missing or empty: none run. */
   parityDir?: string;
   /** Before the weekly refetch rewrites stored history (the backup); a throw fails the run. */
@@ -358,6 +364,20 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
           reasons: checked.reasons,
         });
         if (sent.failed.length > 0) markIncomplete('alerts');
+      }
+    }
+
+    if (job === 'daily' && o.databaseUrl) {
+      // A failed measurement is logged; it never fails the run.
+      try {
+        const disk = await measureDisk(o.databaseUrl, o.statfs);
+        if (!disk) log.warn('Disk space not measured (the database is not a file)');
+        else if (diskWarns(disk)) {
+          const sent = await sendDiskSpace(db, { ...alerting, disk });
+          if (sent.failed.length > 0) markIncomplete('alerts');
+        }
+      } catch (e) {
+        log.warn('Disk space not measured', { error: String(e) });
       }
     }
 

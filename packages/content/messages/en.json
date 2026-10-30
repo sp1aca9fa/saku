@@ -43,6 +43,10 @@
       "title": "Saku: data for {date} is not green",
       "body": "Not green: {reasons}. Each strategy states its own status; a red one applies its safe state."
     },
+    "disk": {
+      "title": "Saku: the server disk is {percent}% full",
+      "body": "{free} is free and the database is {size}. Prune old backups and logs to free space (docs/troubleshooting.md)."
+    },
     "update": {
       "title": "Saku: the update to {to} failed at the {step} step",
       "back": "The server went back to {from} and keeps running it. It tries again when a newer version is pushed; the update log on the server has the details.",

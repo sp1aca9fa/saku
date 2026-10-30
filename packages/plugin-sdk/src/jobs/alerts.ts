@@ -23,6 +23,7 @@ import {
 } from '@saku/db';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { Logger, Notifier, PluginContext } from '../types';
+import { type DiskUsage, formatBytes } from './disk';
 import { parseVersion } from './forward';
 
 export type AlertType =
@@ -35,7 +36,8 @@ export type AlertType =
   | 'recompute_differs'
   | 'revisions'
   | 'integrity'
-  | 'stand_in_corrected';
+  | 'stand_in_corrected'
+  | 'disk_space';
 const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red'];
 
 export interface Alert {
@@ -396,6 +398,27 @@ export function sendUpdateFailed(
     lines: (t) => [
       { keep: t('alerts.update.title', { to: o.to, step: o.step }) },
       { keep: t(o.stuck ? 'alerts.update.stuck' : 'alerts.update.back', { from: o.from }) },
+    ],
+  });
+}
+
+/** The disk holding the database is at or over the warning threshold: once per day. */
+export function sendDiskSpace(
+  db: Db,
+  o: AlertOptions & { disk: DiskUsage },
+): Promise<AlertSummary> {
+  return sendAdminAlert(db, {
+    ...o,
+    subject: 'disk',
+    type: 'disk_space',
+    lines: (t) => [
+      { keep: t('alerts.disk.title', { percent: o.disk.usedPercent.toFixed(1) }) },
+      {
+        keep: t('alerts.disk.body', {
+          free: formatBytes(o.disk.freeBytes),
+          size: formatBytes(o.disk.databaseBytes),
+        }),
+      },
     ],
   });
 }

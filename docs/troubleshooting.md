@@ -93,6 +93,15 @@ Look at `journalctl -u saku-daily` and the run's error in `pnpm health` (the hea
 latest run). To run now: `pnpm daily --force`. When a delivery channel is broken the run stays
 incomplete: `pnpm channel test <id> --user <name>`, or `pnpm channel disable`.
 
+## Disk warning ("the server disk is N% full")
+
+The daily run tells the admins once a day while the disk holding the database is 70% full or
+more (`pnpm health` prints the same numbers). Backups prune themselves (the newest 30 days plus
+the first of each month for 12 months, in the data folder's `backups/`); if they are the cause,
+copy older ones to the main PC and delete them here and the logs
+(`journalctl --vacuum-size=200M`, and the state folder's log files), then check `pnpm health`
+again. Other programs on the same disk count too. Never delete `saku.db` or its `-wal` file.
+
 "Another job is running" is not an error: the lock is held by another job (or by an update).
 A lock left by a dead process is taken over on the next start.
 

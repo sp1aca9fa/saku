@@ -164,6 +164,7 @@ try {
       ...(process.env.SAKU_TSA_CAFILE?.trim() && { caFile: process.env.SAKU_TSA_CAFILE.trim() }),
     },
     code: codeVersion(),
+    databaseUrl: dbConfigFromEnv().url,
     parityDir: join(findRepoRoot(), 'plugins', 'test', 'testfol'),
     beforeRefetch: backup,
     afterDaily: backup,
