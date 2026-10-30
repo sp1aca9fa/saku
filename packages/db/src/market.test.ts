@@ -643,6 +643,132 @@ describe('withdrawn values', () => {
     ]);
   });
 
+  // A legacy row stored its vintage as a date only; the same source now sends that vintage as an
+  // instant on the same New York day (FRED: 18:00). Both are one vintage (review of e288a4a).
+  describe('a legacy date-only vintage and the same vintage as an instant', () => {
+    const legacy = {
+      series: 'S',
+      source: 'x',
+      date: '2026-01-05',
+      value: 3.6,
+      publishedAt: '2026-01-06',
+      fetchedAt: '2026-01-07T12:00:00.000Z',
+      knownAt: '2026-01-06',
+    };
+    // 2026-01-06 18:00 in New York; the legacy row reads as known from 23:59 there (04:59Z).
+    const evening = '2026-01-06T18:00:00-05:00';
+    const dayEnd = '2026-01-07T04:59:00.000Z';
+    const fetched = (d: string) => `${d}T12:00:00.000Z`;
+    let db: Awaited<ReturnType<typeof testDb>>;
+    const store = (v: number, publishedAt: string, d: string) =>
+      storeSeries(db, {
+        series: 'S',
+        source: 'x',
+        points: [{ date: '2026-01-05', value: v, publishedAt }],
+        fetchedAt: fetched(d),
+      });
+    const none = { inserted: 0, revised: [], withdrawn: [] };
+
+    it('the same value as an instant stores nothing; a restatement counts only from its fetch', async () => {
+      db = await testDb();
+      await db.insert(series).values(legacy);
+      expect(await store(3.6, evening, '2026-01-08')).toEqual(none);
+      expect(await db.select().from(series)).toHaveLength(1);
+      // Restated: a revision known from its fetch, never from 18:00 on the vintage day.
+      expect(await store(3.65, evening, '2026-01-09')).toEqual({
+        inserted: 0,
+        revised: [{ item: 'S', date: '2026-01-05' }],
+        withdrawn: [],
+      });
+      // A newer vintage (2026-01-08 18:00 New York), first seen: known from its publication.
+      await store(3.7, '2026-01-08T18:00:00-05:00', '2026-01-10');
+      const rows = await db.select().from(series);
+      expect(rows.map((r) => [r.value, r.knownAt])).toEqual([
+        [3.6, '2026-01-06'],
+        [3.65, fetched('2026-01-09')],
+        [3.7, '2026-01-08T23:00:00.000Z'],
+      ]);
+      const pit = await seriesPointInTime(db, 'S', 'x');
+      expect(pit.asOf('2026-01-05', '2026-01-06T23:30:00.000Z')).toBeUndefined();
+      expect(pit.asOf('2026-01-05', dayEnd)!.value).toBe(3.6);
+      expect(pit.asOf('2026-01-05', '2026-01-08T22:59:59.999Z')!.value).toBe(3.6);
+      // The newer vintage holds, and the restated older one never outranks it.
+      expect(pit.asOf('2026-01-05', '2026-01-08T23:00:00.000Z')!.value).toBe(3.7);
+      expect(pit.asOf('2026-01-05', fetched('2026-01-11'))!.value).toBe(3.7);
+    });
+
+    it('a restatement outranks the legacy value after its fetch, and only then', async () => {
+      db = await testDb();
+      await db.insert(series).values(legacy);
+      await store(3.65, evening, '2026-01-09');
+      // The legacy value again under the instant: the latest stored row of the vintage is the
+      // restatement, so this is a revision too.
+      expect((await store(3.6, evening, '2026-01-12')).revised).toHaveLength(1);
+      const pit = await seriesPointInTime(db, 'S', 'x');
+      expect(pit.asOf('2026-01-05', '2026-01-09T11:59:59.999Z')!.value).toBe(3.6);
+      expect(pit.asOf('2026-01-05', fetched('2026-01-09'))!.value).toBe(3.65);
+      expect(pit.asOf('2026-01-05', fetched('2026-01-12'))!.value).toBe(3.6);
+    });
+
+    it('reads an instant row stored as first seen after a legacy row as a restatement', async () => {
+      db = await testDb();
+      // Stored before this rule: the restatement kept its publication time as known_at.
+      await db.insert(series).values([
+        legacy,
+        {
+          ...legacy,
+          value: 3.65,
+          publishedAt: '2026-01-06T23:00:00.000Z',
+          fetchedAt: fetched('2026-01-09'),
+          knownAt: '2026-01-06T23:00:00.000Z',
+        },
+      ]);
+      const pit = await seriesPointInTime(db, 'S', 'x');
+      expect(pit.asOf('2026-01-05', '2026-01-06T23:30:00.000Z')).toBeUndefined();
+      expect(pit.asOf('2026-01-05', dayEnd)!.value).toBe(3.6);
+      expect(pit.asOf('2026-01-05', '2026-01-09T11:59:59.999Z')!.value).toBe(3.6);
+      expect(pit.asOf('2026-01-05', fetched('2026-01-09'))!.value).toBe(3.65);
+    });
+
+    it('two different instants of one day stay two vintages', async () => {
+      db = await testDb();
+      const morning = '2026-01-06T10:00:00-05:00';
+      // Without a legacy row: both first seen, each known from its publication.
+      expect(await store(3.6, morning, '2026-01-08')).toEqual({ ...none, inserted: 1 });
+      expect(await store(3.61, evening, '2026-01-08')).toEqual({ ...none, inserted: 1 });
+      // With one: each instant is compared with the legacy row, not with the other instant.
+      db = await testDb();
+      await db.insert(series).values(legacy);
+      expect((await store(3.61, evening, '2026-01-08')).revised).toHaveLength(1);
+      expect(await store(3.6, morning, '2026-01-09')).toEqual(none);
+      expect(await db.select().from(series)).toHaveLength(2);
+    });
+
+    it('works the same for FX', async () => {
+      db = await testDb();
+      const { source, date, publishedAt, fetchedAt, knownAt } = legacy;
+      await db.insert(fxRates).values({
+        ...{ source, date, publishedAt, fetchedAt, knownAt },
+        pair: 'USDXXX',
+        kind: 'valuation',
+        rate: 3.6,
+      });
+      const fx = (r: number, d: string) =>
+        storeFx(db, {
+          source: 'x',
+          kind: 'valuation',
+          rates: [{ pair: 'USDXXX', date: '2026-01-05', rate: r, publishedAt: evening }],
+          fetchedAt: fetched(d),
+        });
+      expect(await fx(3.6, '2026-01-08')).toEqual(none);
+      expect((await fx(3.65, '2026-01-09')).revised).toHaveLength(1);
+      const pit = await fxPointInTime(db, 'USDXXX', 'x');
+      expect(pit.asOf('2026-01-05', '2026-01-06T23:30:00.000Z')).toBeUndefined();
+      expect(pit.asOf('2026-01-05', '2026-01-09T11:59:59.999Z')!.value).toBe(3.6);
+      expect(pit.asOf('2026-01-05', fetched('2026-01-09'))!.value).toBe(3.65);
+    });
+  });
+
   it('refuses a fetch time that is not an instant with a zone', async () => {
     const db = await testDb();
     const points = [{ date: '2026-01-02', value: 1 }];

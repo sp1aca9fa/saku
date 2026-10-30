@@ -10,6 +10,7 @@ import {
   type RawBarField,
   type SeriesPoint,
   type TradingDate,
+  tradingDateOf,
   type Vintage,
   zonedInstant,
 } from '@saku/core';
@@ -348,7 +349,8 @@ interface VintageRow {
  * `known_at` (spec 2026-10-30 restated-vintage; requirements 04, no look-ahead): a vintage first
  * seen is known from its publication time (the source's history), as given in `incoming`; a
  * restatement of a stored vintage (same key, another value or a withdrawal) only from the later
- * of that time and its fetch, so a read before our fetch keeps the original.
+ * of that time and its fetch, so a read before our fetch keeps the original. A legacy date-only
+ * row counts as a stored row of every instant vintage of its New York day (`legacyKey`).
  */
 function newVintages<T extends VintageRow>(
   stored: T[],
@@ -379,13 +381,22 @@ function newVintages<T extends VintageRow>(
   for (const row of [...stored].sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt))) {
     latest.set(key(row), row);
   }
+  // The stored row an incoming one is compared with: the latest of its own vintage, or of the
+  // legacy date-only vintage of the same New York day (`legacyKey`), whichever was fetched later.
+  const prevOf = (row: T): T | undefined => {
+    const own = latest.get(key(row));
+    const day = legacyKey(row.date, row.publishedAt);
+    const old = day === null ? undefined : latest.get(day);
+    if (own === undefined || old === undefined) return own ?? old;
+    return old.fetchedAt > own.fetchedAt ? old : own;
+  };
   const values: T[] = [];
   const withdrawals: T[] = [];
   const revised = new Set<TradingDate>();
   const withdrawn = new Set<TradingDate>();
   let fresh = 0;
   for (let row of unique) {
-    const prev = latest.get(key(row));
+    const prev = prevOf(row);
     if (prev && prev.value === row.value) continue;
     // Both UTC ISO text (`instant`, and the jobs' fetch time), so string order is time order.
     if (prev && row.fetchedAt > row.knownAt) row = { ...row, knownAt: row.fetchedAt };
@@ -424,7 +435,8 @@ function instant(text: string, what = 'publishedAt'): string {
  * The vintage a row belongs to: its date and publication moment, so the same moment spelled
  * differently (`Z` or `-05:00`) is one vintage (review of 0e9f235). The moment is the normalized
  * instant; a legacy row whose `published_at` is a date only (stored before a time was required,
- * which `instant` refuses) keeps its raw text. No publication time: the date alone.
+ * which `instant` refuses) keeps its raw text, and is matched to the instants of its day by
+ * `legacyKey`. No publication time: the date alone.
  */
 function vintageKey(date: string, publishedAt: string | null): string {
   if (publishedAt === null) return `${date}|`;
@@ -432,6 +444,34 @@ function vintageKey(date: string, publishedAt: string | null): string {
     return `${date}|${instant(publishedAt)}`;
   } catch {
     return `${date}|${publishedAt}`;
+  }
+}
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A legacy row: its `published_at` is a date only (stored before a time was required). */
+const isLegacy = (publishedAt: string | null): boolean =>
+  publishedAt !== null && DATE_ONLY.test(publishedAt);
+
+/**
+ * The key a vintage published at an instant had when it was stored date-only before a time was
+ * required: its date and the instant's New York calendar date (legacy rows are read as known at
+ * the end of that day, `readKnownAt`). Null without a publication time, or for a legacy row.
+ *
+ * Why (review of e288a4a; requirements 04, no look-ahead): FRED stored `2026-01-06` before and
+ * sends `2026-01-06T18:00` New York now for the same vintage. Keyed apart, a restatement of it
+ * would be stored as first seen (known from 18:00, while the legacy row is read as known from
+ * 23:59: look-ahead that evening) and the legacy value would outrank it forever. So a legacy row
+ * counts as a stored row of every instant vintage of its day: an incoming instant is compared
+ * with it (`newVintages`), and on read it is part of their vintage (`vintages`). Two different
+ * instants of one day stay two vintages; only the legacy row is shared.
+ */
+function legacyKey(date: string, publishedAt: string | null): string | null {
+  if (publishedAt === null || isLegacy(publishedAt)) return null;
+  try {
+    return `${date}|${tradingDateOf(Date.parse(instant(publishedAt)))}`;
+  } catch {
+    return null;
   }
 }
 
@@ -732,14 +772,19 @@ interface StoredVintage {
  * among them: the first-seen row's, which is its publication time (later restatements are known
  * at or after it). Taken from the stored, already normalized `known_at` rather than by parsing
  * `published_at` again, so older rows (date-only, read as known at the day end) rank as they
- * are read.
+ * are read. A legacy date-only row is also part of every instant vintage of its New York day
+ * (`legacyKey`): read first, it makes their rows restatements; its known time counts in theirs.
  */
 function vintages(
   values: (StoredVintage & { value: number })[],
   withdrawals: StoredVintage[],
 ): Vintage[] {
   const key = (r: StoredVintage) => vintageKey(r.date, r.publishedAt);
-  const firstSeen = new Set<string>();
+  const day = (r: StoredVintage) => legacyKey(r.date, r.publishedAt);
+  // Keys of the vintages with a row read so far, and the legacy keys (`legacyKey`) of the days
+  // with an instant vintage read so far.
+  const seen = new Set<string>();
+  const seenDay = new Set<string>();
   const all = readKnownAt([
     ...values.map((r) => ({ ...r, withdrawn: false as const })),
     ...withdrawals.map((r) => ({ ...r, withdrawn: true as const, value: undefined })),
@@ -750,21 +795,45 @@ function vintages(
       // first-fetched row of a vintage keeps its known_at; a later row of the same vintage (a
       // restatement) is known only from its fetch, whatever its stored known_at says (rows
       // stored before that rule, legacy date-only ones included). Nothing stored is changed.
+      // A legacy date-only row shares the vintage of every instant of its day (`legacyKey`).
       if (r.publishedAt === null) return r;
-      if (!firstSeen.has(key(r))) {
-        firstSeen.add(key(r));
-        return r;
-      }
+      const k = key(r);
+      const d = day(r);
+      const first = isLegacy(r.publishedAt)
+        ? !seen.has(k) && !seenDay.has(k)
+        : !seen.has(k) && (d === null || !seen.has(d));
+      seen.add(k);
+      if (d !== null) seenDay.add(d);
+      if (first) return r;
       return r.fetchedAt > r.knownAt ? { ...r, knownAt: r.fetchedAt } : r;
     });
+  const earliest = (map: Map<string, string>, k: string, at: string) => {
+    const was = map.get(k);
+    if (was === undefined || at < was) map.set(k, at);
+  };
+  // Earliest known time per vintage, and per legacy day over its instant vintages.
   const vintageAt = new Map<string, string>();
+  const dayAt = new Map<string, string>();
   for (const r of all) {
     if (r.publishedAt === null) continue;
-    const at = vintageAt.get(key(r));
-    if (at === undefined || r.knownAt < at) vintageAt.set(key(r), r.knownAt);
+    earliest(vintageAt, key(r), r.knownAt);
+    const d = day(r);
+    if (d !== null) earliest(dayAt, d, r.knownAt);
   }
+  // A vintage's time also counts its legacy rows: an instant vintage takes the earlier of its own
+  // and its day's legacy vintage time; a legacy one the earlier of its own and its day's instants.
+  const timeOf = (r: StoredVintage): string => {
+    const own = vintageAt.get(key(r))!;
+    const d = day(r);
+    const other = isLegacy(r.publishedAt)
+      ? dayAt.get(key(r))
+      : d === null
+        ? undefined
+        : vintageAt.get(d);
+    return other !== undefined && other < own ? other : own;
+  };
   return all.map((r): Vintage => {
-    const v = r.publishedAt === null ? r.knownAt : vintageAt.get(key(r))!;
+    const v = r.publishedAt === null ? r.knownAt : timeOf(r);
     return r.withdrawn
       ? { date: r.date, withdrawn: true, knownAt: r.knownAt, vintageAt: v }
       : { date: r.date, value: r.value, knownAt: r.knownAt, vintageAt: v };
