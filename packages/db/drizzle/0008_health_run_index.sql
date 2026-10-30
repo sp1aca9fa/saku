@@ -1,0 +1,1 @@
+CREATE INDEX `data_health_run_idx` ON `data_health` (`run_id`);

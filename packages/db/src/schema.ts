@@ -441,6 +441,7 @@ export const dataHealth = sqliteTable(
   },
   (t) => [
     index('data_health_date_idx').on(t.date, t.symbolId),
+    index('data_health_run_idx').on(t.runId),
     check('data_health_status_check', oneOf(t.status, HEALTH_STATUSES)),
   ],
 );

@@ -9,10 +9,11 @@
 | 2026-10-30 | FRED values withdrawn (revised to '.') or leaving the 10-year licence window keep the old vintage as latest, silently; store or flag withdrawn values | Claude (review) | Reliability | new | Pre-existing; affects asOf for a withdrawn value |
 | 2026-10-30 | ECB: accept a leading empty part only when the series really starts later (ask for its first observation) | Claude (review) | Reliability | accepted | A wrong 404 on the first part would shorten history silently. Built 2026-10-30: one `firstNObservations=1` request; refused unless every needed series starts after the empty span |
 | 2026-10-30 | Issuer sources declare what they publish (NAV, distributions, splits), so a NAV-only file does not flag every ex-date | Claude | Reliability | new | Layer D is advisory until thresholds are set |
-| 2026-10-30 | Index on `data_health(run_id)` | Claude | Reliability | new | The health report scans it per run; small tables for now |
+| 2026-10-30 | Index on `data_health(run_id)` | Claude | Reliability | accepted | Done 2026-10-30 (migration 0008) |
 | 2026-10-30 | Full passes store per-symbol green coverage, so a symbol skipped in a full run never reads green from older data | Claude (review) | Reliability | new | Coverage ranges cover the known cases |
 | 2026-10-30 | Compare holdings order-insensitively when counting switches (a reorder with no trade counted) | Claude (review) | Evidence | accepted | Done 2026-10-30 (core and reference); matters for testfol parity |
 | 2026-10-30 | testfol parity: check the cash rate series' health in the case window | Claude (review) | Reliability | new | Leveraged and cash cases depend on it |
 | 2026-10-30 | Plug-ins declare a calendar per series or pair (TARGET for ECB, Fed for DTB3), so expected gaps are exact | Claude | Reliability | new | NYSE calendar used meanwhile |
 | 2026-10-30 | Plug-ins declare a provider id (default: the key), so two plug-ins for one provider share its quota | Claude (review) | Reliability | new | Each loaded key is a different provider today |
 | 2026-10-30 | Quota guard for bandwidth limits (e.g. 1 GB per month) | Claude | Reliability | new | Not declared by any plug-in yet |
+| 2026-10-30 | ECB: refuse when the first rate received comes well after the start the ECB states (a gap inside the first part with rates); also gaps inside any part | Claude (review) | Reliability | new | Needs an allowance in TARGET days (owner); FX freshness covers only recent gaps |
