@@ -2,6 +2,7 @@ import type { RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   addChannel,
+  annotationsOf,
   createUser,
   forwardRecord,
   registerVersion,
@@ -15,10 +16,21 @@ import {
   verifyChain,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
+import { eq, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
 import { sendRecomputeDiffers, sendStrategyAlerts } from './alerts';
-import { type Rows, forward, reader, recompute, signalsDiffer, upTo } from './forward';
+import {
+  type ResolvedStandIn,
+  type Rows,
+  forward,
+  instantOf,
+  reader,
+  recompute,
+  signalsDiffer,
+  standInCorrections,
+  upTo,
+} from './forward';
 import { verify } from './verify';
 
 const sessions = new Sessions({
@@ -199,7 +211,6 @@ describe('forward', () => {
       { version: 'Trend', date: '2026-01-08', recorded: 'Risk on', now: 'Calm' },
     ]);
     expect((await recompute(db, { runId, code: 'c2' })).differences).toEqual([]);
-    const { annotationsOf } = await import('@saku/db');
     const [note] = await annotationsOf(db, version.id, 'recomputed');
     expect(note!.detail).toMatchObject({ code: 'c2', signalsDiffer: ['A'] });
     // The admins hear of it; an undelivered alert is tried again on the next run.
@@ -240,6 +251,166 @@ describe('forward', () => {
       'Risk on',
       'Risk on',
     ]);
+  });
+
+  it('annotates a corrected stand-in once, also for a version skipped in the resolving run', async () => {
+    const { db, version, runId } = await setup();
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    const aaa = (await symbolId(db, 'AAA'))!;
+    const aaa2 = (await symbolId(db, 'AAA2'))!;
+    // Stand-ins recorded before the entries are appended (the canonical bars themselves are not
+    // needed for the annotation): 01-07's AAA will be corrected 0.5% off, 01-08's AAA2 within
+    // the close tolerance.
+    const early = '2026-01-07T21:30:00.000Z';
+    const standIn = { source: 's', band: 0.001, basis: 'index', createdAt: early };
+    await db.insert(schema.standIns).values([
+      { ...standIn, symbolId: aaa, date: D[2]!, close: 102.51 },
+      { ...standIn, symbolId: aaa2, date: D[3]!, close: 53.0398 },
+    ]);
+    expect((await forward(db, { runId, sessions, to: D[3]! })).appended).toBe(2);
+    const record = await forwardRecord(db, version.id);
+    // Run 1 resolves both (after the entries were appended) while the version does not parse:
+    // as if a stricter schema refused it (registered versions are immutable; only the test
+    // lifts the trigger to simulate it).
+    const resolvedAt = new Date(
+      Math.max(...record.map((e) => instantOf(e.createdAt))) + 1,
+    ).toISOString();
+    await db
+      .update(schema.standIns)
+      .set({ primaryClose: 102, deviation: 102.51 / 102 - 1, resolvedAt })
+      .where(eq(schema.standIns.symbolId, aaa));
+    await db
+      .update(schema.standIns)
+      .set({ primaryClose: 53.0398, deviation: 0, resolvedAt })
+      .where(eq(schema.standIns.symbolId, aaa2));
+    const [row] = await db
+      .select()
+      .from(schema.strategyVersions)
+      .where(eq(schema.strategyVersions.id, version.id));
+    const stored = JSON.parse(row!.canonicalJson) as { strategy: typeof strategy };
+    const twice = [
+      { ticker: 'AAA', weight: 50 },
+      { ticker: 'AAA', weight: 50 },
+    ];
+    const broken = {
+      ...stored,
+      strategy: {
+        ...stored.strategy,
+        allocations: [stored.strategy.allocations[0]!, { name: 'Calm', holdings: twice }],
+      },
+    };
+    await db.run(sql`DROP TRIGGER strategy_versions_no_update`);
+    const setJson = (json: string) =>
+      db
+        .update(schema.strategyVersions)
+        .set({ canonicalJson: json })
+        .where(eq(schema.strategyVersions.id, version.id));
+    await setJson(JSON.stringify(broken));
+    const skipped = await forward(db, { runId, sessions, to: D[3]! });
+    expect(skipped.errors).toHaveLength(1);
+    expect(skipped.annotations).toBe(0);
+    expect(await annotationsOf(db, version.id, 'stand_in_corrected')).toEqual([]);
+
+    // Run 2: it parses again, and the correction is caught up from the database, once.
+    await setJson(row!.canonicalJson);
+    const caught = await forward(db, { runId, sessions, to: D[3]! });
+    expect(caught).toMatchObject({ errors: [], standInErrors: [], annotations: 1 });
+    const notes = await annotationsOf(db, version.id, 'stand_in_corrected');
+    expect(notes.map((n) => [n.date, n.detail])).toEqual([
+      [
+        D[2],
+        {
+          ticker: 'AAA',
+          deviation: 102.51 / 102 - 1,
+          recordedAllocation: 'Risk on',
+          correctedAllocation: 'Risk on',
+          differs: false,
+        },
+      ],
+    ]);
+    expect((await forward(db, { runId, sessions, to: D[3]! })).annotations).toBe(0);
+    expect(await annotationsOf(db, version.id, 'stand_in_corrected')).toHaveLength(1);
+    // The record itself is untouched.
+    expect(await forwardRecord(db, version.id)).toEqual(record);
+  });
+
+  it('an entry appended after the stand-in was resolved used the primary: no annotation', async () => {
+    const { db, version, runId } = await setup();
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    const aaa = (await symbolId(db, 'AAA'))!;
+    // Recorded and resolved (1% off) before the forward step ran: the entries used the primary.
+    await db.insert(schema.standIns).values({
+      symbolId: aaa,
+      date: D[2]!,
+      source: 's',
+      close: 103.02,
+      band: 0.001,
+      basis: 'index',
+      createdAt: '2026-01-07T21:30:00.000Z',
+      primaryClose: 102,
+      deviation: 103.02 / 102 - 1,
+      resolvedAt: '2026-01-08T21:30:00.000Z',
+    });
+    const f = await forward(db, { runId, sessions, to: D[3]! });
+    expect(f).toMatchObject({ appended: 2, annotations: 0, standInErrors: [] });
+    expect(await annotationsOf(db, version.id, 'stand_in_corrected')).toEqual([]);
+  });
+
+  it('stand-in corrections: which entries used the stand-in, compared as instants', () => {
+    const s = (over: Partial<ResolvedStandIn> = {}): ResolvedStandIn => ({
+      ticker: 'AAA',
+      date: '2026-01-07',
+      deviation: 0.01,
+      createdAt: '2026-01-07T21:30:00.000Z',
+      resolvedAt: '2026-01-08T21:30:00.000Z',
+      ...over,
+    });
+    const entry = (createdAt: string) => ({ date: '2026-01-07', allocation: 'Risk on', createdAt });
+    const run = (
+      createdAt: string,
+      corrected: ResolvedStandIn[],
+      annotated: { date: string; ticker: unknown }[] = [],
+    ) =>
+      standInCorrections({
+        version: 'Trend (v1)',
+        deps: ['AAA', 'AAA2'],
+        record: [entry(createdAt)],
+        corrected,
+        annotated,
+      });
+    const used = '2026-01-08T00:00:00.000Z';
+    expect(run(used, [s()]).annotate).toHaveLength(1);
+    // The same instant written with an offset.
+    expect(run('2026-01-07T19:00:00.000-05:00', [s()]).annotate).toHaveLength(1);
+    // Appended before the stand-in existed, at or after its resolution: the primary's bar.
+    expect(run('2026-01-07T21:29:59.999Z', [s()]).annotate).toEqual([]);
+    expect(run('2026-01-08T21:30:00.000Z', [s()]).annotate).toEqual([]);
+    expect(run('2026-01-08T16:30:00.000-05:00', [s()]).annotate).toEqual([]);
+    // Not a dependency, no entry that day, already annotated.
+    expect(run(used, [s({ ticker: 'BBB' })]).annotate).toEqual([]);
+    expect(run(used, [s({ date: '2026-01-06' })]).annotate).toEqual([]);
+    expect(run(used, [s()], [{ date: '2026-01-07', ticker: 'AAA' }]).annotate).toEqual([]);
+    expect(run(used, [s()], [{ date: '2026-01-07', ticker: 'AAA2' }]).annotate).toHaveLength(1);
+    // A timestamp that is not an instant: unknown, an error, nothing annotated on a guess.
+    for (const bad of [s({ resolvedAt: '2026-01-08 21:30:00' }), s({ createdAt: 'x' })]) {
+      const r = run(used, [bad]);
+      expect(r.annotate).toEqual([]);
+      expect(r.errors).toEqual([expect.stringContaining('AAA 2026-01-07')]);
+    }
+    const r = run('2026-01-08 00:00:00', [s()]);
+    expect(r.annotate).toEqual([]);
+    expect(r.errors).toEqual([expect.stringContaining('Trend (v1) 2026-01-07')]);
+    expect(run(used, []).annotate).toEqual([]);
+  });
+
+  it('reads only ISO 8601 instants with a zone', () => {
+    expect(instantOf('2026-01-08T21:30:00.000Z')).toBe(Date.UTC(2026, 0, 8, 21, 30));
+    expect(instantOf('2026-01-08T16:30:00-05:00')).toBe(Date.UTC(2026, 0, 8, 21, 30));
+    expect(instantOf('2026-01-08 21:30:00')).toBeNaN();
+    expect(instantOf('2026-01-08T21:30:00')).toBeNaN();
+    expect(instantOf('2026-01-08')).toBeNaN();
+    expect(instantOf(null)).toBeNaN();
+    expect(instantOf('')).toBeNaN();
   });
 
   it('a multi-day catch-up records the same entries as one run per day', async () => {

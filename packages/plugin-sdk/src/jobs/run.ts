@@ -274,7 +274,6 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         runId,
         sessions,
         to: target,
-        standInsOff: checked.standInsOff,
       });
       if (f.skipped) log.info(`Forward records: ${f.skipped}`);
       else {
@@ -295,6 +294,13 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
             notParsing.add(e.version);
             failures.push(`${e.version}: definition does not parse: ${e.error}`);
           }
+        }
+        // A corrected stand-in whether an entry used it is unknown: nothing annotated on a
+        // guess; the run is incomplete and the admins hear which.
+        if (f.standInErrors.length > 0) {
+          log.warn('Forward: stand-in corrections not checked', { errors: f.standInErrors });
+          markIncomplete('forward');
+          failures.push(...f.standInErrors);
         }
         // Undelivered alerts are retried at the next check (sent ones are not repeated).
         const sent = await sendStrategyAlerts(db, { ...alerting, sessions });

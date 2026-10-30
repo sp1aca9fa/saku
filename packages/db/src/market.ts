@@ -14,7 +14,7 @@ import {
   type Vintage,
   zonedInstant,
 } from '@saku/core';
-import { and, asc, between, desc, eq, lte, sql } from 'drizzle-orm';
+import { and, asc, between, desc, eq, isNotNull, lte, sql } from 'drizzle-orm';
 import type { Db } from './client';
 import {
   barRevisions,
@@ -932,6 +932,27 @@ export async function standInOn(db: Db, symbolId: number, date: TradingDate) {
     .from(standIns)
     .where(and(eq(standIns.symbolId, symbolId), eq(standIns.date, date)));
   return row;
+}
+
+/**
+ * Every stand-in the primary has replaced (resolved), with its ticker, oldest date first: what the
+ * forward step checks for corrections still to annotate (requirements 04, the stand-in rule).
+ * `createdAt` is when it was first recorded, `resolvedAt` when the primary replaced it (both ISO
+ * 8601 instants, written by the process clock).
+ */
+export async function resolvedStandIns(db: Db) {
+  return db
+    .select({
+      ticker: symbols.ticker,
+      date: standIns.date,
+      deviation: standIns.deviation,
+      createdAt: standIns.createdAt,
+      resolvedAt: standIns.resolvedAt,
+    })
+    .from(standIns)
+    .innerJoin(symbols, eq(symbols.id, standIns.symbolId))
+    .where(isNotNull(standIns.resolvedAt))
+    .orderBy(asc(standIns.date), asc(symbols.ticker));
 }
 
 /** What a run revised in stored raw bars: counts per ticker and field, with the date range. */

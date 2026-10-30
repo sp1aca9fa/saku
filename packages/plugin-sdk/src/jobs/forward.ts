@@ -1,7 +1,9 @@
 // The daily forward record (requirements 05, A2): for every registered version, each trading day
 // since the last entry (catch-up) whose close came after registration, the decision with its
 // data health, chained to the previous entry. Nothing runs before `forward_records_from` is set
-// (the A1 gate). Stand-ins the primary later corrected are annotated, never edited.
+// (the A1 gate). Stand-ins the primary later corrected are annotated, never edited, caught up
+// from the database (not one run's list), so a version skipped in the resolving run is annotated
+// in a later one.
 import {
   type RawBar,
   type StrategyDay,
@@ -16,7 +18,7 @@ import {
   NEAR_TIE,
   zonedInstant,
 } from '@saku/core';
-import type { Sessions } from '@saku/data';
+import { type Sessions, TOLERANCE } from '@saku/data';
 import {
   type Db,
   type ForwardEntry,
@@ -30,17 +32,16 @@ import {
   getSetting,
   lastEntry,
   latestHealth,
+  resolvedStandIns,
   sha256,
   standInOn,
 } from '@saku/db';
 import { cashRateReader } from './cash';
-import type { VerifySummary } from './verify';
 
 export interface ForwardOptions {
   runId: string;
   sessions: Sessions;
   to: TradingDate;
-  standInsOff?: VerifySummary['standInsOff'];
 }
 
 export interface ForwardSummary {
@@ -57,6 +58,12 @@ export interface ForwardSummary {
    * once the definition parses again.
    */
   errors: { version: string; error: string }[];
+  /**
+   * Corrected stand-ins whether an entry used them is unknown (a stored timestamp that is not an
+   * ISO 8601 instant): nothing is annotated on a guess, the run is incomplete and the admins'
+   * job-failure alert names each one. One line each.
+   */
+  standInErrors: string[];
 }
 
 /**
@@ -102,6 +109,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     annotations: 0,
     today: [],
     errors: [],
+    standInErrors: [],
   };
   const from = await getSetting(db, 'forward_records_from');
   if (!from) return { ...summary, skipped: 'forward records not started (forward_records_from)' };
@@ -110,6 +118,12 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   const cashRate = await cashRateReader(db);
 
   const healthOn = (rows: Rows, date: TradingDate) => healthOf(db, symbolIds, rows, date);
+  // Resolved stand-ins off the primary by more than the layer B close tolerance (as verify
+  // reports them); those within it are not annotated.
+  const corrected = (await resolvedStandIns(db)).filter(
+    (s) => s.deviation !== null && s.deviation > TOLERANCE.close,
+  );
+  const standInErrors = new Set<string>();
 
   for (const version of await allVersions(db)) {
     const parsed = parseVersion(version);
@@ -123,9 +137,8 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     const start = last ? last.date : from;
     const dates = o.sessions
       .between(start, o.to)
-      .filter((d) => (!last || d > last.date) && d >= from)
       // Only closes after registration: the record never starts in the past.
-      .filter((d) => zonedInstant(d, '16:00', 'America/New_York') > version.registeredAt);
+      .filter((d) => (!last || d > last.date) && recordsDay(d, from, version.registeredAt));
 
     // One read per version and run: the bars up to the run's last date, each date then sees only
     // its prefix (dated <= that date), the same rows a read up to that date returns. The jobs lock
@@ -178,19 +191,31 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     }
 
     // A stand-in the primary has since corrected: would the day's decision have differed?
-    for (const off of o.standInsOff ?? []) {
-      if (!deps.includes(off.ticker)) continue;
-      const recorded = (await forwardRecord(db, version.id)).find((e) => e.date === off.date);
-      if (!recorded) continue;
-      const bars = barsOf(await loadRows(deps, off.date));
-      const now = forwardDecision(strategy, off.date, bars, allGreen(deps));
+    const pending =
+      corrected.length > 0
+        ? standInCorrections({
+            version: `${version.name} (${version.id})`,
+            deps,
+            record: await forwardRecord(db, version.id),
+            corrected,
+            annotated: (await annotationsOf(db, version.id, 'stand_in_corrected')).map((a) => ({
+              date: a.date,
+              ticker: (a.detail as { ticker?: unknown }).ticker,
+            })),
+          })
+        : { annotate: [], errors: [] };
+    for (const e of pending.errors) standInErrors.add(e);
+    for (const { standIn, recorded } of pending.annotate) {
+      // Only bars dated <= the entry's date, all green (the primary's bar is there now).
+      const bars = barsOf(await loadRows(deps, standIn.date));
+      const now = forwardDecision(strategy, standIn.date, bars, allGreen(deps));
       await annotate(db, {
         versionId: version.id,
-        date: off.date,
+        date: standIn.date,
         kind: 'stand_in_corrected',
         detail: {
-          ticker: off.ticker,
-          deviation: off.deviation,
+          ticker: standIn.ticker,
+          deviation: standIn.deviation,
           recordedAllocation: recorded.allocation,
           correctedAllocation: now.allocation,
           differs: now.allocation !== recorded.allocation,
@@ -200,7 +225,81 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
       summary.annotations++;
     }
   }
+  summary.standInErrors = [...standInErrors];
   return summary;
+}
+
+/** A resolved stand-in as `resolvedStandIns` reads it. */
+export interface ResolvedStandIn {
+  ticker: string;
+  date: TradingDate;
+  deviation: number | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+/** ISO 8601 with a `Z` or an offset, as `toISOString` writes `created_at` and `resolved_at`. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * A stored timestamp as epoch milliseconds, or NaN when it is not an ISO 8601 instant. Compared
+ * as instants, never as text; a form without a zone (e.g. SQLite's `YYYY-MM-DD HH:MM:SS`) is
+ * refused rather than read in the server's local time.
+ */
+export function instantOf(text: string | null): number {
+  return text !== null && ISO_INSTANT.test(text) ? Date.parse(text) : NaN;
+}
+
+/**
+ * The corrected stand-ins still to annotate for one version (requirements 04, the stand-in rule:
+ * records are annotated once the primary arrives, never edited; 05: recomputations are
+ * annotations). One per stand-in on a ticker the version depends on, on a date it recorded,
+ * whose entry used the stand-in, and not annotated yet for that date and ticker (idempotent).
+ *
+ * The entry used the stand-in when it was appended after the stand-in was first recorded and
+ * before the primary resolved it: verify records and resolves stand-ins before the forward step
+ * appends (runs hold the jobs lock), so an entry appended in the resolving run used the
+ * primary's bar, and one appended before the stand-in existed used an earlier bar. A timestamp
+ * that is not an instant leaves that unknown: an error, nothing annotated.
+ */
+export function standInCorrections(o: {
+  version: string;
+  deps: string[];
+  record: Pick<ForwardEntry, 'date' | 'allocation' | 'createdAt'>[];
+  corrected: ResolvedStandIn[];
+  annotated: { date: string; ticker: unknown }[];
+}): {
+  annotate: { standIn: ResolvedStandIn; recorded: Pick<ForwardEntry, 'date' | 'allocation'> }[];
+  errors: string[];
+} {
+  const done = new Set(o.annotated.map((a) => `${a.date} ${String(a.ticker)}`));
+  const byDate = new Map(o.record.map((e) => [e.date, e]));
+  const out: ReturnType<typeof standInCorrections> = { annotate: [], errors: [] };
+  for (const s of o.corrected) {
+    if (!o.deps.includes(s.ticker)) continue;
+    const recorded = byDate.get(s.date);
+    if (!recorded) continue;
+    if (done.has(`${s.date} ${s.ticker}`)) continue;
+    const from = instantOf(s.createdAt);
+    const until = instantOf(s.resolvedAt);
+    if (Number.isNaN(from) || Number.isNaN(until)) {
+      out.errors.push(
+        `${s.ticker} ${s.date}: the stand-in's timestamps are not instants ` +
+          `(created ${s.createdAt}, resolved ${s.resolvedAt}); its correction is not annotated`,
+      );
+      continue;
+    }
+    const at = instantOf(recorded.createdAt);
+    if (Number.isNaN(at)) {
+      out.errors.push(
+        `${o.version} ${s.date}: the entry's created_at (${recorded.createdAt}) is not an ` +
+          `instant; the ${s.ticker} stand-in correction is not annotated`,
+      );
+      continue;
+    }
+    if (at >= from && at < until) out.annotate.push({ standIn: s, recorded });
+  }
+  return out;
 }
 
 /**
@@ -423,4 +522,16 @@ function forwardEquity(
     // A holding without a bar that day: the equity is unknown, not guessed.
     return null;
   }
+}
+
+// --- Which days a version records (shared by forward() and `pnpm drill`) ---
+
+/**
+ * Whether the forward step records `date` for a version (requirements 05): on or after
+ * `forward_records_from` (the A1 gate; `from`), and only a close (16:00 New York) after the
+ * version's registration, so the record never starts in the past. `registeredAt` is the stored
+ * ISO 8601 instant (`toISOString`), compared with the close's as the forward step always has.
+ */
+export function recordsDay(date: TradingDate, from: string, registeredAt: string): boolean {
+  return date >= from && zonedInstant(date, '16:00', 'America/New_York') > registeredAt;
 }
