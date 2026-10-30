@@ -4,6 +4,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { statfs as nodeStatfs } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { filePathOf } from '@saku/db/backup';
 
 /** Requirements 04: warn when the disk holding the database is this full (percent). */
 export const DISK_WARN_PERCENT = 70;
@@ -24,16 +25,18 @@ export async function measureDisk(
   url: string,
   statfs: Statfs = nodeStatfs as unknown as Statfs,
 ): Promise<DiskUsage | null> {
-  if (!url.startsWith('file:')) return null;
-  const file = url.slice('file:'.length);
-  if (!file || file === ':memory:' || !existsSync(file)) return null;
+  // Null only when there is no database file to measure (not a file URL, or in memory).
+  const file = filePathOf(url);
+  if (!file) return null;
+  // A missing database file throws (ENOENT) with the real cause; -wal and -shm may be absent.
   const databaseBytes = ['', '-wal', '-shm'].reduce(
-    (sum, suffix) => (existsSync(file + suffix) ? sum + statSync(file + suffix).size : sum),
+    (sum, suffix) =>
+      suffix === '' || existsSync(file + suffix) ? sum + statSync(file + suffix).size : sum,
     0,
   );
   const fsStats = await statfs(dirname(file));
   const totalBytes = fsStats.blocks * fsStats.bsize;
-  if (!(totalBytes > 0)) return null;
+  if (!(totalBytes > 0)) throw new Error(`The disk holding ${file} reports a size of 0.`);
   const freeBytes = fsStats.bavail * fsStats.bsize;
   return {
     databaseBytes,

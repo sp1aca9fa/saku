@@ -57,7 +57,7 @@ export async function snapshotDatabase(url: string, file: string): Promise<numbe
 }
 
 /** The file a `file:` URL names (`file:/a/b`, `file:///a/b`, `file:rel`), or undefined. */
-function filePathOf(url: string): string | undefined {
+export function filePathOf(url: string): string | undefined {
   if (!url.startsWith('file:')) return undefined;
   // libsql reads what follows `?` as options, not as part of the path.
   const bare = url.split('?')[0]!;

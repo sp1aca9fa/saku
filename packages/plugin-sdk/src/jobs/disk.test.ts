@@ -32,7 +32,22 @@ describe('measureDisk', () => {
   it('is unknown for a non-file or missing database', async () => {
     expect(await measureDisk('libsql://host', fsOf(1, 1))).toBeNull();
     expect(await measureDisk('file::memory:', fsOf(1, 1))).toBeNull();
-    expect(await measureDisk('file:/nonexistent/x.db', fsOf(1, 1))).toBeNull();
+  });
+
+  it('reads file:// and ?options URLs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'saku-disk-'));
+    const file = join(dir, 'x.db');
+    writeFileSync(file, Buffer.alloc(10));
+    expect((await measureDisk(`file://${file}?mode=rwc`, fsOf(100, 50)))!.databaseBytes).toBe(10);
+    expect((await measureDisk(`file:${file}?mode=rwc`, fsOf(100, 50)))!.databaseBytes).toBe(10);
+  });
+
+  it('throws the real cause for a missing file or a disk of size 0', async () => {
+    await expect(measureDisk('file:/nonexistent/x.db', fsOf(1, 1))).rejects.toThrow(/ENOENT/);
+    const dir = mkdtempSync(join(tmpdir(), 'saku-disk-'));
+    const file = join(dir, 'x.db');
+    writeFileSync(file, 'x');
+    await expect(measureDisk(`file:${file}`, fsOf(0, 0))).rejects.toThrow(/size of 0/);
   });
 
   it('warns at exactly 70.0 and not at 69.9', async () => {
