@@ -15,6 +15,7 @@ import {
   registerVersion,
   schema,
   setSetting,
+  symbolId,
   upsertSymbols,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
@@ -137,7 +138,10 @@ const withdrawalsSeen = (w: Withdrawal | undefined, from: string, to: string, no
  * The series source: the USD cash rate (`cashUntil`: the first date it no longer has;
  * `cashWithdrawn`: dates the source later withdraws) and SPY's price index `IDX` (SPY's close
  * x10, published 18:00 New York the next session); the index has nothing after `indexUntil` and
- * fails every call once `to` reaches `indexDownFrom`.
+ * fails every call once `to` reaches `indexDownFrom`. `indexCurrent`: the index served as
+ * current values only (no publication time, as FRED's SP500; each value from its publication on)
+ * and declared complete for its span; `vanished` dates no longer served from its `at` on (spec
+ * 2026-10-31 vanished-values). The cash answer keeps what its source declares (`completeSpan`).
  */
 function seriesSource(
   o: {
@@ -145,6 +149,7 @@ function seriesSource(
     cashWithdrawn?: Withdrawal;
     indexUntil?: string;
     indexDownFrom?: string;
+    indexCurrent?: { vanished?: Withdrawal };
   } = {},
 ): SeriesSource {
   const cash = cashRates(sessions, DATES, o.cashUntil ?? TARGET);
@@ -157,18 +162,34 @@ function seriesSource(
     async fetchSeries(id, from, to, ctx) {
       if (id !== 'IDX') {
         const gone = withdrawalsSeen(o.cashWithdrawn, from, to, ctx.now);
-        return [
-          ...seriesFetchOf(await cash.fetchSeries(id, from, to, ctx)).points,
-          ...gone.map((g) => ({ ...g, withdrawn: true as const })),
-        ];
+        const got = seriesFetchOf(await cash.fetchSeries(id, from, to, ctx));
+        return {
+          points: [...got.points, ...gone.map((g) => ({ ...g, withdrawn: true as const }))],
+          completeSpan: got.completeSpan,
+        };
       }
       if (o.indexDownFrom && to >= o.indexDownFrom) throw new Error('idx: HTTP 503');
+      const publishedAt = (date: string) =>
+        zonedInstant(sessions.after(date), '18:00', 'America/New_York');
+      if (o.indexCurrent) {
+        const gone = withdrawalsSeen(o.indexCurrent.vanished, from, to, ctx.now).map((g) => g.date);
+        const points = spy
+          .filter(
+            (b) =>
+              b.date >= from &&
+              b.date <= to &&
+              Date.parse(publishedAt(b.date)) <= ctx.now.getTime() &&
+              !gone.includes(b.date),
+          )
+          .map((b) => ({ date: b.date, value: b.close * 10 }));
+        return { points, completeSpan: true };
+      }
       return spy
         .filter((b) => b.date >= from && b.date <= to && (!o.indexUntil || b.date <= o.indexUntil))
         .map((b) => ({
           date: b.date,
           value: b.close * 10,
-          publishedAt: zonedInstant(sessions.after(b.date), '18:00', 'America/New_York'),
+          publishedAt: publishedAt(b.date),
         }));
     },
   };
@@ -276,7 +297,8 @@ async function run(
   // `http`: the daily run gives each bar source an HTTP client with its declared limits (the run
   // attaches the quota guard's store, the database's `provider_usage`); `before`: runs on the
   // database before the daily run (e.g. earlier runs' usage).
-  daily: { http?: boolean; before?: (db: Db) => Promise<void> } = {},
+  // `job`: the run after the bootstrap (default daily; a weekly run records no forward entry).
+  daily: { http?: boolean; before?: (db: Db) => Promise<void>; job?: 'daily' | 'weekly' } = {},
 ) {
   const db = await testDb();
   await upsertSymbols(db, [
@@ -329,7 +351,12 @@ async function run(
   await addChannel(db, owner, { type: 'fake', target: 'me', authSecret: SECRET });
   await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
   const { notifier, sent } = fakeNotifier();
-  const job = (job: 'bootstrap' | 'daily', target: string, now: string, list: BarSource[]) => {
+  const job = (
+    job: 'bootstrap' | 'daily' | 'weekly',
+    target: string,
+    now: string,
+    list: BarSource[],
+  ) => {
     const ctx = (info?: PluginInfo) => ({
       http:
         job === 'daily' && daily.http && info?.kind === 'bar'
@@ -378,13 +405,13 @@ async function run(
   );
   expect(before.ok).toBe(true);
   await daily.before?.(db);
-  const result = await job('daily', TARGET, '2026-01-17T01:30:00Z', bars);
+  const result = await job(daily.job ?? 'daily', TARGET, '2026-01-17T01:30:00Z', bars);
   const today = (await forwardRecord(db, version.id)).find((e) => e.date === TARGET)!;
   return {
     db,
     result,
     today,
-    reasons: (JSON.parse(today.payload) as { reasons: string[] }).reasons,
+    reasons: today ? (JSON.parse(today.payload) as { reasons: string[] }).reasons : [],
     // The owner's alert for the strategy (the admin alerts on the same channel are separate).
     alert: sent.map((m) => m.text).find((t) => t.startsWith('Trend 2x:')),
     adminAlerts: sent.map((m) => m.text).filter((t) => t.startsWith('Saku:')),
@@ -704,6 +731,84 @@ describe('fault injection (layer F)', () => {
     expect(await db.select().from(schema.seriesWithdrawals)).toMatchObject([
       { series: 'CASH', date: last, knownAt: WITHDRAWN_AT },
     ]);
+  });
+
+  // Vanished values (spec 2026-10-31 vanished-values): the index served as current values only
+  // (like FRED's SP500), so a value the source stops serving never comes as a withdrawal. The
+  // weekly full refetch compares the answer with the stored dates (a daily run never does).
+  describe('an index served as current values only (vanished values)', () => {
+    const healthOf = async (db: Db, runId: string) =>
+      (await db.select().from(schema.dataHealth))
+        .filter((r) => r.runId === runId)
+        .map((r) => ({ symbolId: r.symbolId, date: r.date, status: r.status, reasons: r.reasons }));
+
+    const weekly = (vanished?: string[]) =>
+      run(
+        sources(),
+        seriesSource({
+          indexCurrent: vanished ? { vanished: { dates: vanished, at: WITHDRAWN_AT } } : {},
+        }),
+        undefined,
+        undefined,
+        { job: 'weekly' },
+      );
+
+    it('weekly, nothing vanished: green, no withdrawal (the control)', async () => {
+      const { db, result, adminAlerts } = await weekly();
+      expect(result.ok).toBe(true);
+      expect(await db.select().from(schema.seriesWithdrawals)).toEqual([]);
+      const health = await healthOf(db, result.runId);
+      expect(health.filter((h) => h.status !== 'green')).toEqual([]);
+      expect(health.find((h) => h.symbolId === null && h.date === TARGET)).toMatchObject({
+        status: 'green',
+      });
+      expect(adminAlerts.some((t) => t.includes('Withdrawn by the source'))).toBe(false);
+    });
+
+    it('weekly, a date inside the served span vanished: graded as a withdrawal, admins told', async () => {
+      const gone = sessions.before(TARGET, 4);
+      const { db, result, adminAlerts } = await weekly([gone]);
+      const SPY = await symbolId(db, 'SPY');
+      expect(await db.select().from(schema.seriesWithdrawals)).toMatchObject([
+        { series: 'IDX', date: gone, knownAt: '2026-01-17T01:30:00.000Z', publishedAt: null },
+      ]);
+      // The index has no value for the date from the refetch on: SPY's index check cannot run
+      // on it and the session after (yellow, a cross-check unavailable), never green.
+      const health = await healthOf(db, result.runId);
+      expect(health.filter((h) => h.symbolId === SPY)).toEqual([
+        { symbolId: SPY, date: gone, status: 'yellow', reasons: ['C.index_unavailable@rates'] },
+        {
+          symbolId: SPY,
+          date: sessions.after(gone),
+          status: 'yellow',
+          reasons: ['C.index_unavailable@rates'],
+        },
+      ]);
+      expect(adminAlerts.join('\n')).toContain(
+        `Withdrawn by the source: IDX value@rates 1 (${gone})`,
+      );
+    });
+
+    it('weekly, the newest dates vanished: withdrawn within the request, the day never green', async () => {
+      // The newest stored date (and the next, never stored) no longer served: the answer ends
+      // three sessions before the target, the request runs to the target.
+      const newest = sessions.before(TARGET, 2);
+      const { db, result, adminAlerts } = await weekly([newest, sessions.before(TARGET, 1)]);
+      const SPY = await symbolId(db, 'SPY');
+      expect(
+        (await db.select().from(schema.seriesWithdrawals)).map((w) => [w.series, w.date]),
+      ).toEqual([['IDX', newest]]);
+      const health = await healthOf(db, result.runId);
+      const overall = health.find((h) => h.symbolId === null && h.date === TARGET);
+      expect(overall!.status).not.toBe('green');
+      expect(overall!.reasons).toContain('IDX:stale(3)@rates');
+      const spy = health.filter((h) => h.symbolId === SPY && h.date >= newest);
+      expect(spy.length).toBeGreaterThan(0);
+      expect(spy.every((h) => h.status !== 'green')).toBe(true);
+      expect(adminAlerts.join('\n')).toContain(
+        `Withdrawn by the source: IDX value@rates 1 (${newest})`,
+      );
+    });
   });
 
   it('withdrawn FX primary rates (base JPY): freshness from the earlier date, never green', async () => {

@@ -260,7 +260,8 @@ describe('ingest', () => {
         revised: 1,
         revisedValues: {},
         withdrawnValues: { IDX: ['2026-01-14'] },
-        outsideSpan: {},
+        beforeSpan: {},
+        afterSpan: {},
       });
       expect(lines.filter((x) => x.level === 'warn' && x.message.startsWith('series'))).toEqual([
         {
@@ -287,8 +288,25 @@ describe('ingest', () => {
         { ...emptyPlugins(), series: [series(() => answer)] },
         at('daily', '2026-01-17T01:00:00Z'),
       );
-      expect(r).toMatchObject({ revised: 0, withdrawnValues: {}, outsideSpan: {} });
+      expect(r).toMatchObject({ revised: 0, withdrawnValues: {}, beforeSpan: {}, afterSpan: {} });
       expect(await db.select().from(schema.seriesWithdrawals)).toEqual([]);
+    });
+
+    it('a full fetch withdraws the newest stored date when the answer now ends before it', async () => {
+      const db = await setup();
+      await ingest(
+        db,
+        { ...emptyPlugins(), series: [series(() => points(first))] },
+        at('bootstrap', '2026-01-16T01:00:00Z'),
+      );
+      // Asked through 2026-01-16; the source now ends at 01-14: 01-15 is inside the request.
+      const answer = { points: points(first.slice(0, 3)), completeSpan: true };
+      const [r] = await ingest(
+        db,
+        { ...emptyPlugins(), series: [series(() => answer)] },
+        at('bootstrap', '2026-01-17T01:00:00Z'),
+      );
+      expect(r).toMatchObject({ withdrawnValues: { IDX: ['2026-01-15'] }, afterSpan: {} });
     });
 
     it('a plain list (not declared complete) never compares on a full fetch', async () => {
@@ -302,38 +320,53 @@ describe('ingest', () => {
       expect(await db.select().from(schema.seriesWithdrawals)).toEqual([]);
     });
 
-    it('stored dates before the served span are kept, counted and logged once', async () => {
+    it('stored dates before the served span are kept and counted; only new ones are logged', async () => {
       const db = await setup();
       await ingest(
         db,
         { ...emptyPlugins(), series: [series(() => points(first))] },
         at('bootstrap', '2026-01-16T01:00:00Z'),
       );
-      const { lines, log: l } = logged();
-      const answer = {
+      let answer = {
         points: points(['2026-01-14', '2026-01-15', '2026-01-16']),
         completeSpan: true,
       };
-      const [r] = await ingest(
-        db,
-        { ...emptyPlugins(), series: [series(() => answer)] },
-        at('bootstrap', '2026-01-17T01:00:00Z', l),
-      );
-      expect(r).toMatchObject({
+      const plugins = { ...emptyPlugins(), series: [series(() => answer)] };
+      const runAt = async (iso: string) => {
+        const { lines, log: l } = logged();
+        const [r] = await ingest(db, plugins, at('bootstrap', iso, l));
+        return { r, lines: lines.filter((x) => x.message.includes('before the span')), all: lines };
+      };
+      const one = await runAt('2026-01-17T01:00:00Z');
+      expect(one.r).toMatchObject({
         inserted: 1,
         revised: 0,
         withdrawnValues: {},
-        outsideSpan: { IDX: 2 },
+        beforeSpan: { IDX: 2 },
+        afterSpan: {},
       });
-      expect(lines.filter((x) => x.message.includes('outside the span'))).toEqual([
+      expect(one.lines).toEqual([
         {
           level: 'info',
           message:
-            'series idx IDX: 2 stored dates outside the span the source served (kept, not withdrawn)',
+            'series idx IDX: 2 stored dates newly before the span the source served (kept, not withdrawn)',
           data: { from: '2026-01-12', to: '2026-01-13', dates: ['2026-01-12', '2026-01-13'] },
         },
       ]);
-      expect(lines.filter((x) => x.level === 'warn' && x.message.startsWith('series'))).toEqual([]);
+      expect(one.all.filter((x) => x.level === 'warn' && x.message.startsWith('series'))).toEqual(
+        [],
+      );
+      // The same span again: counted, not logged again.
+      const two = await runAt('2026-01-18T01:00:00Z');
+      expect(two.r).toMatchObject({ beforeSpan: { IDX: 2 } });
+      expect(two.lines).toEqual([]);
+      // The span moves on by one date: only that date is logged.
+      answer = { points: points(['2026-01-15', '2026-01-16']), completeSpan: true };
+      const three = await runAt('2026-01-19T01:00:00Z');
+      expect(three.r).toMatchObject({ beforeSpan: { IDX: 3 } });
+      expect(three.lines.map((x) => x.data)).toEqual([
+        { from: '2026-01-14', to: '2026-01-14', dates: ['2026-01-14'] },
+      ]);
       expect(await db.select().from(schema.seriesWithdrawals)).toEqual([]);
     });
 

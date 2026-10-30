@@ -346,6 +346,24 @@ export const seriesWithdrawals = sqliteTable(
   (t) => [primaryKey({ columns: [t.series, t.date, t.source, t.knownAt, t.fetchedAt] })],
 );
 
+/**
+ * The span a series response complete for its span covered, per compared full fetch (spec
+ * 2026-10-31 vanished-values): its first point's date and the requested end (`last_date`).
+ * Append-only. Read only to tell which stored dates are newly before the served span (logged
+ * once, not every run); never used for a value.
+ */
+export const seriesSpans = sqliteTable(
+  'series_spans',
+  {
+    series: text('series').notNull(),
+    source: text('source').notNull(),
+    fetchedAt: text('fetched_at').notNull(),
+    firstDate: text('first_date').notNull(),
+    lastDate: text('last_date').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.series, t.source, t.fetchedAt] })],
+);
+
 /** A source's withdrawal of an exchange rate, as `series_withdrawals` for `fx_rates`. */
 export const fxWithdrawals = sqliteTable(
   'fx_withdrawals',

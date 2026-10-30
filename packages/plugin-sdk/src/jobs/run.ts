@@ -257,7 +257,8 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
           ...(Object.keys(r.withdrawnValues).length > 0 && {
             withdrawnValues: r.withdrawnValues,
           }),
-          ...(Object.keys(r.outsideSpan).length > 0 && { outsideSpan: r.outsideSpan }),
+          ...(Object.keys(r.beforeSpan).length > 0 && { beforeSpan: r.beforeSpan }),
+          ...(Object.keys(r.afterSpan).length > 0 && { afterSpan: r.afterSpan }),
         });
       }
       // Changed values and withdrawn ones (the source no longer has a value for the date) are
@@ -543,8 +544,11 @@ function summary(r: SourceReport): string {
   if (r.failed.length) parts.push(`${r.failed.length} failed`);
   if (r.stopped) parts.push(`stopped (${r.stopped})`);
   parts.push(`${r.inserted} new, ${r.revised} revised, ${r.readjustments} re-adjustments`);
-  const outside = Object.values(r.outsideSpan).reduce((n, c) => n + c, 0);
-  if (outside > 0) parts.push(`${outside} stored dates outside the served span (kept)`);
+  const count = (by: Record<string, number>) => Object.values(by).reduce((n, c) => n + c, 0);
+  const before = count(r.beforeSpan);
+  const after = count(r.afterSpan);
+  if (before > 0) parts.push(`${before} stored dates before the served span (kept)`);
+  if (after > 0) parts.push(`${after} stored dates after the requested end (kept)`);
   return parts.join(', ');
 }
 

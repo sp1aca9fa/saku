@@ -14,7 +14,7 @@ import {
   type Vintage,
   zonedInstant,
 } from '@saku/core';
-import { and, asc, between, desc, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, between, desc, eq, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm';
 import type { Db } from './client';
 import {
   barRevisions,
@@ -26,6 +26,7 @@ import {
   issuerRecords,
   readjustments,
   series,
+  seriesSpans,
   seriesWithdrawals,
   standIns,
   symbols,
@@ -328,13 +329,22 @@ export interface StoredValues {
   /** The newly stored withdrawals (each also in `revised`). */
   withdrawn: { item: string; date: TradingDate }[];
   /**
-   * Only when a response complete for its span was compared (`storeSeries`'s `completeSpan`):
-   * the stored dates with a value as known at the fetch that lie outside that span (before its
-   * first date, or after its last), ascending. Kept as they are, never inferred withdrawn: the
-   * source no longer serves them, which says nothing about their values (a licence window that
-   * moved forward; spec 2026-10-31 vanished-values).
+   * Only when a response complete for its span was compared (`storeSeries`'s `completeSpan`;
+   * spec 2026-10-31 vanished-values), stored dates with a value as known at the fetch that lie
+   * outside the compared span, ascending. Kept as they are, never inferred withdrawn: the fetch
+   * says nothing about their values.
    */
-  outsideSpan?: TradingDate[];
+  outside?: {
+    /** Before the first point's date (the source's served span moved forward, e.g. a licence window). */
+    before: TradingDate[];
+    /**
+     * Those of `before` that were not before the previous compared span of this series and
+     * source (all of them on the first comparison): what to list in the run log, once.
+     */
+    newlyBefore: TradingDate[];
+    /** After the requested end (`completeSpan.to`): not asked for. */
+    after: TradingDate[];
+  };
 }
 
 /** A stored or incoming vintage: a value, or a withdrawal (`value` null). */
@@ -526,14 +536,18 @@ function vintageValue(
  *
  * `completeSpan` (spec 2026-10-31 vanished-values; requirements 04: never silently overwrite,
  * point-in-time reads with no look-ahead): the caller says the points are everything the source
- * still publishes from the first point's date to the last one's, and that this fetch may be
- * compared (a full fetch; the plug-in declared it, core never guesses). Then a stored date in that
- * span that has a value as read at the fetch (`PointInTime.knownAt`, withdrawals applied) and is
- * absent from the points is stored as a withdrawal known from the fetch (no publication time):
- * reads from the fetch on skip it, reads before keep the old value, nothing stored is changed.
- * A later value for the date is stored as a new value (`newVintages`), the withdrawal kept. Stored
- * dates outside the span are returned in `outsideSpan`, never withdrawn. No points: nothing is
- * compared (an empty answer has no span; a source with nothing left is left to the checks).
+ * still publishes from the first point's date through the requested end `to`, and that this fetch
+ * may be compared (a full fetch; the plug-in declared it, core never guesses). The compared span
+ * is [first point's date, the later of `to` and the last point's date]: a date after the last
+ * point but within the request is as absent as one between points (the source answered for it).
+ * A stored date in the span that has a value as read at the fetch (`PointInTime.knownAt`,
+ * withdrawals applied) and is absent from the points is stored as a withdrawal known from the
+ * fetch (no publication time): reads from the fetch on skip it, reads before keep the old value,
+ * nothing stored is changed. A later value for the date is stored as a new value
+ * (`newVintages`), the withdrawal kept. Stored dates outside the span are returned in `outside`,
+ * never withdrawn; the span is recorded (`series_spans`, append-only) so the next comparison
+ * tells which dates are newly before it. No points: nothing is compared (an empty answer has no
+ * span; a source with nothing left is left to the checks).
  */
 export async function storeSeries(
   db: Db,
@@ -542,7 +556,7 @@ export async function storeSeries(
     source: string;
     points: SeriesPoint[];
     fetchedAt: string;
-    completeSpan?: boolean;
+    completeSpan?: { to: TradingDate };
   },
 ): Promise<StoredValues> {
   if (input.points.length === 0) return { inserted: 0, revised: [], withdrawn: [] };
@@ -579,14 +593,33 @@ export async function storeSeries(
     fetchedAt,
     knownAt: p.publishedAt ? instant(p.publishedAt) : fetchedAt,
   }));
-  let outsideSpan: TradingDate[] | undefined;
+  let outside: StoredValues['outside'];
+  let span: typeof seriesSpans.$inferInsert | undefined;
   if (input.completeSpan) {
     const fetched = new Set(dates);
+    const end = input.completeSpan.to > range[1] ? input.completeSpan.to : range[1];
+    span = { ...common, fetchedAt, firstDate: range[0], lastDate: end };
+    // The previous compared span (by fetch time) tells which dates are newly before this one.
+    const [previous] = await db
+      .select()
+      .from(seriesSpans)
+      .where(
+        and(
+          eq(seriesSpans.series, input.series),
+          eq(seriesSpans.source, input.source),
+          lt(seriesSpans.fetchedAt, fetchedAt),
+        ),
+      )
+      .orderBy(desc(seriesSpans.fetchedAt))
+      .limit(1);
     // The dates a read at the fetch sees with a value (the same rule `asOf` uses).
     const current = new PointInTime(vintages(storedValues, storedWithdrawals)).knownAt(fetchedAt);
-    outsideSpan = [];
+    outside = { before: [], newlyBefore: [], after: [] };
     for (const { date } of current) {
-      if (date < range[0] || date > range[1]) outsideSpan.push(date);
+      if (date < range[0]) {
+        outside.before.push(date);
+        if (!previous || date >= previous.firstDate) outside.newlyBefore.push(date);
+      } else if (date > end) outside.after.push(date);
       else if (!fetched.has(date)) {
         incoming.push({
           ...common,
@@ -609,12 +642,14 @@ export async function storeSeries(
     for (let i = 0; i < gone.length; i += CHUNK) {
       await tx.insert(seriesWithdrawals).values(gone.slice(i, i + CHUNK));
     }
+    // The same fetch stored twice (same fetch time) records its span once.
+    if (span) await tx.insert(seriesSpans).values(span).onConflictDoNothing();
   });
   return {
     inserted: result.new,
     revised: result.revised,
     withdrawn: result.withdrawn,
-    ...(outsideSpan && { outsideSpan }),
+    ...(outside && { outside }),
   };
 }
 

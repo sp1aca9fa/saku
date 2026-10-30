@@ -417,6 +417,51 @@ describe('FRED', () => {
       ).rejects.toThrow(/observation page at the wrong offset/);
     });
 
+    describe('over two pages (100,000 rows per page)', () => {
+      const n = 100_001;
+      const rows = Array.from({ length: n }, (_, i) => ({
+        realtime_start: '2026-01-07',
+        realtime_end: '2026-01-07',
+        date: addDays('1800-01-01', i),
+        value: String(1000 + (i % 7)),
+      }));
+      /** Page answers; `count`: what each page announces, by offset. */
+      const paged = (count: (offset: number) => number) =>
+        fixtureContext(
+          fredRoutes((url) => {
+            const offset = Number(url.searchParams.get('offset'));
+            return {
+              count: count(offset),
+              offset,
+              observations: rows.slice(offset, offset + 100_000),
+            };
+          }, refused),
+          { apiKey: 'abc' },
+        );
+      const fetch = (ctx: ReturnType<typeof paged>) =>
+        fredSeries.fetchSeries('SP500', '1800-01-01', '2026-01-06', ctx);
+
+      it('reads both pages when they announce the same count', async () => {
+        const ctx = paged(() => n);
+        const got = await fetch(ctx);
+        expect(Array.isArray(got) ? [] : got.points).toHaveLength(n);
+        expect(got).toMatchObject({ completeSpan: true });
+        // The vintage dates request, then two observation pages.
+        expect(ctx.requested).toHaveLength(3);
+      });
+
+      it('refuses a later page that announces a different count (the series changed meanwhile)', async () => {
+        // One more row announced on the second page: reading on would miss a row or count it twice.
+        await expect(fetch(paged((offset) => (offset === 0 ? n : n + 1)))).rejects.toThrow(
+          /offset 100000 announces 100002 rows, the first page 100001/,
+        );
+        // One fewer: the loop would stop early with rows it cannot place.
+        await expect(fetch(paged((offset) => (offset === 0 ? n : n - 1)))).rejects.toThrow(
+          /offset 100000 announces 100000 rows, the first page 100001/,
+        );
+      });
+    });
+
     it('a series with vintages stays a plain list (never declared complete for its span)', async () => {
       const ctx = fixtureContext(
         fredRoutes(() => fixture('fred-dtb3.json')),

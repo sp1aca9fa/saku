@@ -83,11 +83,14 @@ export interface SourceReport {
    */
   withdrawnValues: Record<string, TradingDate[]>;
   /**
-   * Series: per item, how many stored dates with a value lie outside the span a response complete
+   * Series: per item, how many stored dates with a value lie before the span a response complete
    * for its span served (`SeriesFetch.completeSpan`, full fetches only; spec 2026-10-31
-   * vanished-values). Kept, never withdrawn; the dates are listed once in the run log.
+   * vanished-values; e.g. a licence window that moved forward). Kept, never withdrawn; only the
+   * dates newly before it are listed in the run log, once.
    */
-  outsideSpan: Record<string, number>;
+  beforeSpan: Record<string, number>;
+  /** Series: per item, how many stored dates with a value lie after the requested end (kept). */
+  afterSpan: Record<string, number>;
   /** Issuer sources: the tickers it supports (all of them when `supports` failed). */
   supported?: string[];
 }
@@ -135,7 +138,8 @@ function report(source: string, kind: SourceReport['kind']): SourceReport {
     missing: {},
     revisedValues: {},
     withdrawnValues: {},
-    outsideSpan: {},
+    beforeSpan: {},
+    afterSpan: {},
   };
 }
 
@@ -307,22 +311,26 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
       const got = seriesFetchOf(await source.fetchSeries(id, from, o.to, ctx));
       // Vanished values (spec 2026-10-31 vanished-values): only a full fetch (bootstrap, weekly)
       // of a response the plug-in declares complete for its span is compared with the stored
-      // dates; a daily fetch never infers a withdrawal, whatever it declares.
+      // dates, through the requested end; a daily fetch never infers a withdrawal, whatever it
+      // declares.
+      const compare = o.mode !== 'daily' && got.completeSpan;
       const stored = await storeSeries(db, {
         series: id,
         source: source.info.key,
         points: got.points,
         fetchedAt: now().toISOString(),
-        completeSpan: o.mode !== 'daily' && got.completeSpan,
+        ...(compare && { completeSpan: { to: o.to } }),
       });
       noteValues(r, stored, o.log);
-      const outside = stored.outsideSpan ?? [];
-      if (outside.length > 0) {
-        r.outsideSpan[id] = outside.length;
+      const outside = stored.outside;
+      if (outside && outside.before.length > 0) r.beforeSpan[id] = outside.before.length;
+      if (outside && outside.after.length > 0) r.afterSpan[id] = outside.after.length;
+      const newly = outside?.newlyBefore ?? [];
+      if (newly.length > 0) {
         o.log.info(
-          `series ${r.source} ${id}: ${outside.length} stored dates outside the span the source ` +
-            'served (kept, not withdrawn)',
-          { from: outside[0], to: outside.at(-1), dates: outside },
+          `series ${r.source} ${id}: ${newly.length} stored dates newly before the span the ` +
+            'source served (kept, not withdrawn)',
+          { from: newly[0], to: newly.at(-1), dates: newly },
         );
       }
     });

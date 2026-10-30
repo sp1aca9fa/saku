@@ -48,10 +48,12 @@ in any spelling, `Z` or an offset); the same vintage twice is stored once.
 Series sources without vintages (current values only) cannot send a withdrawal: a value the
 source stops publishing is simply absent. Such a source returns `{ points, completeSpan: true }`
 (`SeriesFetch`) when the answer holds every value it still publishes from the first point's date
-to the last one's (read to the last page, checked against the count the provider announced). On
-a full fetch (bootstrap, weekly), core then stores a withdrawal, known from the fetch, for each
-stored date in that span left out of the answer; stored dates outside the span are kept. Never
-declare it for an answer that may be partial or capped. A plain list is never compared.
+through the requested `to` (read to the last page, checked against the count the provider
+announced, the same on every page). On a full fetch (bootstrap, weekly), core then stores a
+withdrawal, known from the fetch, for each stored date in that span left out of the answer (a
+date after the last point but on or before `to` included); stored dates before the first point
+or after `to` are kept. Never declare it for an answer that may be partial or capped. A plain list
+is never compared.
 
 ### `PluginInfo`
 

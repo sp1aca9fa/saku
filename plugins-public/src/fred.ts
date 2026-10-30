@@ -115,8 +115,10 @@ const notInAlfred = (e: unknown): boolean =>
 /**
  * All rows of one real-time window (paged), including missing values. Without a window, FRED's
  * default real-time period applies (today: the current values only). `complete`: every page must
- * be at its offset and the rows read must be as many as FRED announced, or the answer is refused
- * (a response declared complete for its span must not be short; see `currentValues`).
+ * be at its offset and announce the same count as the first page (a count that changes between
+ * pages means the series changed while it was read), and the rows read must be as many as that
+ * count, or the answer is refused (a response declared complete for its span must not be short;
+ * see `currentValues`).
  */
 async function windowRows(
   id: string,
@@ -127,6 +129,8 @@ async function windowRows(
   complete = false,
 ): Promise<Row[]> {
   const out: Row[] = [];
+  /** The first page's count (`complete`). */
+  let announced: number | undefined;
   for (let offset = 0; ; offset += PAGE) {
     const url =
       `${API}/observations?series_id=${encodeURIComponent(id)}&api_key=${ctx.apiKey}` +
@@ -136,6 +140,15 @@ async function windowRows(
     const page = Observations.parse(await ctx.http.json(url));
     if (complete && page.offset !== offset) {
       throw new Error(`FRED ${id}: observation page at the wrong offset`);
+    }
+    if (complete) {
+      announced ??= page.count;
+      if (page.count !== announced) {
+        throw new Error(
+          `FRED ${id}: observation page at offset ${offset} announces ${page.count} rows, ` +
+            `the first page ${announced}`,
+        );
+      }
     }
     for (const o of page.observations) {
       if (

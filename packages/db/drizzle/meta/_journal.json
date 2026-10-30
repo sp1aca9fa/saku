@@ -71,6 +71,13 @@
       "when": 1793336390357,
       "tag": "0009_withdrawals",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1793383462686,
+      "tag": "0010_series_spans",
+      "breakpoints": true
     }
   ]
 }
