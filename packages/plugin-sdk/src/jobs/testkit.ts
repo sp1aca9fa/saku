@@ -1,7 +1,8 @@
 // Shared by the job tests: in-memory plug-ins and a fake alert channel (no network).
 import { type TradingDate, zonedInstant } from '@saku/core';
 import type { Sessions } from '@saku/data';
-import type { Notifier, PluginInfo, SeriesSource } from '../types';
+import { PoliteHttp } from '../http';
+import type { Notifier, PluginInfo, ProviderLimits, SeriesSource } from '../types';
 
 export const quiet = { info() {}, warn() {} };
 
@@ -52,4 +53,21 @@ export function fakeNotifier(down: string[] = []) {
     },
   };
   return { notifier, sent };
+}
+
+/**
+ * A plug-in's HTTP client with the provider's `limits` that answers every request with `{}` (no
+ * network), on a fixed clock (`at`, ms) for both the run's and the system clock, never waiting.
+ * The run attaches the quota guard's store, as it does for a real plug-in.
+ */
+export function fakeHttp(at: number, limits: ProviderLimits = {}): PoliteHttp {
+  return new PoliteHttp({
+    limits,
+    minDelayMs: 0,
+    retries: 0,
+    sleep: async () => {},
+    fetchImpl: async () => new Response('{}'),
+    clock: () => at,
+    wallClock: () => at,
+  });
 }

@@ -9,7 +9,9 @@ import { Sessions } from '@saku/data';
 import {
   addChannel,
   createUser,
+  type Db,
   forwardRecord,
+  recordProviderRequest,
   registerVersion,
   schema,
   setSetting,
@@ -18,11 +20,18 @@ import {
 import { testDb } from '@saku/db/testing';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
-import { BlockedError } from '../http';
+import { BlockedError, type PoliteHttp } from '../http';
 import { emptyPlugins } from '../registry';
-import type { BarSource, CalendarSource, FxSource, IssuerSource, SeriesSource } from '../types';
+import type {
+  BarSource,
+  CalendarSource,
+  FxSource,
+  IssuerSource,
+  PluginInfo,
+  SeriesSource,
+} from '../types';
 import { runJob } from './run';
-import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
+import { cashRates, fakeHttp, fakeNotifier, quiet, testInfo } from './testkit';
 
 const sessions = new Sessions({
   id: 't',
@@ -83,16 +92,26 @@ const onTarget =
           return f(b, bars[i - 1]!);
         });
 
-/** A bar source answering from the clean history, corrupted by `fault`; `down` fails every call. */
-function source(key: string, o: { fault?: Fault; down?: boolean; adjusted?: boolean } = {}) {
+/**
+ * A bar source answering from the clean history, corrupted by `fault`; `down` fails every call;
+ * `info`: declarations added to its description (limits, adjusted-close rounding). With an HTTP
+ * client in its context, each fetch first sends one request through it (as a plug-in does), so
+ * the quota guard counts and refuses as for a real provider.
+ */
+function source(
+  key: string,
+  o: { fault?: Fault; down?: boolean; adjusted?: boolean; info?: Partial<PluginInfo> } = {},
+) {
   const data = clean();
   const adj = Object.fromEntries(
     Object.entries(data).map(([t, bars]) => [t, totalReturnIndex(bars, 100)]),
   );
   const s: BarSource = {
-    info: testInfo(key, 'bar'),
-    async fetchBars(ticker, from, to) {
+    info: testInfo(key, 'bar', o.info),
+    async fetchBars(ticker, from, to, ctx) {
       if (o.down) throw new Error(`${key}: HTTP 503`);
+      const http = ctx.http as PoliteHttp | null;
+      if (http) await http.json(`https://${key}.example.test/bars/${ticker}?from=${from}&to=${to}`);
       const t = ticker as Ticker;
       // The provider's adjusted closes come from its own (clean) books, as a check source's do.
       let bars = data[t].map((b, i) =>
@@ -224,6 +243,10 @@ async function run(
   issuer?: { source: IssuerSource; tolerances?: string; dailyMissing?: boolean },
   // A base currency other than USD, with its FX sources.
   fx?: { base: string; sources: FxSource[]; calendars?: CalendarSource[] },
+  // `http`: the daily run gives each bar source an HTTP client with its declared limits (the run
+  // attaches the quota guard's store, the database's `provider_usage`); `before`: runs on the
+  // database before the daily run (e.g. earlier runs' usage).
+  daily: { http?: boolean; before?: (db: Db) => Promise<void> } = {},
 ) {
   const db = await testDb();
   await upsertSymbols(db, [
@@ -277,7 +300,14 @@ async function run(
   await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
   const { notifier, sent } = fakeNotifier();
   const job = (job: 'bootstrap' | 'daily', target: string, now: string, list: BarSource[]) => {
-    const ctx = () => ({ http: null as never, now: new Date(now), log: quiet });
+    const ctx = (info?: PluginInfo) => ({
+      http:
+        job === 'daily' && daily.http && info?.kind === 'bar'
+          ? fakeHttp(Date.parse(now), info.limits)
+          : (null as never),
+      now: new Date(now),
+      log: quiet,
+    });
     return runJob(
       db,
       {
@@ -301,7 +331,7 @@ async function run(
           date: target,
           notifiers: [notifier],
           authSecret: SECRET,
-          context: ctx,
+          context: () => ctx(),
           log: quiet,
         },
         tsa: { authorities: [] },
@@ -317,6 +347,7 @@ async function run(
     sources(),
   );
   expect(before.ok).toBe(true);
+  await daily.before?.(db);
   const result = await job('daily', TARGET, '2026-01-17T01:30:00Z', bars);
   const today = (await forwardRecord(db, version.id)).find((e) => e.date === TARGET)!;
   return {
@@ -327,6 +358,8 @@ async function run(
     // The owner's alert for the strategy (the admin alerts on the same channel are separate).
     alert: sent.map((m) => m.text).find((t) => t.startsWith('Trend 2x:')),
     adminAlerts: sent.map((m) => m.text).filter((t) => t.startsWith('Saku:')),
+    /** A later daily run for the same target (a catch-up run) with these sources. */
+    again: (list: BarSource[], now: string) => job('daily', TARGET, now, list),
   };
 }
 
@@ -707,4 +740,273 @@ describe('fault injection (layer F)', () => {
       );
     });
   }
+
+  // The data paths added on 2026-10-30 (docs/data-pipeline.md "Quota guard" and "A source's
+  // unfinished day is not stored"; storeRawBars' declared adjusted-close rounding).
+  describe('quota guard, unfinished day, adjusted-close rounding', () => {
+    /** The daily run's clock (as in `run`). */
+    const DAILY = Date.parse('2026-01-17T01:30:00Z');
+    /** `n` earlier requests of `provider`, `ago` ms before the daily run, cycling over `symbols`. */
+    const earlier =
+      (provider: string, n: number, symbols: (string | null)[], ago: number) => async (db: Db) => {
+        for (let i = 0; i < n; i++) {
+          const symbol = symbols[i % symbols.length] ?? null;
+          await recordProviderRequest(db, { provider, at: DAILY - ago, symbol });
+        }
+      };
+    /** A day of an earlier run: the symbols stay counted (31 days), the request windows are clear. */
+    const DAY_AGO = 86_400_000 + 3_600_000;
+    /** Ten minutes ago: inside the hour window, which frees up only in 50 minutes (over 2). */
+    const MINUTES_AGO = 600_000;
+    /** perHour 10: 8 requests allowed (80%); `full` fills them. */
+    const hourly = { limits: { perHour: 10 } };
+    const full = (provider: string) => earlier(provider, 8, [null], MINUTES_AGO);
+
+    const health = async (r: Awaited<ReturnType<typeof run>>, runId = r.result.runId) => {
+      const tickers = new Map(
+        (await r.db.select().from(schema.symbols)).map((x) => [x.id, x.ticker]),
+      );
+      return (await r.db.select().from(schema.dataHealth).where(eq(schema.dataHealth.runId, runId)))
+        .filter((x) => x.date === TARGET)
+        .map((x) => ({
+          ticker: x.symbolId === null ? null : tickers.get(x.symbolId),
+          status: x.status,
+          reasons: x.reasons,
+        }));
+    };
+    /** The sources that stored a bar for the ticker on the target day. */
+    const storedOnTarget = async (r: Awaited<ReturnType<typeof run>>, ticker: Ticker) => {
+      const [sym] = await r.db
+        .select()
+        .from(schema.symbols)
+        .where(eq(schema.symbols.ticker, ticker));
+      return (await r.db.select().from(schema.barsRaw))
+        .filter((x) => x.symbolId === sym!.id && x.date === TARGET)
+        .map((x) => x.source)
+        .sort();
+    };
+
+    // The control for the cases below: the sources' requests go through a guarded client.
+    it('limits declared and room left: green, every request counted (the control)', async () => {
+      const r = await run(
+        [
+          source('p', { info: { limits: { symbolsPerMonth: 5, perHour: 10 } } }),
+          source('s1', { adjusted: true, info: hourly }),
+          source('s2', { info: hourly }),
+        ],
+        rates,
+        undefined,
+        undefined,
+        { http: true, before: earlier('p', 3, ['AAA', 'BBB', 'SPY'], DAY_AGO) },
+      );
+      expect(r.result.ok).toBe(true);
+      expect(r.today).toMatchObject({ dataStatus: 'green', allocation: 'Risk on' });
+      const days = (await r.db.select().from(schema.providerUsage)).filter(
+        (u) => u.windowType === 'day' && u.windowStart === '2026-01-17',
+      );
+      for (const key of ['p', 's1', 's2']) {
+        expect(days.find((u) => u.provider === key)).toMatchObject({
+          requestCount: 2,
+          symbols: ['SPY', 'SSO'],
+        });
+      }
+    });
+
+    // A refused ticker is the primary missing for it: the stand-in rule grades it (04: "Primary
+    // data missing with no usable stand-in" is red; here two agreeing secondaries stand in and the
+    // signal cannot flip within the band, so yellow), exactly as the primary failing outright.
+    it("the primary's symbol cap refuses a ticker the strategy reads: as a primary failure for it", async () => {
+      // symbolsPerMonth 5: 4 allowed; AAA, BBB, CCC and SPY counted by earlier runs, SSO is new.
+      const r = await run(
+        [
+          source('p', { info: { limits: { symbolsPerMonth: 5 } } }),
+          source('s1', { adjusted: true }),
+          source('s2'),
+        ],
+        rates,
+        undefined,
+        undefined,
+        { http: true, before: earlier('p', 4, ['AAA', 'BBB', 'CCC', 'SPY'], DAY_AGO) },
+      );
+      // SPY, already counted, is still fetched; SSO is refused (nothing sent, nothing stored).
+      expect(await storedOnTarget(r, 'SPY')).toEqual(['p', 's1', 's2']);
+      expect(await storedOnTarget(r, 'SSO')).toEqual(['s1', 's2']);
+      const usage = await r.db.select().from(schema.providerUsage);
+      expect(usage.some((u) => u.provider === 'p' && u.symbols.includes('SSO'))).toBe(false);
+      expect(r.result.error).toBe('incomplete: p');
+      expect(r.today).toMatchObject({
+        dataStatus: 'yellow',
+        safeStateApplied: false,
+        allocation: 'Risk on',
+      });
+      expect(r.reasons).toEqual(['SSO:stand_in@s1']);
+      expect(await health(r)).toEqual(
+        expect.arrayContaining([
+          { ticker: 'SPY', status: 'green', reasons: [] },
+          { ticker: 'SSO', status: 'yellow', reasons: ['stand_in@s1'] },
+        ]),
+      );
+      expect(r.alert).toContain('Data health: yellow (computed with a warning).');
+      expect(r.adminAlerts.join('\n')).toContain(
+        `Saku: the daily run for ${TARGET} did not finish\nReason: incomplete: p.`,
+      );
+    });
+
+    it("the primary's hour window full from an earlier run: stopped, graded as the primary down", async () => {
+      const r = await run(
+        [source('p', { info: hourly }), source('s1', { adjusted: true }), source('s2')],
+        rates,
+        undefined,
+        undefined,
+        { http: true, before: full('p') },
+      );
+      // Nothing sent: the source stopped before its first request.
+      expect(await storedOnTarget(r, 'SPY')).toEqual(['s1', 's2']);
+      expect(await storedOnTarget(r, 'SSO')).toEqual(['s1', 's2']);
+      const down = await run([
+        source('p', { down: true }),
+        source('s1', { adjusted: true }),
+        source('s2'),
+      ]);
+      for (const x of [r, down]) {
+        expect(x.result.error).toBe('incomplete: p');
+        expect(x.today).toMatchObject({
+          dataStatus: 'yellow',
+          safeStateApplied: false,
+          allocation: 'Risk on',
+        });
+        expect(x.reasons).toEqual(['SPY:stand_in@s1', 'SSO:stand_in@s1']);
+        expect(x.adminAlerts.join('\n')).toContain('Reason: incomplete: p.');
+      }
+      expect(await health(r)).toEqual(await health(down));
+    });
+
+    it('a secondary stopped by its quota: yellow (secondary unavailable), never green', async () => {
+      const r = await run(
+        [source('p'), source('s1', { adjusted: true }), source('s2', { info: hourly })],
+        rates,
+        undefined,
+        undefined,
+        { http: true, before: full('s2') },
+      );
+      expect(r.result.error).toBe('incomplete: s2');
+      expect(r.today).toMatchObject({
+        dataStatus: 'yellow',
+        safeStateApplied: false,
+        allocation: 'Risk on',
+      });
+      expect(r.reasons).toEqual(['SPY:B.close_match@s2', 'SSO:B.close_match@s2']);
+      // Caught as the secondary's bar missing (layer B, yellow), not as a mismatch.
+      const b = (
+        await r.db
+          .select()
+          .from(schema.checkResults)
+          .where(eq(schema.checkResults.runId, r.result.runId))
+      ).filter((x) => x.date === TARGET && x.checkName === 'close_match' && x.source === 's2');
+      expect(b.map((x) => [x.status, x.message])).toEqual([
+        ['yellow', 'no secondary bar'],
+        ['yellow', 'no secondary bar'],
+      ]);
+    });
+
+    it('both secondaries stopped by their quotas: single source, yellow, never green', async () => {
+      const r = await run(
+        [
+          source('p'),
+          source('s1', { adjusted: true, info: hourly }),
+          source('s2', { info: hourly }),
+        ],
+        rates,
+        undefined,
+        undefined,
+        {
+          http: true,
+          before: async (db) => {
+            await full('s1')(db);
+            await full('s2')(db);
+          },
+        },
+      );
+      expect(r.result.error).toBe('incomplete: s1, s2');
+      expect(r.today).toMatchObject({
+        dataStatus: 'yellow',
+        safeStateApplied: false,
+        allocation: 'Risk on',
+      });
+      expect(r.reasons).toEqual(expect.arrayContaining(['SPY:single_source', 'SSO:single_source']));
+      expect(r.alert).toContain('Data health: yellow (computed with a warning).');
+    });
+
+    it("a secondary's unfinished day (no bar for the target yet): yellow, then green with the bar", async () => {
+      // As Yahoo before the final time: the bar left out, the others have it. Not a failure of the
+      // run (the source answered); the day is graded with that secondary unavailable.
+      const unfinished: Fault = (_t, bars) => bars.filter((b) => b.date !== TARGET);
+      const r = await run([
+        source('p'),
+        source('s1', { adjusted: true, fault: unfinished }),
+        source('s2'),
+      ]);
+      expect(r.result.ok).toBe(true);
+      expect(await storedOnTarget(r, 'SPY')).toEqual(['p', 's2']);
+      expect(r.today).toMatchObject({
+        dataStatus: 'yellow',
+        safeStateApplied: false,
+        allocation: 'Risk on',
+      });
+      expect(r.reasons).toEqual(['SPY:B.close_match@s1', 'SSO:B.close_match@s1']);
+      const b = (
+        await r.db
+          .select()
+          .from(schema.checkResults)
+          .where(eq(schema.checkResults.runId, r.result.runId))
+      ).filter((x) => x.date === TARGET && x.checkName === 'close_match' && x.source === 's1');
+      expect(b.every((x) => x.status === 'yellow' && x.message === 'no secondary bar')).toBe(true);
+      expect(b).toHaveLength(2);
+      // The next run, with the bar: the target regraded green; the forward record keeps what was
+      // signaled (yellow), append-only.
+      const next = await r.again(sources(), '2026-01-17T03:00:00Z');
+      expect(next.ok).toBe(true);
+      expect(await health(r, next.runId)).toEqual(
+        expect.arrayContaining([
+          { ticker: 'SPY', status: 'green', reasons: [] },
+          { ticker: 'SSO', status: 'green', reasons: [] },
+          { ticker: null, status: 'green', reasons: [] },
+        ]),
+      );
+      const record = await forwardRecord(r.db, r.today.versionId);
+      expect(record.filter((e) => e.date === TARGET).map((e) => e.dataStatus)).toEqual(['yellow']);
+    });
+
+    // The declared rounding only spares re-adjustment events within it; it never hides a fault.
+    for (const c of [
+      { name: 'on the target day', date: TARGET, events: 0 },
+      // A stored date: the change is recorded as a one-date re-adjustment (factor 1.01), not
+      // rounding, and the target's adjusted return (from that date) is caught.
+      { name: 'on the stored day before', date: sessions.before(TARGET, 1), events: 1 },
+    ]) {
+      it(`a provider's adjusted close off by 1% ${c.name}, rounding 1e-6 declared: red, safe state`, async () => {
+        const off: Fault = (t, bars) =>
+          t !== 'SPY'
+            ? bars
+            : bars.map((x) =>
+                x.date === c.date ? { ...x, providerAdjClose: x.providerAdjClose! * 1.01 } : x,
+              );
+        const r = await run([
+          source('p'),
+          source('s1', { adjusted: true, fault: off, info: { adjCloseRounding: 1e-6 } }),
+          source('s2'),
+        ]);
+        expect(r.today.dataStatus).toBe('red');
+        expect(r.reasons).toContain('SPY:B.adj_return_match@s1');
+        expect(r.today).toMatchObject({ safeStateApplied: true, allocation: 'Safe state' });
+        expect(r.alert).toMatch(new RegExp(`^Trend 2x: safe state for ${TARGET}`));
+        const events = await r.db.select().from(schema.readjustments);
+        expect(events).toHaveLength(c.events);
+        if (c.events) {
+          expect(events[0]).toMatchObject({ source: 's1', fromDate: c.date, toDate: c.date });
+          expect(events[0]!.factor).toBeCloseTo(1.01, 12);
+        }
+      });
+    }
+  });
 });
