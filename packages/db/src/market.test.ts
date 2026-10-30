@@ -19,8 +19,10 @@ import {
   barsRaw,
   fxRates,
   issuerRecords,
+  fxWithdrawals,
   readjustments,
   series,
+  seriesWithdrawals,
   symbols,
 } from './schema';
 import { testDb } from './testing';
@@ -311,11 +313,13 @@ describe('vintages', () => {
     expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't1' })).toEqual({
       inserted: 2,
       revised: [],
+      withdrawn: [],
     });
     // A new publication time is a new vintage, not a revision.
     expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't2' })).toEqual({
       inserted: 0,
       revised: [],
+      withdrawn: [],
     });
     expect(await db.select().from(series)).toHaveLength(2);
     const pit = await seriesPointInTime(db, 'S', 'x');
@@ -361,6 +365,7 @@ describe('vintages', () => {
     expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt })).toEqual({
       inserted: 1,
       revised: [],
+      withdrawn: [],
     });
     const rows = await db.select().from(series);
     expect(rows.map((r) => [r.publishedAt, r.knownAt])).toEqual([[null, fetchedAt]]);
@@ -385,7 +390,7 @@ describe('vintages', () => {
         points: points(5001.25),
         fetchedAt: at(8),
       }),
-    ).toEqual({ inserted: 0, revised: [] });
+    ).toEqual({ inserted: 0, revised: [], withdrawn: [] });
     // One value changed, one new date.
     expect(
       await storeSeries(db, {
@@ -394,7 +399,7 @@ describe('vintages', () => {
         points: [...points(5002), { date: '2026-01-06', value: 11 }],
         fetchedAt: at(9),
       }),
-    ).toEqual({ inserted: 1, revised: [{ item: 'S', date: '2026-01-02' }] });
+    ).toEqual({ inserted: 1, revised: [{ item: 'S', date: '2026-01-02' }], withdrawn: [] });
     const rows = await db.select().from(series).where(eq(series.date, '2026-01-02'));
     expect(rows.map((r) => [r.value, r.knownAt])).toEqual([
       [5001.25, at(7)],
@@ -410,7 +415,7 @@ describe('vintages', () => {
     await storeSeries(db, { series: 'T', source: 'x', points: vintage(1), fetchedAt: at(7) });
     expect(
       await storeSeries(db, { series: 'T', source: 'x', points: vintage(2), fetchedAt: at(8) }),
-    ).toEqual({ inserted: 0, revised: [{ item: 'T', date: '2026-01-02' }] });
+    ).toEqual({ inserted: 0, revised: [{ item: 'T', date: '2026-01-02' }], withdrawn: [] });
   });
 
   it('without a publication time, a changed value is a new row known from its fetch', async () => {
@@ -420,7 +425,7 @@ describe('vintages', () => {
     await storeFx(db, { source: 'x', kind: 'valuation', rates: rate(100), fetchedAt: 't2' });
     expect(
       await storeFx(db, { source: 'x', kind: 'valuation', rates: rate(101), fetchedAt: 't3' }),
-    ).toEqual({ inserted: 0, revised: [{ item: 'USDXXX', date: '2026-01-02' }] });
+    ).toEqual({ inserted: 0, revised: [{ item: 'USDXXX', date: '2026-01-02' }], withdrawn: [] });
     await storeFx(db, { source: 'x', kind: 'valuation', rates: rate(100), fetchedAt: 't4' });
     const rows = await db.select().from(fxRates);
     expect(rows.map((r) => [r.rate, r.knownAt])).toEqual([
@@ -430,6 +435,146 @@ describe('vintages', () => {
     ]);
     const pit = await fxPointInTime(db, 'USDXXX', 'x');
     expect(pit.asOf('2026-01-02', 't3x')!.value).toBe(101);
+  });
+});
+
+describe('withdrawn values', () => {
+  const pub = (d: string) => `${d}T23:00:00.000Z`;
+  const value = (date: string, v: number, at: string) => ({ date, value: v, publishedAt: pub(at) });
+  const gone = (date: string, at: string) => ({
+    date,
+    withdrawn: true as const,
+    publishedAt: pub(at),
+  });
+
+  it('stores a withdrawal once, keeps the old value, and reads it point in time', async () => {
+    const db = await testDb();
+    const points = [
+      value('2026-01-02', 3.61, '2026-01-05'),
+      value('2026-01-05', 3.6, '2026-01-06'),
+      gone('2026-01-05', '2026-01-08'),
+    ];
+    const store = (fetchedAt: string) =>
+      storeSeries(db, { series: 'S', source: 'x', points, fetchedAt });
+    expect(await store('t1')).toEqual({
+      inserted: 2,
+      revised: [{ item: 'S', date: '2026-01-05' }],
+      withdrawn: [{ item: 'S', date: '2026-01-05' }],
+    });
+    // Refetch: nothing new, nothing reported (idempotent).
+    expect(await store('t2')).toEqual({ inserted: 0, revised: [], withdrawn: [] });
+    expect(await db.select().from(series)).toHaveLength(2);
+    const rows = await db.select().from(seriesWithdrawals);
+    expect(rows.map((r) => [r.date, r.knownAt, r.fetchedAt])).toEqual([
+      ['2026-01-05', pub('2026-01-08'), 't1'],
+    ]);
+    const pit = await seriesPointInTime(db, 'S', 'x');
+    // Before the withdrawal: the old value. From it on: 01-05 has none, the read looks back.
+    expect(pit.asOf('2026-01-05', pub('2026-01-07'))).toMatchObject({
+      date: '2026-01-05',
+      value: 3.6,
+    });
+    expect(pit.asOf('2026-01-05', pub('2026-01-08'))).toMatchObject({
+      date: '2026-01-02',
+      value: 3.61,
+    });
+    expect(pit.knownAt(pub('2026-01-09')).map((p) => p.date)).toEqual(['2026-01-02']);
+  });
+
+  it('a value after a withdrawal restores the date; restating a withdrawn vintage is a revision', async () => {
+    const db = await testDb();
+    await storeSeries(db, {
+      series: 'S',
+      source: 'x',
+      points: [value('2026-01-05', 3.6, '2026-01-06'), gone('2026-01-05', '2026-01-08')],
+      fetchedAt: 't1',
+    });
+    // A later vintage brings a value back: a new vintage, not a revision.
+    expect(
+      await storeSeries(db, {
+        series: 'S',
+        source: 'x',
+        points: [value('2026-01-05', 3.7, '2026-01-12')],
+        fetchedAt: 't2',
+      }),
+    ).toEqual({ inserted: 1, revised: [], withdrawn: [] });
+    let pit = await seriesPointInTime(db, 'S', 'x');
+    expect(pit.asOf('2026-01-05', pub('2026-01-10'))).toBeUndefined();
+    expect(pit.asOf('2026-01-05', pub('2026-01-12'))!.value).toBe(3.7);
+    // The source restates the withdrawn vintage itself as a value: a revision, a new row.
+    expect(
+      await storeSeries(db, {
+        series: 'S',
+        source: 'x',
+        points: [value('2026-01-05', 3.65, '2026-01-08')],
+        fetchedAt: 't3',
+      }),
+    ).toEqual({ inserted: 0, revised: [{ item: 'S', date: '2026-01-05' }], withdrawn: [] });
+    expect(await db.select().from(seriesWithdrawals)).toHaveLength(1);
+    pit = await seriesPointInTime(db, 'S', 'x');
+    // Same known_at as the withdrawal: the later fetch wins.
+    expect(pit.asOf('2026-01-05', pub('2026-01-10'))!.value).toBe(3.65);
+  });
+
+  it('refuses a value and a withdrawal for the same date and publication time', async () => {
+    const db = await testDb();
+    const points = [value('2026-01-05', 3.6, '2026-01-06'), gone('2026-01-05', '2026-01-06')];
+    await expect(
+      storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't1' }),
+    ).rejects.toThrow(/a value and a withdrawal/);
+    expect(await db.select().from(series)).toHaveLength(0);
+  });
+
+  it('stores FX withdrawals per pair and kind, once', async () => {
+    const db = await testDb();
+    const rates = [
+      { pair: 'USDXXX', date: '2026-01-05', rate: 150, publishedAt: pub('2026-01-06') },
+      {
+        pair: 'USDXXX',
+        date: '2026-01-05',
+        withdrawn: true as const,
+        publishedAt: pub('2026-01-08'),
+      },
+    ];
+    const store = (fetchedAt: string) =>
+      storeFx(db, { source: 'x', kind: 'valuation', rates, fetchedAt });
+    expect(await store('t1')).toEqual({
+      inserted: 1,
+      revised: [{ item: 'USDXXX', date: '2026-01-05' }],
+      withdrawn: [{ item: 'USDXXX', date: '2026-01-05' }],
+    });
+    expect(await store('t2')).toEqual({ inserted: 0, revised: [], withdrawn: [] });
+    expect(await db.select().from(fxRates)).toHaveLength(1);
+    expect(await db.select().from(fxWithdrawals)).toHaveLength(1);
+    const pit = await fxPointInTime(db, 'USDXXX', 'x');
+    expect(pit.asOf('2026-01-05', pub('2026-01-07'))!.value).toBe(150);
+    expect(pit.asOf('2026-01-05', pub('2026-01-08'))).toBeUndefined();
+    // Another kind is not affected.
+    expect((await fxPointInTime(db, 'USDXXX', 'x', 'tax_mid')).asOf('2026-01-05', 'z')).toBe(
+      undefined,
+    );
+  });
+
+  it('a withdrawal without a publication time is known from its fetch', async () => {
+    const db = await testDb();
+    const fetchedAt = '2026-01-07T01:00:00.000Z';
+    await storeSeries(db, {
+      series: 'S',
+      source: 'x',
+      points: [{ date: '2026-01-02', value: 5 }],
+      fetchedAt: '2026-01-06T01:00:00.000Z',
+    });
+    expect(
+      await storeSeries(db, {
+        series: 'S',
+        source: 'x',
+        points: [{ date: '2026-01-02', withdrawn: true }],
+        fetchedAt,
+      }),
+    ).toMatchObject({ withdrawn: [{ item: 'S', date: '2026-01-02' }] });
+    const pit = await seriesPointInTime(db, 'S', 'x');
+    expect(pit.asOf('2026-01-02', '2026-01-07T00:59:59.999Z')!.value).toBe(5);
+    expect(pit.asOf('2026-01-02', fetchedAt)).toBeUndefined();
   });
 });
 

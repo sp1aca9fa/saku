@@ -328,6 +328,43 @@ export const series = sqliteTable(
 );
 
 /**
+ * A source's withdrawal of a series value (spec 2026-10-30 withdrawn-values): from `known_at` on
+ * the source has no value for that date, until a later `series` row for it. Kept apart from
+ * `series` so its NOT NULL `value` never holds a stand-in number; nothing in `series` is changed
+ * or deleted. `known_at` as in `series`.
+ */
+export const seriesWithdrawals = sqliteTable(
+  'series_withdrawals',
+  {
+    series: text('series').notNull(),
+    date: text('date').notNull(),
+    source: text('source').notNull(),
+    publishedAt: text('published_at'),
+    fetchedAt: text('fetched_at').notNull(),
+    knownAt: text('known_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.series, t.date, t.source, t.knownAt, t.fetchedAt] })],
+);
+
+/** A source's withdrawal of an exchange rate, as `series_withdrawals` for `fx_rates`. */
+export const fxWithdrawals = sqliteTable(
+  'fx_withdrawals',
+  {
+    pair: text('pair').notNull(),
+    date: text('date').notNull(),
+    source: text('source').notNull(),
+    kind: text('kind', { enum: FX_KINDS }).notNull(),
+    publishedAt: text('published_at'),
+    fetchedAt: text('fetched_at').notNull(),
+    knownAt: text('known_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.pair, t.kind, t.date, t.source, t.knownAt, t.fetchedAt] }),
+    check('fx_withdrawals_kind_check', oneOf(t.kind, FX_KINDS)),
+  ],
+);
+
+/**
  * What fund issuers publish (layer D, best effort): NAV, distributions and splits per date. A
  * changed value is a new row (the latest fetch counts), never an overwrite.
  */

@@ -174,6 +174,7 @@ describe('FRED', () => {
       { date: '2009-12-03', value: 3.1, publishedAt: at18NY(v[1500]!) },
       // D: missing at the boundary, so the same value coming back there is a new vintage.
       { date: '2009-12-04', value: 4, publishedAt: at18NY(v[20]!) },
+      { date: '2009-12-04', withdrawn: true, publishedAt: at18NY(v[30]!) },
       { date: '2009-12-04', value: 4, publishedAt: at18NY(w1) },
     ];
 

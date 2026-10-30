@@ -12,7 +12,14 @@ import { Sessions } from '@saku/data';
 import { describe, expect, it } from 'vitest';
 import { BlockedError, PoliteHttp } from '../http';
 import { emptyPlugins } from '../registry';
-import type { BarSource, FxSource, IssuerSource, PluginInfo } from '../types';
+import type {
+  BarSource,
+  FxSource,
+  IssuerSource,
+  PluginInfo,
+  SeriesPoint,
+  SeriesSource,
+} from '../types';
 import { ingest, issuerAvailability, windowStart } from './ingest';
 
 const sessions = new Sessions({
@@ -163,6 +170,40 @@ describe('ingest', () => {
     const reports = await ingest(db, { ...emptyPlugins(), fx: [fx] }, options('daily'));
     expect(asked).toEqual(['USDXXX']);
     expect(reports[0]).toMatchObject({ ok: ['USDXXX'], inserted: 1 });
+  });
+
+  it('reports a withdrawn series value like a revised one, once, and warns', async () => {
+    const db = await setup();
+    const at = (d: string) => `${d}T23:00:00.000Z`;
+    let points: SeriesPoint[] = [{ date: '2026-01-14', value: 4, publishedAt: at('2026-01-14') }];
+    const series: SeriesSource = {
+      info: { ...info('rates', 'series'), provides: { series: ['CASH'] } },
+      fetchSeries: async () => points,
+    };
+    const warned: { message: string; data?: Record<string, unknown> }[] = [];
+    const o = {
+      ...options('daily'),
+      log: {
+        info: () => {},
+        warn: (message: string, data?: Record<string, unknown>) =>
+          warned.push({ message, ...(data && { data }) }),
+      },
+    };
+    const plugins = { ...emptyPlugins(), series: [series] };
+    expect((await ingest(db, plugins, o))[0]).toMatchObject({ inserted: 1, revised: 0 });
+    // A later vintage withdraws the value: reported with the revisions, and warned.
+    points = [...points, { date: '2026-01-14', withdrawn: true, publishedAt: at('2026-01-15') }];
+    const [r] = await ingest(db, plugins, o);
+    expect(r).toMatchObject({ inserted: 0, revised: 1, revisedValues: { CASH: ['2026-01-14'] } });
+    expect(warned.filter((w) => w.message.includes('withdrew'))).toEqual([
+      {
+        message: 'series rates CASH: the source withdrew stored values',
+        data: { dates: ['2026-01-14'] },
+      },
+    ]);
+    // The same answer again: stored once, nothing reported.
+    expect((await ingest(db, plugins, o))[0]).toMatchObject({ revised: 0, revisedValues: {} });
+    expect(await db.select().from(schema.seriesWithdrawals)).toHaveLength(1);
   });
 
   it('fetches issuer records for the symbols a source supports, in the daily window', async () => {

@@ -33,6 +33,14 @@ Dates are `YYYY-MM-DD` trading dates. Return raw values as the provider gives th
 adjusted values only in the fields meant for checks); never compute indicators or derived series.
 A missing field stays missing, it never becomes a zero.
 
+Series and FX sources that keep vintages: when the source revises a value to "no value" (a later
+vintage of the date is empty), return a withdrawal for that date and vintage,
+`{ date, withdrawn: true, publishedAt }` (`SeriesWithdrawal`; for FX `{ pair, date, withdrawn:
+true, publishedAt }`), never a zero. From its publication time (or, without one, the fetch) on,
+point-in-time reads treat the date as having no value; a later value for the date restores it.
+Send one only for a date the source had a value for; a date that never had one is left out. A
+value and a withdrawal with the same date and publication time are refused.
+
 ### `PluginInfo`
 
 Every source has an `info` (`NotifierInfo` for notifiers) that describes it. Each job run saves

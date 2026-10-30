@@ -10,6 +10,7 @@ import {
   type RawBarField,
   type SeriesPoint,
   type TradingDate,
+  type Vintage,
   zonedInstant,
 } from '@saku/core';
 import { and, asc, between, desc, eq, lte, sql } from 'drizzle-orm';
@@ -20,9 +21,11 @@ import {
   barsRaw,
   dataHealth,
   fxRates,
+  fxWithdrawals,
   issuerRecords,
   readjustments,
   series,
+  seriesWithdrawals,
   standIns,
   symbols,
 } from './schema';
@@ -314,36 +317,76 @@ export interface StoredValues {
    * none given, the same date) the source now reports differently: stored as a new row known
    * from its own publication time or fetch, reported like a bar revision. A new publication time
    * is a new vintage, not a revision.
+   *
+   * A newly stored withdrawal (the source no longer has a value for the date from its
+   * publication time, or with none given, from the fetch) is always listed here too, so it is
+   * reported like a revised value and never silent (spec 2026-10-30 withdrawn-values).
    */
   revised: { item: string; date: TradingDate }[];
+  /** The newly stored withdrawals (each also in `revised`). */
+  withdrawn: { item: string; date: TradingDate }[];
+}
+
+/** A stored or incoming vintage: a value, or a withdrawal (`value` null). */
+interface VintageRow {
+  date: string;
+  publishedAt: string | null;
+  fetchedAt: string;
+  knownAt: string;
+  value: number | null;
 }
 
 /**
- * Keeps a value only when it is new: no stored row for that date and publication time (or, with
- * none given, for that date) yet, or the latest stored one says something else (a revision).
+ * Keeps a vintage only when it is new: no stored row for that date and publication time (or,
+ * with none given, for that date) yet, or the latest stored one (value or withdrawal, by fetch
+ * time) says something else (a revision). A withdrawal is the same as a stored withdrawal for
+ * the same key, so a refetch stores nothing (idempotent). Refuses a value and a withdrawal for
+ * the same date and publication time in one response (which one holds would be a guess).
  */
-function newVintages<T extends { date: string; publishedAt: string | null; fetchedAt: string }>(
+function newVintages<T extends VintageRow>(
   stored: T[],
   incoming: T[],
-  same: (a: T, b: T) => boolean,
-): { rows: T[]; revisedRows: number; revised: TradingDate[] } {
+  item: string,
+): { values: T[]; withdrawals: T[]; result: Omit<StoredValues, 'inserted'> & { new: number } } {
+  const key = (r: T) => `${r.date}|${r.publishedAt ?? ''}`;
+  const seen = new Map<string, T>();
+  for (const row of incoming) {
+    const other = seen.get(key(row));
+    if (other && (other.value === null) !== (row.value === null)) {
+      throw new Error(
+        `${item}: a value and a withdrawal for ${row.date} with the same publication time`,
+      );
+    }
+    seen.set(key(row), row);
+  }
   const latest = new Map<string, T>();
   for (const row of [...stored].sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt))) {
-    latest.set(`${row.date}|${row.publishedAt ?? ''}`, row);
+    latest.set(key(row), row);
   }
-  const rows: T[] = [];
+  const values: T[] = [];
+  const withdrawals: T[] = [];
   const revised = new Set<TradingDate>();
-  let revisedRows = 0;
+  const withdrawn = new Set<TradingDate>();
+  let fresh = 0;
   for (const row of incoming) {
-    const prev = latest.get(`${row.date}|${row.publishedAt ?? ''}`);
-    if (prev && same(prev, row)) continue;
-    if (prev) {
+    const prev = latest.get(key(row));
+    if (prev && prev.value === row.value) continue;
+    if (row.value === null) {
+      withdrawals.push(row);
+      withdrawn.add(row.date);
       revised.add(row.date);
-      revisedRows++;
+      continue;
     }
-    rows.push(row);
+    values.push(row);
+    if (prev) revised.add(row.date);
+    else fresh++;
   }
-  return { rows, revisedRows, revised: [...revised].sort() };
+  const list = (dates: Set<TradingDate>) => [...dates].sort().map((date) => ({ item, date }));
+  return {
+    values,
+    withdrawals,
+    result: { new: fresh, revised: list(revised), withdrawn: list(withdrawn) },
+  };
 }
 
 /**
@@ -370,78 +413,131 @@ const readKnownAt = <T extends { knownAt: string }>(rows: T[]): T[] =>
       : r,
   );
 
+/**
+ * Stores a series' vintages: values in `series`, withdrawals in `series_withdrawals` (both
+ * append-only; see `newVintages` for what counts as new).
+ */
 export async function storeSeries(
   db: Db,
   input: { series: string; source: string; points: SeriesPoint[]; fetchedAt: string },
 ): Promise<StoredValues> {
-  if (input.points.length === 0) return { inserted: 0, revised: [] };
+  if (input.points.length === 0) return { inserted: 0, revised: [], withdrawn: [] };
   const dates = input.points.map((p) => p.date).sort();
-  const key = and(eq(series.series, input.series), eq(series.source, input.source));
-  const stored = await db
-    .select()
-    .from(series)
-    .where(and(key, between(series.date, dates[0]!, dates.at(-1)!)));
-  const { rows, revisedRows, revised } = newVintages(
+  const range = [dates[0]!, dates.at(-1)!] as const;
+  const common = { series: input.series, source: input.source };
+  const stored = [
+    ...(await db
+      .select()
+      .from(series)
+      .where(
+        and(
+          eq(series.series, input.series),
+          eq(series.source, input.source),
+          between(series.date, ...range),
+        ),
+      )),
+    ...(
+      await db
+        .select()
+        .from(seriesWithdrawals)
+        .where(
+          and(
+            eq(seriesWithdrawals.series, input.series),
+            eq(seriesWithdrawals.source, input.source),
+            between(seriesWithdrawals.date, ...range),
+          ),
+        )
+    ).map((r) => ({ ...r, value: null })),
+  ];
+  const { values, withdrawals, result } = newVintages(
     stored,
     input.points.map((p) => ({
-      series: input.series,
-      source: input.source,
+      ...common,
       date: p.date,
-      value: p.value,
+      value: p.withdrawn ? null : p.value,
       publishedAt: p.publishedAt ?? null,
       fetchedAt: input.fetchedAt,
       knownAt: p.publishedAt ? instant(p.publishedAt) : input.fetchedAt,
     })),
-    (a, b) => a.value === b.value,
+    input.series,
   );
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    await db.insert(series).values(rows.slice(i, i + CHUNK));
-  }
-  return {
-    inserted: rows.length - revisedRows,
-    revised: revised.map((date) => ({ item: input.series, date })),
-  };
+  const rows = values.map((r) => ({ ...r, value: r.value! }));
+  const gone = withdrawals.map(({ value: _, ...r }) => r);
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      await tx.insert(series).values(rows.slice(i, i + CHUNK));
+    }
+    for (let i = 0; i < gone.length; i += CHUNK) {
+      await tx.insert(seriesWithdrawals).values(gone.slice(i, i + CHUNK));
+    }
+  });
+  return { inserted: result.new, revised: result.revised, withdrawn: result.withdrawn };
 }
 
 export async function storeFx(
   db: Db,
   input: { source: string; kind: FxKind; rates: FxRate[]; fetchedAt: string },
 ): Promise<StoredValues> {
-  const out: StoredValues = { inserted: 0, revised: [] };
+  const out: StoredValues = { inserted: 0, revised: [], withdrawn: [] };
   const pairs = [...new Set(input.rates.map((r) => r.pair))];
   for (const pair of pairs) {
     const rates = input.rates.filter((r) => r.pair === pair);
     const dates = rates.map((r) => r.date).sort();
-    const stored = await db
-      .select()
-      .from(fxRates)
-      .where(
-        and(
-          eq(fxRates.pair, pair),
-          eq(fxRates.source, input.source),
-          eq(fxRates.kind, input.kind),
-          between(fxRates.date, dates[0]!, dates.at(-1)!),
-        ),
-      );
-    const { rows, revisedRows, revised } = newVintages(
+    const range = [dates[0]!, dates.at(-1)!] as const;
+    const common = { pair, source: input.source, kind: input.kind };
+    const stored = [
+      ...(
+        await db
+          .select()
+          .from(fxRates)
+          .where(
+            and(
+              eq(fxRates.pair, pair),
+              eq(fxRates.source, input.source),
+              eq(fxRates.kind, input.kind),
+              between(fxRates.date, ...range),
+            ),
+          )
+      ).map(({ rate, ...r }) => ({ ...r, value: rate as number | null })),
+      ...(
+        await db
+          .select()
+          .from(fxWithdrawals)
+          .where(
+            and(
+              eq(fxWithdrawals.pair, pair),
+              eq(fxWithdrawals.source, input.source),
+              eq(fxWithdrawals.kind, input.kind),
+              between(fxWithdrawals.date, ...range),
+            ),
+          )
+      ).map((r) => ({ ...r, value: null })),
+    ];
+    const { values, withdrawals, result } = newVintages(
       stored,
       rates.map((r) => ({
-        pair,
-        source: input.source,
-        kind: input.kind,
+        ...common,
         date: r.date,
-        rate: r.rate,
+        value: r.withdrawn ? null : r.rate,
         publishedAt: r.publishedAt ?? null,
         fetchedAt: input.fetchedAt,
         knownAt: r.publishedAt ? instant(r.publishedAt) : input.fetchedAt,
       })),
-      (a, b) => a.rate === b.rate,
+      pair,
     );
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      await db.insert(fxRates).values(rows.slice(i, i + CHUNK));
-    }
-    out.inserted += rows.length - revisedRows;
-    out.revised.push(...revised.map((date) => ({ item: pair, date })));
+    const rows = values.map(({ value, ...r }) => ({ ...r, rate: value! }));
+    const gone = withdrawals.map(({ value: _, ...r }) => r);
+    await db.transaction(async (tx) => {
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        await tx.insert(fxRates).values(rows.slice(i, i + CHUNK));
+      }
+      for (let i = 0; i < gone.length; i += CHUNK) {
+        await tx.insert(fxWithdrawals).values(gone.slice(i, i + CHUNK));
+      }
+    });
+    out.inserted += result.new;
+    out.revised.push(...result.revised);
+    out.withdrawn.push(...result.withdrawn);
   }
   return out;
 }
@@ -546,27 +642,74 @@ export async function issuerRecordsOf(
   return new Map([...latest].map(([source, byDate]) => [source, [...byDate.values()]]));
 }
 
-/** Every vintage of a series from one source, for point-in-time reads (`asOf`). */
-export async function seriesPointInTime(db: Db, id: string, source: string): Promise<PointInTime> {
-  const rows = await db
-    .select({ date: series.date, value: series.value, knownAt: series.knownAt })
-    .from(series)
-    .where(and(eq(series.series, id), eq(series.source, source)));
-  return new PointInTime(readKnownAt(rows));
+/**
+ * Values and withdrawals as point-in-time vintages, in fetch order (PointInTime keeps that order
+ * for equal `known_at`, so a later fetch's restatement of the same publication wins).
+ */
+function vintages(
+  values: { date: string; value: number; knownAt: string; fetchedAt: string }[],
+  withdrawals: { date: string; knownAt: string; fetchedAt: string }[],
+): Vintage[] {
+  const all = [
+    ...values.map((r) => ({ ...r, withdrawn: false as const })),
+    ...withdrawals.map((r) => ({ ...r, withdrawn: true as const })),
+  ].sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt));
+  return readKnownAt(all).map((r): Vintage =>
+    r.withdrawn
+      ? { date: r.date, withdrawn: true, knownAt: r.knownAt }
+      : { date: r.date, value: r.value, knownAt: r.knownAt },
+  );
 }
 
-/** Every vintage of an FX pair of one kind from one source, for point-in-time reads. */
+/** Every vintage of a series from one source (withdrawals included), for `asOf`. */
+export async function seriesPointInTime(db: Db, id: string, source: string): Promise<PointInTime> {
+  const cols = { date: series.date, knownAt: series.knownAt, fetchedAt: series.fetchedAt };
+  const values = await db
+    .select({ ...cols, value: series.value })
+    .from(series)
+    .where(and(eq(series.series, id), eq(series.source, source)));
+  const withdrawals = await db
+    .select({
+      date: seriesWithdrawals.date,
+      knownAt: seriesWithdrawals.knownAt,
+      fetchedAt: seriesWithdrawals.fetchedAt,
+    })
+    .from(seriesWithdrawals)
+    .where(and(eq(seriesWithdrawals.series, id), eq(seriesWithdrawals.source, source)));
+  return new PointInTime(vintages(values, withdrawals));
+}
+
+/** Every vintage of an FX pair of one kind from one source (withdrawals included), for `asOf`. */
 export async function fxPointInTime(
   db: Db,
   pair: string,
   source: string,
   kind: FxKind = 'valuation',
 ): Promise<PointInTime> {
-  const rows = await db
-    .select({ date: fxRates.date, value: fxRates.rate, knownAt: fxRates.knownAt })
+  const values = await db
+    .select({
+      date: fxRates.date,
+      value: fxRates.rate,
+      knownAt: fxRates.knownAt,
+      fetchedAt: fxRates.fetchedAt,
+    })
     .from(fxRates)
     .where(and(eq(fxRates.pair, pair), eq(fxRates.source, source), eq(fxRates.kind, kind)));
-  return new PointInTime(readKnownAt(rows));
+  const withdrawals = await db
+    .select({
+      date: fxWithdrawals.date,
+      knownAt: fxWithdrawals.knownAt,
+      fetchedAt: fxWithdrawals.fetchedAt,
+    })
+    .from(fxWithdrawals)
+    .where(
+      and(
+        eq(fxWithdrawals.pair, pair),
+        eq(fxWithdrawals.source, source),
+        eq(fxWithdrawals.kind, kind),
+      ),
+    );
+  return new PointInTime(vintages(values, withdrawals));
 }
 
 export type CanonicalRow = typeof bars.$inferSelect;

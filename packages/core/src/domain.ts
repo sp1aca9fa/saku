@@ -78,12 +78,32 @@ export interface RawBar {
   providerAdjClose?: number;
 }
 
-export interface SeriesPoint {
+/** A series value for one date as the source published it. */
+export interface SeriesValue {
   date: TradingDate;
   value: number;
   /** When the source published this value, if it says (ISO 8601). */
   publishedAt?: string;
+  withdrawn?: undefined;
 }
+
+/**
+ * The source withdrew its value for `date`: from `publishedAt` (or, with none given, the fetch)
+ * on it has no value for that date any more (FRED/ALFRED: a later vintage of the date reading
+ * '.'). Point-in-time reads from then on treat the date as having no value (never the old one,
+ * never 0); reads before it still see the old value. A later value for the date restores it.
+ * Sent only for a date the source had a value for; a date that never had one is simply left out.
+ */
+export interface SeriesWithdrawal {
+  date: TradingDate;
+  withdrawn: true;
+  /** When the source withdrew the value, if it says (ISO 8601). */
+  publishedAt?: string;
+  value?: undefined;
+}
+
+/** What a series source returns per date and vintage: a value, or a withdrawal of one. */
+export type SeriesPoint = SeriesValue | SeriesWithdrawal;
 
 /**
  * What a fund issuer publishes for one date (layer D, best effort; for checks only, never a value
@@ -104,13 +124,27 @@ export interface IssuerRecord {
   split?: number;
 }
 
-export interface FxRate {
+/** An exchange rate for one date as the source published it. */
+export interface FxValue {
   /** Base then quote currency, e.g. `USDXXX` = units of XXX per USD. */
   pair: string;
   date: TradingDate;
   rate: number;
   publishedAt?: string;
+  withdrawn?: undefined;
 }
+
+/** The source withdrew its rate for `date` from `publishedAt` on (as `SeriesWithdrawal`). */
+export interface FxWithdrawal {
+  pair: string;
+  date: TradingDate;
+  withdrawn: true;
+  publishedAt?: string;
+  rate?: undefined;
+}
+
+/** What an FX source returns per date and vintage: a rate, or a withdrawal of one. */
+export type FxRate = FxValue | FxWithdrawal;
 
 /** A holiday table as versioned data (exchange, bond market, central bank). */
 export interface Calendar {

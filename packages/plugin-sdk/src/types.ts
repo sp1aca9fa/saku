@@ -3,16 +3,30 @@
 import type {
   Calendar,
   FxRate,
+  FxValue,
+  FxWithdrawal,
   IssuerRecord,
   PluginKind,
   RawBar,
   SeriesPoint,
+  SeriesValue,
+  SeriesWithdrawal,
   SourceRole,
   TradingDate,
 } from '@saku/core';
 import type { PoliteHttp } from './http';
 
-export type { Calendar, FxRate, IssuerRecord, RawBar, SeriesPoint };
+export type {
+  Calendar,
+  FxRate,
+  FxValue,
+  FxWithdrawal,
+  IssuerRecord,
+  RawBar,
+  SeriesPoint,
+  SeriesValue,
+  SeriesWithdrawal,
+};
 
 /** A provider's limits as its terms state them. The HTTP client stays under 80% of each. */
 export interface ProviderLimits {
@@ -116,6 +130,11 @@ export interface BarSource {
 
 export interface SeriesSource {
   info: PluginInfo;
+  /**
+   * Values per date and vintage. A source that revises a value to "no value" sends a withdrawal
+   * (`{ date, withdrawn: true, publishedAt }`, `SeriesWithdrawal`), never a 0 and never nothing:
+   * a date simply left out keeps its stored value as current.
+   */
   fetchSeries(
     id: string,
     from: TradingDate,
@@ -128,6 +147,7 @@ export interface FxSource {
   info: PluginInfo;
   /** Whether the source can provide this pair. */
   supports(pair: string): boolean;
+  /** Rates per date and vintage; a withdrawn rate as `FxWithdrawal` (see `fetchSeries`). */
   fetchRates(
     pair: string,
     from: TradingDate,

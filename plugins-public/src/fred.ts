@@ -150,7 +150,13 @@ function sameValue(a: string, b: string): boolean {
 }
 
 /**
- * All observations of a series in the window, every vintage, missing values ('.') left out.
+ * All observations of a series in the window, every vintage. Missing values ('.'): a '.' vintage
+ * that follows a numeric vintage of the same date is a withdrawal (the source no longer has a
+ * value for that date from that vintage on; spec 2026-10-30 withdrawn-values, assumed from FRED's
+ * docs: '.' is a missing value); a '.' with no numeric vintage before it is left out (no
+ * observation), as is a '.' following another '.'. A numeric vintage after a withdrawal is a
+ * value again. The merge rule below runs first, so a '.' continuing across a window boundary is
+ * one vintage, never a second withdrawal.
  *
  * Real-time windows: the vintage dates are split into groups of at most
  * FRED_VINTAGES_PER_WINDOW; window k runs from its first vintage (the first window from
@@ -237,17 +243,21 @@ async function observations(
     );
   }
   const out: SeriesPoint[] = [];
+  /** Per date, whether its latest vintage so far (rows are in real-time order) has a value. */
+  const hasValue = new Map<string, boolean>();
   for (const o of rows) {
-    if (o.value === '.') continue;
-    const value = Number(o.value);
-    if (!Number.isFinite(value)) throw new Error(`FRED ${id}: unreadable value "${o.value}"`);
     // The vintage date gives no time of day. Assumption: known from 18:00 New York that day
     // (the H.15 and H.10 releases come out in the afternoon), never from midnight.
-    out.push({
-      date: o.date,
-      value,
-      publishedAt: zonedInstant(o.realtime_start, '18:00', 'America/New_York'),
-    });
+    const publishedAt = zonedInstant(o.realtime_start, '18:00', 'America/New_York');
+    if (o.value === '.') {
+      if (hasValue.get(o.date) === true) out.push({ date: o.date, withdrawn: true, publishedAt });
+      if (hasValue.has(o.date)) hasValue.set(o.date, false);
+      continue;
+    }
+    const value = Number(o.value);
+    if (!Number.isFinite(value)) throw new Error(`FRED ${id}: unreadable value "${o.value}"`);
+    hasValue.set(o.date, true);
+    out.push({ date: o.date, value, publishedAt });
   }
   return out;
 }
@@ -309,11 +319,20 @@ export const fredFx: FxSource = {
     const map = FRED_FX[pair];
     if (!map) throw new Error(`FRED has no H.10 series for ${pair}`);
     const points = await observations(map.series, from, to, ctx);
-    return points.map((p): FxRate => ({
-      pair,
-      date: p.date,
-      rate: map.invert ? 1 / p.value : p.value,
-      ...(p.publishedAt && { publishedAt: p.publishedAt }),
-    }));
+    return points.map((p): FxRate =>
+      p.withdrawn
+        ? {
+            pair,
+            date: p.date,
+            withdrawn: true,
+            ...(p.publishedAt && { publishedAt: p.publishedAt }),
+          }
+        : {
+            pair,
+            date: p.date,
+            rate: map.invert ? 1 / p.value : p.value,
+            ...(p.publishedAt && { publishedAt: p.publishedAt }),
+          },
+    );
   },
 };

@@ -45,3 +45,110 @@ describe('PointInTime', () => {
     expect(pit.knownAt('2026-01-01T00:00:00Z')).toEqual([]);
   });
 });
+
+describe('PointInTime withdrawals', () => {
+  // 01-06 published 4.1, withdrawn on 01-09 (the source no longer has a value), restored 01-12.
+  const rows = [
+    { date: '2026-01-05', value: 4.0, knownAt: '2026-01-06T21:00:00Z' },
+    { date: '2026-01-06', value: 4.1, knownAt: '2026-01-07T21:00:00Z' },
+    { date: '2026-01-06', withdrawn: true as const, knownAt: '2026-01-09T21:00:00Z' },
+    { date: '2026-01-06', value: 4.12, knownAt: '2026-01-12T21:00:00Z' },
+  ];
+  const w = new PointInTime(rows);
+
+  it('reads the old value before the withdrawal, and looks back from it on', () => {
+    expect(w.asOf('2026-01-06', '2026-01-08T00:00:00Z')).toMatchObject({
+      date: '2026-01-06',
+      value: 4.1,
+    });
+    // Withdrawn: 01-06 has no value, so the read looks back to 01-05 (never 4.1, never 0).
+    expect(w.asOf('2026-01-06', '2026-01-10T00:00:00Z')).toMatchObject({
+      date: '2026-01-05',
+      value: 4.0,
+      firstKnown: false,
+    });
+    // Exactly at the withdrawal's knownAt it counts (known from its own time on).
+    expect(w.asOf('2026-01-06', '2026-01-09T21:00:00Z')!.date).toBe('2026-01-05');
+  });
+
+  it('counts a later restoring value again', () => {
+    expect(w.asOf('2026-01-06', '2026-01-13T00:00:00Z')).toMatchObject({
+      date: '2026-01-06',
+      value: 4.12,
+    });
+  });
+
+  it('gives no value when nothing within the look-back has one', () => {
+    const only = new PointInTime([
+      { date: '2026-01-06', value: 4.1, knownAt: '2026-01-07T21:00:00Z' },
+      { date: '2026-01-06', withdrawn: true, knownAt: '2026-01-09T21:00:00Z' },
+    ]);
+    expect(only.asOf('2026-01-07', '2026-01-10T00:00:00Z')).toBeUndefined();
+    // A known withdrawal means the history had started: no first-known value either.
+    expect(only.asOf('2026-01-07', '2026-01-10T00:00:00Z', { firstKnown: true })).toBeUndefined();
+    // Before the withdrawal, the old value.
+    expect(only.asOf('2026-01-07', '2026-01-08T00:00:00Z')!.value).toBe(4.1);
+  });
+
+  it('stops looking back after the look-back limit', () => {
+    // 2026-01-01 has a value; the 10 dates after it are all withdrawn.
+    const dates = Array.from({ length: 10 }, (_, k) => `2026-01-${String(k + 2).padStart(2, '0')}`);
+    const many = new PointInTime([
+      { date: '2026-01-01', value: 1, knownAt: '2026-01-01T21:00:00Z' },
+      ...dates.flatMap((date) => [
+        { date, value: 2, knownAt: '2026-01-20T21:00:00Z' },
+        { date, withdrawn: true as const, knownAt: '2026-01-21T21:00:00Z' },
+      ]),
+    ]);
+    expect(many.asOf('2026-01-11', '2026-01-22T00:00:00Z')).toBeUndefined();
+    // Nine withdrawn dates back: 01-01 is within the look-back.
+    expect(many.asOf('2026-01-10', '2026-01-22T00:00:00Z')).toMatchObject({
+      date: '2026-01-01',
+      value: 1,
+    });
+  });
+
+  it('never gives a withdrawal as a first-known value', () => {
+    const odd = new PointInTime([
+      { date: '2026-01-05', value: 4.0, knownAt: '2026-01-06T21:00:00Z' },
+      // A withdrawal as the first version (no earlier value stored for the date).
+      { date: '2026-01-06', withdrawn: true, knownAt: '2026-01-09T21:00:00Z' },
+    ]);
+    // Nothing known on 01-06 yet: the first-known fallback skips 01-06 and takes 01-05.
+    expect(odd.asOf('2026-01-06', '2026-01-06T00:00:00Z', { firstKnown: true })).toMatchObject({
+      date: '2026-01-05',
+      value: 4.0,
+      firstKnown: true,
+    });
+    const none = new PointInTime([
+      { date: '2026-01-06', withdrawn: true, knownAt: '2026-01-09T21:00:00Z' },
+    ]);
+    expect(none.asOf('2026-01-06', '2026-01-06T00:00:00Z', { firstKnown: true })).toBeUndefined();
+  });
+
+  it('leaves a withdrawn observation out of knownAt until it is restored', () => {
+    expect(w.knownAt('2026-01-08T00:00:00Z')).toEqual([
+      { date: '2026-01-05', value: 4.0 },
+      { date: '2026-01-06', value: 4.1 },
+    ]);
+    expect(w.knownAt('2026-01-10T00:00:00Z')).toEqual([{ date: '2026-01-05', value: 4.0 }]);
+    expect(w.knownAt('2026-01-13T00:00:00Z')).toEqual([
+      { date: '2026-01-05', value: 4.0 },
+      { date: '2026-01-06', value: 4.12 },
+    ]);
+  });
+
+  it('breaks a tie in knownAt by the order given (the later fetch wins)', () => {
+    const at = '2026-01-07T21:00:00Z';
+    const valueThenWithdrawal = new PointInTime([
+      { date: '2026-01-06', value: 4.1, knownAt: at },
+      { date: '2026-01-06', withdrawn: true, knownAt: at },
+    ]);
+    expect(valueThenWithdrawal.knownAt(at)).toEqual([]);
+    const withdrawalThenValue = new PointInTime([
+      { date: '2026-01-06', withdrawn: true, knownAt: at },
+      { date: '2026-01-06', value: 4.1, knownAt: at },
+    ]);
+    expect(withdrawalThenValue.knownAt(at)).toEqual([{ date: '2026-01-06', value: 4.1 }]);
+  });
+});

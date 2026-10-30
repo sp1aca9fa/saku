@@ -64,6 +64,13 @@
       "when": 1793336072740,
       "tag": "0008_health_run_index",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1793336390357,
+      "tag": "0009_withdrawals",
+      "breakpoints": true
     }
   ]
 }

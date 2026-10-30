@@ -52,8 +52,9 @@ export interface SourceReport {
   missing: Record<string, TradingDate[]>;
   /**
    * Series and FX: stored dates whose value the source now reports differently, per item (each a
-   * new row known from this fetch; the old one kept). Counted in `revised` and reported with the
-   * bar revisions.
+   * new row known from this fetch; the old one kept), and dates whose value the source withdrew
+   * (no value from the withdrawal on; StoredValues.withdrawn). Counted in `revised` and reported
+   * with the bar revisions.
    */
   revisedValues: Record<string, TradingDate[]>;
   /** Issuer sources: the tickers it supports (all of them when `supports` failed). */
@@ -105,11 +106,20 @@ function report(source: string, kind: SourceReport['kind']): SourceReport {
   };
 }
 
-/** Adds what storing series values or FX rates did to the source's report. */
-function noteValues(r: SourceReport, stored: StoredValues): void {
+/**
+ * Adds what storing series values or FX rates did to the source's report. Withdrawals are in
+ * `revised` (reported with the revisions) and are also logged as a warning of their own.
+ */
+function noteValues(r: SourceReport, stored: StoredValues, log: Logger): void {
   r.inserted += stored.inserted;
   r.revised += stored.revised.length;
   for (const { item, date } of stored.revised) (r.revisedValues[item] ??= []).push(date);
+  const withdrawn = new Map<string, TradingDate[]>();
+  for (const { item, date } of stored.withdrawn)
+    withdrawn.set(item, [...(withdrawn.get(item) ?? []), date]);
+  for (const [item, dates] of withdrawn) {
+    log.warn(`${r.kind} ${r.source} ${item}: the source withdrew stored values`, { dates });
+  }
 }
 
 /**
@@ -236,6 +246,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
           points,
           fetchedAt: now().toISOString(),
         }),
+        o.log,
       );
     });
   }
@@ -261,6 +272,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
           rates,
           fetchedAt: now().toISOString(),
         }),
+        o.log,
       );
     });
   }
