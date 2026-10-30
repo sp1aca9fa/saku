@@ -8,10 +8,11 @@ import {
   loadPlugins,
   notifierContexts,
   pluginContext,
+  providerUsageStore,
   savePluginInfos,
   validateInfos,
 } from './registry';
-import { QuotaError, type UsageStore } from './http';
+import { PoliteHttp, QuotaError, type UsageStore } from './http';
 import type { PluginInfo } from './types';
 
 const info: PluginInfo = {
@@ -112,6 +113,74 @@ describe('notifierContexts', () => {
       // Unknown usage: nothing is sent (the store is read before any request).
       await expect(ctx.http.text('https://example.test/hook')).rejects.toBeInstanceOf(QuotaError);
     }
-    expect(asked).toEqual(['fake', 'fake']);
+    // Loaded once for the service (the channels share it), refused for both.
+    expect(asked).toEqual(['fake']);
+  });
+
+  it('channels of one service share its pace: together never above 80% of the limit', async () => {
+    const notifier = {
+      info: {
+        key: 'fake',
+        kind: 'notifier' as const,
+        name: 'Fake',
+        termsUrl: 'x',
+        maxLength: 10,
+        limits: { perMinute: 10 },
+      },
+      validTarget: () => true,
+      send: async () => {},
+    };
+    let now = 1_000_000;
+    const times: number[] = [];
+    const contexts = notifierContexts({ info() {}, warn() {} }, undefined, {
+      minDelayMs: 0,
+      clock: () => now,
+      sleep: async (ms) => {
+        now += ms;
+      },
+      fetchImpl: (async () => {
+        times.push(now);
+        return new Response('ok');
+      }) as typeof fetch,
+    });
+    const c1 = contexts(notifier, 'c1');
+    const c2 = contexts(notifier, 'c2');
+    for (let k = 0; k < 12; k++) {
+      await c1.http.text('https://example.test/1');
+      await c2.http.text('https://example.test/2');
+    }
+    expect(times).toHaveLength(24);
+    for (const t of times) {
+      expect(times.filter((u) => u > t - 60_000 && u <= t).length).toBeLessThanOrEqual(8);
+    }
+  });
+
+  it('a shared count is loaded once and kept with a clock ahead of the system one', async () => {
+    const db = await testDb();
+    const store = providerUsageStore(db);
+    const wall = Date.parse('2026-01-05T10:00:00Z');
+    await store.record('fake', wall - 30_000, null);
+    const loadedAt: number[] = [];
+    const watched: UsageStore = {
+      load: async (provider, at) => {
+        loadedAt.push(at);
+        return store.load(provider, at);
+      },
+      record: store.record,
+    };
+    // The run's clock is two days ahead: reading at it would prune and skip the request above.
+    const http = new PoliteHttp({
+      usage: { provider: 'fake', store: watched },
+      clock: () => wall + 2 * 86_400_000,
+      wallClock: () => wall,
+      limits: { perDay: 2 },
+      fetchImpl: (async () => new Response('ok')) as typeof fetch,
+      sleep: async () => {},
+      minDelayMs: 0,
+    });
+    await http.text('https://example.test/hook');
+    expect(loadedAt).toEqual([wall]);
+    const rows = await db.select().from(schema.providerUsage);
+    expect(rows.some((r) => r.windowStart === '2026-01-05T09:59:00.000Z')).toBe(true);
   });
 });

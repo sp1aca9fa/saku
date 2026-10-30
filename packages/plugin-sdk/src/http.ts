@@ -102,6 +102,11 @@ export interface PoliteHttpOptions {
   limits?: ProviderLimits;
   /** The quota guard's store and the provider key its requests are counted under. */
   usage?: { provider: string; store: UsageStore };
+  /**
+   * Another client of the same provider whose request and symbol counts this one shares (paced
+   * together), e.g. the channels of one notifier service; refusals (403, 429) stay per client.
+   */
+  shareQuotaWith?: PoliteHttp;
   /** Pause between any two requests. */
   minDelayMs?: number;
   /** Longest the client waits for a limit window to free up before giving up for the run. */
@@ -117,27 +122,39 @@ export interface PoliteHttpOptions {
   clock?: () => number;
   /**
    * The system clock. A request is recorded at the later of the two clocks, so an injected clock
-   * that is frozen or behind never records a request earlier than it was sent. Tests replace it.
+   * that is frozen or behind never records a request earlier than it was sent; stored usage is
+   * read and pruned at the earlier, so one ahead never drops rows still inside a real window.
+   * Tests replace it.
    */
   wallClock?: () => number;
 }
 
-export class PoliteHttp {
+/** What the windows count, shared by clients of one provider (`shareQuotaWith`). */
+interface Ledger {
   /** Request times in this run plus the stored history, oldest first. */
-  readonly sent: number[] = [];
+  sent: number[];
+  /** Symbols this provider received (stored and this run), with the latest time each counts from. */
+  symbols: Map<string, number>;
+  /** The stored history, loaded once before the first request or symbol check. */
+  loaded?: Promise<void>;
+}
+
+export class PoliteHttp {
   private blocked: string | null = null;
-  private readonly o: Required<Omit<PoliteHttpOptions, 'usage'>>;
+  private readonly o: Required<Omit<PoliteHttpOptions, 'usage' | 'shareQuotaWith'>>;
   private readonly secrets: string[];
   private usage: { provider: string; store: UsageStore } | undefined;
-  /** The stored history, loaded once before the first request or symbol check. */
-  private loaded: Promise<void> | undefined;
-  /** Symbols this provider received (stored and this run), with the latest time each counts from. */
-  private readonly symbols = new Map<string, number>();
+  private readonly ledger: Ledger;
   /** The symbol the next requests are for (`forSymbol`), recorded with each. */
   private symbol: string | null = null;
 
   constructor(options: PoliteHttpOptions = {}) {
-    this.usage = options.usage;
+    const peer = options.shareQuotaWith;
+    if (peer && options.usage && peer.usage?.provider !== options.usage.provider) {
+      throw new Error('a shared quota needs the same provider');
+    }
+    this.ledger = peer ? peer.ledger : { sent: [], symbols: new Map() };
+    this.usage = options.usage ?? peer?.usage;
     this.secrets = (options.secrets ?? []).filter((s) => s.length >= 4);
     this.o = {
       limits: {},
@@ -155,6 +172,15 @@ export class PoliteHttp {
     };
   }
 
+  /** Request times in this run plus the stored history, oldest first. */
+  get sent(): readonly number[] {
+    return this.ledger.sent;
+  }
+
+  private get symbols(): Map<string, number> {
+    return this.ledger.symbols;
+  }
+
   /** Whether requests are counted across runs (a usage store is attached). */
   get guarded(): boolean {
     return this.usage !== undefined;
@@ -166,7 +192,7 @@ export class PoliteHttp {
    */
   guard(usage: { provider: string; store: UsageStore }, clock?: () => number): void {
     if (this.usage) throw new Error(`quota guard already attached (${this.usage.provider})`);
-    if (this.loaded || this.sent.length > 0) {
+    if (this.ledger.loaded || this.sent.length > 0) {
       throw new Error('quota guard attached after requests were sent');
     }
     this.usage = usage;
@@ -201,18 +227,21 @@ export class PoliteHttp {
   private ready(): Promise<void> {
     const usage = this.usage;
     if (!usage) return Promise.resolve();
-    this.loaded ??= (async () => {
+    this.ledger.loaded ??= (async () => {
       let h: UsageHistory;
       try {
-        h = await usage.store.load(usage.provider, this.o.clock());
+        // Read (and pruned) at the earlier of the two clocks, the mirror of recording at the
+        // later: an injected clock ahead of the system one never prunes or skips rows that are
+        // still inside a real window. The windows then filter on the run's clock.
+        h = await usage.store.load(usage.provider, Math.min(this.o.clock(), this.o.wallClock()));
       } catch (e) {
         throw new QuotaError(`earlier requests of ${usage.provider} unknown: ${message(e)}`);
       }
-      this.sent.push(...h.requests);
-      this.sent.sort((a, b) => a - b);
+      this.ledger.sent.push(...h.requests);
+      this.ledger.sent.sort((a, b) => a - b);
       for (const [s, at] of h.symbols) this.noteSymbol(s, at);
     })();
-    return this.loaded;
+    return this.ledger.loaded;
   }
 
   private noteSymbol(symbol: string, at: number): void {
@@ -234,9 +263,10 @@ export class PoliteHttp {
       }
     }
     // Kept in order: stored times may lie after this one (the end of their bucket).
-    let i = this.sent.length;
-    while (i > 0 && this.sent[i - 1]! > at) i--;
-    this.sent.splice(i, 0, at);
+    const sent = this.ledger.sent;
+    let i = sent.length;
+    while (i > 0 && sent[i - 1]! > at) i--;
+    sent.splice(i, 0, at);
     if (this.symbol !== null) this.noteSymbol(this.symbol, at);
   }
 

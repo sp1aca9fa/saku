@@ -158,22 +158,31 @@ export function pluginContext(
 }
 
 /**
- * Contexts for notifiers in one run: one client per channel, so the service's pace and limits
- * apply across that channel's messages and a channel the service refuses (403, 429) stops only
- * itself; no automatic retry, since a resent POST could deliver an alert twice (what failed is
- * tried again at the next check). `usage`: the quota guard's store, so the service's limits hold
- * across runs (counted under the notifier's key, all its channels together).
+ * Contexts for notifiers in one run: one client per channel, so a channel the service refuses
+ * (403, 429) stops only itself; all of a notifier's channels share one count of requests, so the
+ * service's pace and limits apply to them together (as they are recorded). No automatic retry,
+ * since a resent POST could deliver an alert twice (what failed is tried again at the next
+ * check). `usage`: the quota guard's store, so the service's limits hold across runs (counted
+ * under the notifier's key). `http`: client options (tests: a fake fetch and clock).
  */
 export function notifierContexts(
   log: Logger,
   usage?: UsageStore,
+  http: PoliteHttpOptions = {},
 ): (notifier: Notifier, channelId: string) => PluginContext {
   const made = new Map<string, PluginContext>();
+  /** Per notifier key, the first channel's client: the others share its counts and pacing. */
+  const first = new Map<string, PoliteHttp>();
   return (notifier, channelId) => {
     const key = `${notifier.info.key} ${channelId}`;
     let ctx = made.get(key);
     if (!ctx) {
-      ctx = pluginContext(notifier.info, log, { http: { retries: 0 }, ...(usage && { usage }) });
+      const peer = first.get(notifier.info.key);
+      ctx = pluginContext(notifier.info, log, {
+        http: { ...http, retries: 0, ...(peer && { shareQuotaWith: peer }) },
+        ...(usage && { usage }),
+      });
+      if (!peer) first.set(notifier.info.key, ctx.http);
       made.set(key, ctx);
     }
     return ctx;
