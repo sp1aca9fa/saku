@@ -56,7 +56,11 @@ export interface DayEntry {
   reasons: string[];
 }
 
-/** The day's alert for one strategy and one recipient, or null when there is nothing to say. */
+/**
+ * The day's alert for one strategy and one recipient, or null when there is nothing to say,
+ * within `max` characters (`fitMessage`): the health line whole, the reasons after it shortened
+ * with an exact count, then the other lines cut at the end.
+ */
 export function strategyAlert(
   t: Translate,
   language: string,
@@ -68,6 +72,7 @@ export function strategyAlert(
     nextSession: TradingDate;
     lastTold?: string;
   },
+  max = Infinity,
 ): Alert | null {
   const e = o.entry;
   const name = (allocation: string) =>
@@ -82,15 +87,21 @@ export function strategyAlert(
   const timing = t(`alerts.timing.${o.execution}`, {
     date: o.execution === 'same_close' ? e.date : o.nextSession,
   });
-  const health = t(`alerts.health.${e.dataStatus}`);
-  const reasons = e.reasons.length
-    ? [t('alerts.reasons', { reasons: describeReasons(t, e.reasons) })]
+  const health = { keep: t(`alerts.health.${e.dataStatus}`) };
+  const reasons: Part[] = e.reasons.length
+    ? [
+        {
+          items: e.reasons.map((code) => describeReason(t, code)),
+          more: (count) => t('alerts.more', { count }),
+          inline: { join: REASONS_JOIN, line: (r) => t('alerts.reasons', { reasons: r }) },
+        },
+      ]
     : [];
   const values = { strategy: o.name, date: e.date };
-  const alert = (type: AlertType, lines: string[]): Alert => ({
+  const alert = (type: AlertType, parts: Part[]): Alert => ({
     key: { subject: o.versionId, date: e.date, type },
     allocation: e.safeStateApplied ? SAFE_STATE : e.allocation,
-    text: lines.join('\n'),
+    text: fitMessage(parts, max).text,
   });
 
   if (e.safeStateApplied) {
@@ -212,15 +223,20 @@ export async function sendDayAlert(
   const owner = await ownerOf(db, o, d.owners ?? new Map(), version.ownerId);
   const { language, t } = owner;
   for (const channel of owner.targets) {
-    const alert = strategyAlert(t, language, {
-      versionId: version.id,
-      name: version.name,
-      execution: strategy.execution,
-      entry: day,
-      nextSession: o.sessions.after(day.date),
-      // A drill reads nothing told before (the safe-state alert does not depend on it).
-      lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
-    });
+    const alert = strategyAlert(
+      t,
+      language,
+      {
+        versionId: version.id,
+        name: version.name,
+        execution: strategy.execution,
+        entry: day,
+        nextSession: o.sessions.after(day.date),
+        // A drill reads nothing told before (the safe-state alert does not depend on it).
+        lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
+      },
+      roomOn(o, channel, t),
+    );
     if (alert) await deliver(db, o, channel, alert, summary, t);
   }
   return summary;
@@ -235,12 +251,8 @@ export async function sendAdminAlert(
   o: AlertOptions & {
     subject: string;
     type: AlertType;
-    /**
-     * The message's lines before the health line. `room`: the characters they may take on this
-     * channel (its notifier's longest message less the health line), for a message that fits
-     * itself rather than being cut at the end.
-     */
-    lines: (t: Translate, room: number) => string[];
+    /** The message before the health line, fitted to each channel with it (`fitMessage`). */
+    lines: (t: Translate) => Part[];
     /** The data health it states; default: the latest overall grade on record. */
     health?: string;
   },
@@ -248,10 +260,8 @@ export async function sendAdminAlert(
   const summary: AlertSummary = { sent: 0, failed: [] };
   const key = { subject: o.subject, date: o.date, type: o.type };
   await eachAdminChannel(db, o, o.health, async (t, channel, healthLine) => {
-    // No notifier for the channel: deliver reports it; the room is then irrelevant.
-    const max = o.notifiers.find((n) => n.info.key === channel.type)?.info.maxLength ?? Infinity;
-    const room = max - healthLine.length - 1 - (o.drill ? drillOverhead(t) : 0);
-    const text = [...o.lines(t, room), healthLine].join('\n');
+    const parts = [...o.lines(t), { keep: healthLine }];
+    const { text } = fitMessage(parts, roomOn(o, channel, t));
     await deliver(db, o, channel, { key, text }, summary, t);
   });
   return summary;
@@ -300,37 +310,40 @@ export function sendJobFailure(
     subject: o.job,
     type: 'job_failure',
     health: o.health ?? 'unknown',
-    lines: (t, room) =>
-      jobFailureLines(t, { job: o.job, date: o.date, failures: o.failures }, room),
+    lines: (t) => jobFailureParts(t, { job: o.job, date: o.date, failures: o.failures }),
   });
 }
 
 /**
- * The job-failure lines within `room` characters (joined by newlines). When the listed lines do
- * not fit the channel, fewer are listed and more are counted, so the count line always arrives;
- * only a channel too small for the title, count and closing line is cut by `deliver`.
+ * The job-failure message before the health line: the title, the count, the failures one per
+ * line (fewer listed and more counted when the channel has no room for them, so the count line
+ * always arrives) and the closing line.
  */
+export function jobFailureParts(
+  t: Translate,
+  o: { job: string; date: TradingDate; failures: string[] },
+): Part[] {
+  // A run that failed without a stated reason still failed: it is never shown as nothing.
+  const failures = o.failures.length > 0 ? o.failures : ['unknown'];
+  return [
+    t('alerts.jobFailure.title', { job: o.job, date: o.date }),
+    t('alerts.jobFailure.failed', { count: failures.length }),
+    {
+      items: failures.map((f) => `- ${oneLine(f, JOB_FAILURE_LINE_LENGTH - 2)}`),
+      limit: JOB_FAILURE_LINES,
+      more: (count) => t('alerts.jobFailure.more', { count }),
+    },
+    t('alerts.jobFailure.body'),
+  ];
+}
+
+/** The job-failure lines within `room` characters (`jobFailureParts` fitted, without health). */
 export function jobFailureLines(
   t: Translate,
   o: { job: string; date: TradingDate; failures: string[] },
   room: number,
 ): string[] {
-  // A run that failed without a stated reason still failed: it is never shown as nothing.
-  const failures = o.failures.length > 0 ? o.failures : ['unknown'];
-  const items = failures.map((f) => `- ${oneLine(f, JOB_FAILURE_LINE_LENGTH - 2)}`);
-  let shown = Math.min(items.length, JOB_FAILURE_LINES);
-  for (;;) {
-    const hidden = items.length - shown;
-    const lines = [
-      t('alerts.jobFailure.title', { job: o.job, date: o.date }),
-      t('alerts.jobFailure.failed', { count: items.length }),
-      ...items.slice(0, shown),
-      ...(hidden > 0 ? [t('alerts.jobFailure.more', { count: hidden })] : []),
-      t('alerts.jobFailure.body'),
-    ];
-    if (shown === 0 || lines.join('\n').length <= room) return lines;
-    shown--;
-  }
+  return fitMessage(jobFailureParts(t, o), room).text.split('\n');
 }
 
 /** One line of at most `max` characters: whitespace runs (newlines too) as one space, "…" if cut. */
@@ -352,7 +365,11 @@ export function sendDataHealthAdmin(
     type: 'data_health',
     lines: (t) => [
       t('alerts.dataAdmin.title', { date: o.date }),
-      t('alerts.dataAdmin.body', { reasons: describeReasons(t, o.reasons) }),
+      {
+        items: o.reasons.map((code) => describeReason(t, code)),
+        more: (count) => t('alerts.more', { count }),
+        inline: { join: REASONS_JOIN, line: (reasons) => t('alerts.dataAdmin.body', { reasons }) },
+      },
     ],
   });
 }
@@ -372,6 +389,9 @@ export function sendUpdateFailed(
     ],
   });
 }
+
+/** Revised rows (ticker, field, source) listed per kind in the revisions alert; the rest counted. */
+export const REVISION_ITEMS = 8;
 
 /**
  * What a weekly refetch revised, once per run: changed values (bars, series, FX), and values the
@@ -395,16 +415,21 @@ export function sendRevisions(
   },
 ): Promise<AlertSummary> {
   const count = o.revisions.reduce((n, r) => n + r.count, 0);
-  const listed = (rows: typeof o.revisions) => {
-    const items = rows
-      .slice(0, 8)
-      .map(
-        (r) =>
-          `${r.ticker} ${r.field}@${r.source} ${r.count} (${r.from === r.to ? r.from : `${r.from}..${r.to}`})`,
-      )
-      .join(', ');
-    return rows.length > 8 ? `${items}, ...` : items;
-  };
+  // At most REVISION_ITEMS rows per kind, the other rows counted exactly.
+  const listed = (t: Translate, rows: typeof o.revisions, key: string): Part[] =>
+    rows.length === 0
+      ? []
+      : [
+          {
+            items: rows.map(
+              (r) =>
+                `${r.ticker} ${r.field}@${r.source} ${r.count} (${r.from === r.to ? r.from : `${r.from}..${r.to}`})`,
+            ),
+            limit: REVISION_ITEMS,
+            more: (n) => t('alerts.more', { count: n }),
+            inline: { join: ', ', line: (items) => t(key, { items }) },
+          },
+        ];
   const changed = o.revisions.filter((r) => r.kind !== 'withdrawn');
   const withdrawn = o.revisions.filter((r) => r.kind === 'withdrawn');
   return sendAdminAlert(db, {
@@ -413,10 +438,8 @@ export function sendRevisions(
     type: 'revisions',
     lines: (t) => [
       t('alerts.revisions.title', { count }),
-      ...(changed.length > 0 ? [t('alerts.revisions.body', { items: listed(changed) })] : []),
-      ...(withdrawn.length > 0
-        ? [t('alerts.revisions.withdrawn', { items: listed(withdrawn) })]
-        : []),
+      ...listed(t, changed, 'alerts.revisions.body'),
+      ...listed(t, withdrawn, 'alerts.revisions.withdrawn'),
     ],
   });
 }
@@ -476,17 +499,26 @@ export async function sendRecomputeDiffers(db: Db, o: AlertOptions): Promise<Ale
     const pending = notes.filter((n) => !told.has(n.key.subject));
     const first = pending[0];
     if (!first) return;
-    const text = [
-      t('alerts.recompute.title', { count: pending.length }),
+    const body = (signals: string) =>
       t('alerts.recompute.body', {
         version: first.version,
         date: first.date,
         recorded: first.detail.recordedAllocation,
         now: first.detail.recomputedAllocation,
-        signals: first.detail.signalsDiffer.join(', ') || '-',
-      }),
-      healthLine,
-    ].join('\n');
+        signals: signals || '-',
+      });
+    const { text } = fitMessage(
+      [
+        t('alerts.recompute.title', { count: pending.length }),
+        {
+          items: first.detail.signalsDiffer,
+          more: (count) => t('alerts.more', { count }),
+          inline: { join: ', ', line: body },
+        },
+        { keep: healthLine },
+      ],
+      roomOn(o, channel, t),
+    );
     await deliver(
       db,
       o,
@@ -553,9 +585,12 @@ export function standInDetail(detail: unknown, date: TradingDate): StandInCorrec
  * stored deviation, |primary / stand-in - 1|, so it is worded as how far the primary's price
  * differed from the stand-in. It is about a past day: the corrected allocation is never given as
  * a signal or an instruction, and the record is said to be annotated, not changed. `others`: the
- * version's other corrections in the same message (see there). The lines before
- * the health line are cut to fit (the first lines kept); the health line (the version's latest
- * recorded day) always ends it. A channel too small even for that is cut at the end by `deliver`.
+ * version's other corrections in the same message (see there). Fitted to `max` (`fitMessage`):
+ * the other days that change the signal are listed while there is room, the rest counted ("and
+ * N more"); the health line (the version's latest recorded day) always ends it whole.
+ * `told`: what arrives whole besides the correction in full (the number of changing days listed,
+ * and whether the unchanged ones' count line arrives), so only those keys are recorded and the
+ * others are told at the next run.
  */
 export function standInCorrectedText(
   t: Translate,
@@ -573,9 +608,9 @@ export function standInCorrectedText(
      */
     others?: { date: TradingDate; detail: StandInCorrectedDetail }[];
   },
-  /** The channel's longest message. */
+  /** The channel's longest message (less a drill's mark and line). */
   max: number,
-): string {
+): { text: string; told: { changed: number; unchanged: boolean } } {
   const d = o.detail;
   const name = (allocation: string) =>
     allocation === SAFE_STATE ? t('alerts.safeStateName') : allocation;
@@ -594,7 +629,7 @@ export function standInCorrectedText(
     standInDate: d.standInDate,
     deviation,
   };
-  const lines = [
+  const parts: Part[] = [
     t('alerts.standInCorrected.title', values),
     t(
       d.standInDate === o.date ? 'alerts.standInCorrected.body' : 'alerts.standInCorrected.earlier',
@@ -606,28 +641,34 @@ export function standInCorrectedText(
           corrected: name(d.correctedAllocation),
         })
       : t('alerts.standInCorrected.same', { recorded: name(d.recordedAllocation) }),
-    ...(changed.length > 0
-      ? [
-          t('alerts.standInCorrected.otherChanged'),
-          ...changed.map((x) =>
-            t('alerts.standInCorrected.otherDay', {
-              date: x.date,
-              ticker: x.detail.ticker,
-              recorded: name(x.detail.recordedAllocation),
-              corrected: name(x.detail.correctedAllocation),
-            }),
-          ),
-        ]
-      : []),
-    ...(unchanged > 0 ? [t('alerts.standInCorrected.more', { count: unchanged })] : []),
-    t('alerts.standInCorrected.pastDay'),
-  ].join('\n');
+    ...(changed.length > 0 ? [t('alerts.standInCorrected.otherChanged')] : []),
+  ];
+  const list = parts.length;
+  parts.push({
+    items: changed.map((x) =>
+      t('alerts.standInCorrected.otherDay', {
+        date: x.date,
+        ticker: x.detail.ticker,
+        recorded: name(x.detail.recordedAllocation),
+        corrected: name(x.detail.correctedAllocation),
+      }),
+    ),
+    more: (count) => t('alerts.more', { count }),
+  });
+  if (unchanged > 0) parts.push(t('alerts.standInCorrected.more', { count: unchanged }));
+  parts.push(t('alerts.standInCorrected.pastDay'));
   // Unknown stays unknown: without a recorded day the status is `unknown`, never green.
   const healthLine = o.health
     ? `${t(`alerts.health.${o.health.status}`)} ${t('alerts.standInCorrected.healthDate', { date: o.health.date })}`
     : t('alerts.health.unknown');
-  const room = max - healthLine.length - 1;
-  return room > 1 ? `${cut(lines, room)}\n${healthLine}` : `${lines}\n${healthLine}`;
+  const fitted = fitMessage([...parts, { keep: healthLine }], max);
+  return {
+    text: fitted.text,
+    told: {
+      changed: fitted.shown[list]!,
+      unchanged: unchanged > 0 && fitted.shown[list + 1] === 1,
+    },
+  };
 }
 
 export interface StandInAlertSummary extends AlertSummary {
@@ -701,20 +742,30 @@ export async function sendStandInCorrections(
       // In full: the newest correction that changes the signal, else the newest one.
       const lead = pending.find((n) => n.detail.differs) ?? pending[0];
       if (!lead) return;
-      const max = o.notifiers.find((n) => n.info.key === channel.type)?.info.maxLength ?? Infinity;
-      const text = standInCorrectedText(
+      const others = pending.filter((n) => n !== lead);
+      const { text, told } = standInCorrectedText(
         t,
         language,
         {
           name: version.name,
           date: lead.date,
           detail: lead.detail,
-          others: pending.filter((n) => n !== lead),
+          others,
           ...(health && { health }),
         },
-        max,
+        roomOn(o, channel, t),
       );
-      const keys = pending.map((n) => n.key);
+      // Only what the message tells is recorded: the lead (the alert's own key), the changing
+      // days listed whole (in order, newest first) and the unchanged ones when their count line
+      // arrives whole. The others stay pending and are told at the next run.
+      const keys = [
+        lead.key,
+        ...others
+          .filter((n) => n.detail.differs)
+          .slice(0, told.changed)
+          .map((n) => n.key),
+        ...(told.unchanged ? others.filter((n) => !n.detail.differs).map((n) => n.key) : []),
+      ];
       await deliver(db, o, channel, { key: lead.key, keys, text }, summary, t);
     };
     if (!version.ownerId) {
@@ -858,8 +909,141 @@ async function deliver(
 
 /** At most `max` characters, "…" at the end when cut (not between a surrogate pair's halves). */
 function cut(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, '')}…`;
+  return cutKept(text, max).text;
+}
+
+/** `cut`, with how many of the text's first characters it kept whole. */
+function cutKept(text: string, max: number): { text: string; kept: number } {
+  if (text.length <= max) return { text, kept: text.length };
+  const kept = text.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, '');
+  return { text: `${kept}…`, kept: kept.length };
+}
+
+/**
+ * A list in a message, shortened item by item to fit the channel. The items not listed are
+ * counted exactly by `more` (never dropped silently). `inline`: the listed items and the count
+ * joined by `join` into one line by `line`; otherwise each item is a line, the count a line after
+ * them.
+ */
+export interface ListPart {
+  items: string[];
+  /** At most this many listed whatever the room (default: all). */
+  limit?: number;
+  more: (count: number) => string;
+  inline?: { join: string; line: (items: string) => string };
+}
+
+/** A part of a message: a line (cut when nothing else fits), a line never cut, or a list. */
+export type Part = string | { keep: string } | ListPart;
+
+export interface Fitted {
+  text: string;
+  /**
+   * Per part, what arrives whole: a line 1 or 0; a list the number of its items listed (an inline
+   * list's only when its whole line arrives).
+   */
+  shown: number[];
+}
+
+const isList = (p: Part): p is ListPart => typeof p === 'object' && 'items' in p;
+const isKept = (p: Part): p is { keep: string } => typeof p === 'object' && 'keep' in p;
+
+/**
+ * The one way an alert fits its channel (requirements 11: every alert states the data health).
+ * `max`: the channel's longest message, less a drill's mark and line (`roomOn`).
+ * 1. The lists are shortened one item at a time, the list with the most items listed first (on a
+ *    tie the later one), each counted exactly ("and N more"), until the message fits or no list
+ *    lists anything.
+ * 2. Still too long: the lines that may be cut are, from the end, run by run (the runs between
+ *    the lines never cut), each at its end with "…"; a run cut down to "…" alone gives its room to
+ *    the run before it. The lines never cut (the health line) arrive whole.
+ * 3. A channel too small even for the lines never cut and one "…" per run: the message is cut at
+ *    its end (`deliver` would do the same), so nothing beyond the channel's limit is sent.
+ */
+export function fitMessage(parts: Part[], max: number): Fitted {
+  const shown = parts.map((p) => (isList(p) ? Math.min(p.items.length, p.limit ?? Infinity) : 1));
+  const render = () =>
+    parts.map((p, i): string[] => {
+      if (typeof p === 'string') return [p];
+      if (isKept(p)) return [p.keep];
+      const n = shown[i]!;
+      const hidden = p.items.length - n;
+      const listed = [...p.items.slice(0, n), ...(hidden > 0 ? [p.more(hidden)] : [])];
+      return p.inline ? [p.inline.line(listed.join(p.inline.join))] : listed;
+    });
+  const textOf = (r: string[][]) => r.flat().join('\n');
+  let rendered = render();
+  for (;;) {
+    if (textOf(rendered).length <= max) return { text: textOf(rendered), shown };
+    let pick = -1;
+    parts.forEach((p, i) => {
+      if (isList(p) && shown[i]! > 0 && (pick < 0 || shown[i]! >= shown[pick]!)) pick = i;
+    });
+    if (pick < 0) break;
+    shown[pick]!--;
+    rendered = render();
+  }
+
+  // Each line with its part; runs of lines that may be cut, between those never cut.
+  const lines = rendered.flatMap((ls, part) =>
+    ls.map((text) => ({ text, part, keep: isKept(parts[part]!) })),
+  );
+  type Run = { keep: boolean; lines: typeof lines };
+  const runs: Run[] = [];
+  for (const line of lines) {
+    const last = runs.at(-1);
+    if (last && !last.keep && !line.keep) last.lines.push(line);
+    else runs.push({ keep: line.keep, lines: [line] });
+  }
+  const runText = (r: Run) => r.lines.map((l) => l.text).join('\n');
+  const smallest = runs.reduce((n, r) => n + (r.keep ? runText(r).length : 1), 0) + runs.length - 1;
+  // Per run, the characters of its text kept whole (all, unless it is cut).
+  let cuts: { text: string; kept: number }[];
+  if (max >= 1 && smallest <= max) {
+    let excess = textOf(rendered).length - max;
+    cuts = runs.map((r) => ({ text: runText(r), kept: runText(r).length }));
+    for (let i = runs.length - 1; i >= 0 && excess > 0; i--) {
+      if (runs[i]!.keep) continue;
+      const whole = cuts[i]!.text;
+      cuts[i] = cutKept(whole, Math.max(1, whole.length - excess));
+      excess -= whole.length - cuts[i]!.text.length;
+    }
+  } else {
+    const all = textOf(rendered);
+    const c = max >= 1 ? cutKept(all, max) : { text: all, kept: all.length };
+    cuts = [c];
+    runs.splice(0, runs.length, { keep: false, lines });
+  }
+  // What arrives whole: a line whose text and newline are both kept (or that ends an uncut run).
+  const whole = new Set<(typeof lines)[number]>();
+  runs.forEach((r, i) => {
+    const { kept, text } = cuts[i]!;
+    const uncut = kept === runText(r).length && text.length === kept;
+    let end = 0;
+    for (const l of r.lines) {
+      end += l.text.length;
+      if (uncut || end < kept) whole.add(l);
+      end += 1;
+    }
+  });
+  const shownWhole = parts.map((p, i) => {
+    const own = lines.filter((l) => l.part === i);
+    if (!isList(p) || p.inline)
+      return own.length > 0 && own.every((l) => whole.has(l)) ? shown[i]! : 0;
+    // One line per item, the count after them: the items before the first line cut.
+    const first = own.findIndex((l) => !whole.has(l));
+    return Math.min(shown[i]!, first < 0 ? own.length : first);
+  });
+  return { text: cuts.map((c) => c.text).join('\n'), shown: shownWhole };
+}
+
+/**
+ * The characters a message may take on a channel: its notifier's longest message, less a drill's
+ * mark and line. Without a notifier `deliver` reports the channel; the room is then irrelevant.
+ */
+function roomOn(o: AlertOptions, channel: Channel, t: Translate): number {
+  const max = o.notifiers.find((n) => n.info.key === channel.type)?.info.maxLength ?? Infinity;
+  return max - (o.drill ? drillOverhead(t) : 0);
 }
 
 /** The characters `drillText` adds: the mark and a space, the drill line and its newline. */
@@ -885,12 +1069,15 @@ const SIMPLE_REASONS = [
   'issuer_nav_tolerance_invalid',
 ];
 
+/** Between reasons in words (`describeReasons` and the alerts' reason lists). */
+const REASONS_JOIN = '; ';
+
 /**
  * Reason codes in words, e.g. `AAA2:B.close_match@alpaca` as "AAA2: closes differ between sources
  * (alpaca)". A code without a text stays as it is (it is still exact, only less readable).
  */
 export function describeReasons(t: Translate, codes: string[]): string {
-  return codes.map((code) => describeReason(t, code)).join('; ');
+  return codes.map((code) => describeReason(t, code)).join(REASONS_JOIN);
 }
 
 /** A check's text: layer D (issuer data) has its own, other layers share them by check name. */
