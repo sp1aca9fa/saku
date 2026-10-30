@@ -38,6 +38,36 @@ async function withJobsLock(
   }
 }
 
+/** Registration's inputs, shared by `register` and `check --registration`. */
+interface RegistrationInput {
+  strategy: Strategy;
+  /** The latest session whose data is final now (`dailyTarget`). */
+  through: TradingDate;
+  /** The market calendar. */
+  sessions: Sessions;
+  /** The jobs lock's folder (default: the state dir's). */
+  lockDir?: string;
+}
+
+const problemList = (problems: string[]) => problems.map((p) => `- ${p}`).join('\n');
+
+/**
+ * What `register` would say, without registering: the same problems from the same function,
+ * under the same lock. Writes nothing.
+ */
+export function previewRegistration(db: Db, o: RegistrationInput): Promise<CommandOutput> {
+  return withJobsLock(o.lockDir, async () => {
+    const problems = await registrationProblems(db, o.strategy, {
+      through: o.through,
+      sessions: o.sessions,
+    });
+    if (problems.length > 0) {
+      return refused(`Would not register:\n${problemList(problems)}`);
+    }
+    return { exitCode: 0, stdout: ['Ready to register.'], stderr: [] };
+  });
+}
+
 /** Registers the strategy when nothing refuses it (registration.ts); otherwise every reason. */
 export function registerStrategy(
   db: Db,
@@ -58,7 +88,7 @@ export function registerStrategy(
       sessions: o.sessions,
     });
     if (problems.length > 0) {
-      return refused(`Not registered:\n${problems.map((p) => `- ${p}`).join('\n')}`);
+      return refused(`Not registered:\n${problemList(problems)}`);
     }
     const v = await registerVersion(db, {
       ownerId: o.ownerId,

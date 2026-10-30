@@ -1,6 +1,8 @@
 // Strategies and the journal from the server (A2; the web UI comes with D1).
 //
-//   pnpm strategy check <file.json>                       validate a definition (no record)
+//   pnpm strategy check <file.json> [--registration]      validate a definition (no record); with
+//                                                          --registration also every reason register
+//                                                          would refuse (writes nothing)
 //   pnpm strategy register <file.json> --user <username>   register: an immutable version whose
 //   pnpm strategy register <file.json> --library           forward record starts with the next close;
 //                                                          refused for same_close or a ticker whose
@@ -45,7 +47,12 @@ import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA, verifyToken } from '../jobs/anchor';
-import { type CommandOutput, recomputeRecords, registerStrategy } from '../jobs/strategy-commands';
+import {
+  type CommandOutput,
+  previewRegistration,
+  recomputeRecords,
+  registerStrategy,
+} from '../jobs/strategy-commands';
 import { dailyAfterOf, dailyTarget } from '../jobs/target';
 import { codeVersion } from '../code-version';
 import { loadPlugins, notifierContexts, providerUsageStore } from '../registry';
@@ -89,12 +96,8 @@ function load(file: string | undefined) {
   return parsed.data!;
 }
 
-if (tool === 'strategy' && command === 'check') {
-  const s = load(rest[0]);
-  console.log(`${s.name}: valid; depends on ${dependencies(s).join(', ')}.`);
-} else if (tool === 'strategy' && command === 'register') {
-  const s = load(rest[0]);
-  const ownerId = rest.includes('--library') ? null : await userId();
+/** The market calendar and the latest final session, as registration reads them. */
+async function registrationInput() {
   const calendar = (await loadPlugins()).calendars
     .flatMap((c) => c.calendars)
     .find((c) => c.id === 'xnys');
@@ -107,7 +110,19 @@ if (tool === 'strategy' && command === 'check') {
   } catch (e) {
     fail(e instanceof Error ? e.message : String(e));
   }
-  finish(await registerStrategy(db, { strategy: s, ownerId, through: through!, sessions }));
+  return { sessions, through: through! };
+}
+
+if (tool === 'strategy' && command === 'check') {
+  const s = load(rest[0]);
+  console.log(`${s.name}: valid; depends on ${dependencies(s).join(', ')}.`);
+  if (rest.includes('--registration')) {
+    finish(await previewRegistration(db, { strategy: s, ...(await registrationInput()) }));
+  }
+} else if (tool === 'strategy' && command === 'register') {
+  const s = load(rest[0]);
+  const ownerId = rest.includes('--library') ? null : await userId();
+  finish(await registerStrategy(db, { strategy: s, ownerId, ...(await registrationInput()) }));
 } else if (tool === 'strategy' && command === 'list') {
   for (const v of await allVersions(db)) {
     const record = await forwardRecord(db, v.id);
@@ -247,7 +262,7 @@ if (tool === 'strategy' && command === 'check') {
   );
 } else {
   fail(
-    'Usage: pnpm strategy check|register|list|show|verify|recompute ... | pnpm journal add|list ... | pnpm channel ... ' +
+    'Usage: pnpm strategy check [--registration]|register|list|show|verify|recompute ... | pnpm journal add|list ... | pnpm channel ... ' +
       '(see packages/plugin-sdk/src/cli/strategy.ts)',
   );
 }

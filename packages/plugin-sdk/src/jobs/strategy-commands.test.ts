@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { lock } from './lock';
-import { recomputeRecords, registerStrategy } from './strategy-commands';
+import { previewRegistration, recomputeRecords, registerStrategy } from './strategy-commands';
 
 const sessions = new Sessions({
   id: 't',
@@ -108,6 +108,41 @@ describe('registerStrategy', () => {
     });
     expect(await db.select().from(schema.strategyVersions)).toHaveLength(0);
     expect(existsSync(join(dir, 'jobs.lock'))).toBe(true);
+  });
+});
+
+describe('previewRegistration', () => {
+  const input = (execution: string, dir: string) => ({
+    strategy: strategy(execution),
+    through: D[3],
+    sessions,
+    lockDir: dir,
+  });
+
+  it('lists the problems with exit 1 and registers nothing', async () => {
+    const db = await passed();
+    const out = await previewRegistration(db, input('same_close', lockDir()));
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr[0]).toMatch(/^Would not register:\n- same_close trades at a close/);
+    expect(await db.select().from(schema.strategyVersions)).toHaveLength(0);
+  });
+
+  it('says ready with exit 0 and registers nothing', async () => {
+    const db = await passed();
+    const dir = lockDir();
+    const out = await previewRegistration(db, input('next_open', dir));
+    expect(out).toEqual({ exitCode: 0, stdout: ['Ready to register.'], stderr: [] });
+    expect(await db.select().from(schema.strategyVersions)).toHaveLength(0);
+    expect(existsSync(join(dir, 'jobs.lock'))).toBe(false);
+  });
+
+  it('refuses while a job holds the lock', async () => {
+    const db = await passed();
+    const dir = lockDir();
+    lock('jobs', dir, process.ppid);
+    const out = await previewRegistration(db, input('next_open', dir));
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr[0]).toMatch(/^A job is running/);
   });
 });
 
