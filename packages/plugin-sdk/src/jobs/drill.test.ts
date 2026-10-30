@@ -352,7 +352,13 @@ describe("pnpm drill red: the forward step's rules", () => {
     expect(r.grade).toBe('red');
     expect(r.versions.map((v) => v.name)).toEqual(['Trend']);
     expect(r.notDrilled).toEqual([
-      expect.objectContaining({ name: 'Late', reason: expect.stringMatching(/not before the/) }),
+      expect.objectContaining({
+        name: 'Late',
+        // The test calendar lists no early closes: the cut is the earliest possible close.
+        reason: expect.stringMatching(
+          /not before the 2026-01-16 close \(13:00 New York, the earliest/,
+        ),
+      }),
     ]);
     // Only the drilled version's alert (owner and admin channel) and the admins' data alert.
     expect(sent.filter((m) => m.text.includes('Late'))).toEqual([]);
@@ -380,13 +386,51 @@ describe("pnpm drill red: the forward step's rules", () => {
   });
 
   it('the rule: on or after forward_records_from, a close after registration', () => {
+    // A calendar whose early-close list covers 2026: every other session closes at 16:00.
+    const known = new Sessions({
+      id: 'k',
+      version: 'k',
+      validFrom: '2026-01-01',
+      validTo: '2026-12-31',
+      holidays: ['2026-11-26'],
+      earlyCloses: { from: '2026-01-01', to: '2026-12-31', time: '13:00', dates: ['2026-11-27'] },
+    });
     // 2026-01-16 closes at 21:00Z (EST); 2026-07-16 at 20:00Z (EDT).
-    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T20:59:59.999Z')).toBe(true);
-    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T21:00:00.000Z')).toBe(false);
-    expect(recordsDay('2026-07-16', '2026-01-02', '2026-07-16T19:59:59.999Z')).toBe(true);
-    expect(recordsDay('2026-07-16', '2026-01-02', '2026-07-16T20:00:00.000Z')).toBe(false);
-    expect(recordsDay('2026-01-16', '2026-01-16', '2026-01-01T00:00:00.000Z')).toBe(true);
-    expect(recordsDay('2026-01-16', '2026-01-17', '2026-01-01T00:00:00.000Z')).toBe(false);
+    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T20:59:59.999Z', known)).toBe(true);
+    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T21:00:00.000Z', known)).toBe(false);
+    expect(recordsDay('2026-07-16', '2026-01-02', '2026-07-16T19:59:59.999Z', known)).toBe(true);
+    expect(recordsDay('2026-07-16', '2026-01-02', '2026-07-16T20:00:00.000Z', known)).toBe(false);
+    expect(recordsDay('2026-01-16', '2026-01-16', '2026-01-01T00:00:00.000Z', known)).toBe(true);
+    expect(recordsDay('2026-01-16', '2026-01-17', '2026-01-01T00:00:00.000Z', known)).toBe(false);
+    // A half-day closes at 13:00 New York (18:00Z): a registration at 14:30 already knew that
+    // close, so the record starts later (no look-ahead); one at 12:30 records the day.
+    expect(recordsDay('2026-11-27', '2026-01-02', '2026-11-27T19:30:00.000Z', known)).toBe(false);
+    expect(recordsDay('2026-11-27', '2026-01-02', '2026-11-27T18:00:00.000Z', known)).toBe(false);
+    expect(recordsDay('2026-11-27', '2026-01-02', '2026-11-27T17:59:59.999Z', known)).toBe(true);
+    expect(recordsDay('2026-11-27', '2026-01-02', '2026-11-27T17:30:00.000Z', known)).toBe(true);
+    // Outside the early-close list (or with none), the close is unknown: cut at the earliest it
+    // could be, 13:00 New York, never at 16:00.
+    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T17:59:59.999Z', sessions)).toBe(true);
+    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T18:00:00.000Z', sessions)).toBe(
+      false,
+    );
+    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T19:30:00.000Z', sessions)).toBe(
+      false,
+    );
+    const partial = new Sessions({
+      id: 'p',
+      version: 'p',
+      validFrom: '2026-01-01',
+      validTo: '2026-12-31',
+      holidays: [],
+      earlyCloses: { from: '2026-06-01', to: '2026-12-31', time: '13:00', dates: [] },
+    });
+    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T17:59:59.999Z', partial)).toBe(true);
+    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T18:00:00.000Z', partial)).toBe(false);
+    // Not a session: an error, never a guess.
+    expect(() => recordsDay('2026-01-17', '2026-01-02', '2026-01-01T00:00:00.000Z', known)).toThrow(
+      /not a session/,
+    );
   });
 
   it('one notifier context for the drill: two versions on one channel share it', async () => {

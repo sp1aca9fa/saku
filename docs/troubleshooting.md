@@ -75,7 +75,8 @@ or for a date before they start, on CI or Vercel, and while another job runs (tr
 has finished).
 
 It follows the daily run's rules for which strategies record the day: a strategy registered at
-or after that day's close (16:00 New York) has no record that day, so it is not drilled; the
+or after that day's close (16:00 New York; 13:00 on a half-day, and 13:00 where the calendar
+cannot say whether the day closed early) has no record that day, so it is not drilled; the
 output lists it under "Not drilled" and the drill fails. Choose a later date.
 
 The drill's messages are real sends but are counted only in the copy, which is deleted: the live

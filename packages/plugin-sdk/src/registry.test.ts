@@ -1,3 +1,4 @@
+import { Sessions } from '@saku/data';
 import { schema } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -39,6 +40,18 @@ describe('plug-in registry', () => {
     const loaded = await loadPlugins(root);
     expect(loaded.bars.map((b) => b.info.key)).toEqual(['example']);
     expect(loaded.missing).toEqual(['plugins']);
+  });
+
+  it('every shipped calendar table loads as sessions (a bad table fails here, not every job)', async () => {
+    const loaded = await loadPlugins();
+    const tables = loaded.calendars.flatMap((c) => c.calendars);
+    expect(tables.map((t) => t.id)).toEqual(
+      expect.arrayContaining(['xnys', 'us-fed', 'ecb-target']),
+    );
+    for (const t of tables) {
+      const sessions = new Sessions(t);
+      for (const d of t.earlyCloses?.dates ?? []) expect(sessions.closeOf(d)).toBe('early');
+    }
   });
 
   it('refuses bad or duplicate keys', () => {

@@ -17,7 +17,7 @@ import {
   NEAR_TIE,
   zonedInstant,
 } from '@saku/core';
-import { type Sessions, TOLERANCE } from '@saku/data';
+import { type SessionClose, type Sessions, TOLERANCE } from '@saku/data';
 import {
   type Db,
   type ForwardEntry,
@@ -122,7 +122,9 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     const dates = o.sessions
       .between(start, o.to)
       // Only closes after registration: the record never starts in the past.
-      .filter((d) => (!last || d > last.date) && recordsDay(d, from, version.registeredAt));
+      .filter(
+        (d) => (!last || d > last.date) && recordsDay(d, from, version.registeredAt, o.sessions),
+      );
 
     // One read per version and run: the bars up to the run's last date, each date then sees only
     // its prefix (dated <= that date), the same rows a read up to that date returns. The jobs lock
@@ -563,12 +565,44 @@ function forwardEquity(
 
 // --- Which days a version records (shared by forward() and `pnpm drill`) ---
 
+/** The regular close of a US equity session (New York time). */
+const REGULAR_CLOSE = '16:00';
+/**
+ * The earliest close a session can have when the calendar lists no early-close time: the NYSE
+ * half-day close (13:00 New York; requirements 04, Calendars).
+ */
+const EARLIEST_CLOSE = '13:00';
+
 /**
  * Whether the forward step records `date` for a version (requirements 05): on or after
- * `forward_records_from` (the A1 gate; `from`), and only a close (16:00 New York) after the
- * version's registration, so the record never starts in the past. `registeredAt` is the stored
- * ISO 8601 instant (`toISOString`), compared with the close's as the forward step always has.
+ * `forward_records_from` (the A1 gate; `from`), and only a close after the version's registration,
+ * so the record never starts in the past (no look-ahead). The close is the session's actual one
+ * from the calendar (requirements 04, Calendars): an early close at its time (13:00 New York), a
+ * regular close at 16:00, and where the calendar cannot say whether the day closed early, the
+ * earliest it could have closed (the early-close time): a later cut would admit a half-day whose
+ * close was already known at registration. `registeredAt` is the stored ISO 8601 instant
+ * (`toISOString`), compared with the close's as the forward step always has. `date` must be a
+ * session of `sessions` (else this throws).
  */
-export function recordsDay(date: TradingDate, from: string, registeredAt: string): boolean {
-  return date >= from && zonedInstant(date, '16:00', 'America/New_York') > registeredAt;
+export function recordsDay(
+  date: TradingDate,
+  from: string,
+  registeredAt: string,
+  sessions: Sessions,
+): boolean {
+  if (date < from) return false;
+  return zonedInstant(date, recordClose(date, sessions).time, 'America/New_York') > registeredAt;
+}
+
+/**
+ * The close `recordsDay` cuts at on a session (New York `HH:MM`) and the calendar's word on it:
+ * `regular` 16:00, `early` the table's early-close time, `unknown` the earliest possible close.
+ */
+export function recordClose(
+  date: TradingDate,
+  sessions: Sessions,
+): { time: string; kind: SessionClose } {
+  const kind = sessions.closeOf(date);
+  const early = sessions.calendar.earlyCloses?.time ?? EARLIEST_CLOSE;
+  return { time: kind === 'regular' ? REGULAR_CLOSE : early, kind };
 }

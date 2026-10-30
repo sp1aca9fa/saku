@@ -25,3 +25,4 @@
 | 2026-10-31 | Admin alerts other than job failure (data health, revisions) sized to the channel's room like the job-failure lines, so a long reasons list never cuts the health line | Claude (build) | Reliability | new | Today such a text is cut at the end |
 | 2026-10-31 | Database size and free disk before D1: a line in `pnpm health` and an admin alert at 70% of disk from the daily run | Claude (gap scan) | Reliability | new | 04 puts them on the admin page (D1); the server runs from A1 |
 | 2026-10-31 | `pnpm strategy check --registration`: preview the registration checks without registering | Claude (build) | Accessibility | new | Registration refuses with all reasons today |
+| 2026-10-31 | Regular and earliest close times declared per calendar (`Calendar`), so the 16:00 and 13:00 New York constants leave plugin-sdk (agnostic core) | Claude (build) | Reliability | new | Only NYSE is used for sessions today |

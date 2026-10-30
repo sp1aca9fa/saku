@@ -74,14 +74,15 @@ const NYSE_SPECIAL = [
 /**
  * NYSE early closes (13:00 New York), by NYSE's rule since 2013: July 3 when it is a session, the
  * day after Thanksgiving, December 24 when it is a session (NYSE holiday and early closings
- * calendars; the 2026-2028 announcement of 2025-12-23 lists 2026-11-27, 2026-12-24 and 2027-11-26,
- * none on July 2, 2027 or December 24, 2027). Before 2013 the rule differed (with Independence Day
- * on a Thursday, the early close was Friday July 5) and one-off early closes are not known with
- * certainty; 2028's list is not confirmed here. So the list is complete only from NYSE_EARLY_FROM
- * through NYSE_EARLY_TO; outside it an early close is unknown, never a full day.
+ * calendars; the 2026-2028 announcement of 2025-12-23 lists 2026-11-27, 2026-12-24, 2027-11-26,
+ * 2028-07-03 and 2028-11-24, none on July 2, 2027 or December 24, 2027, and December 24, 2028 is
+ * a Sunday). Before 2013 the rule differed (with Independence Day on a Thursday, the early close
+ * was Friday July 5) and one-off early closes are not known with certainty. So the list is
+ * complete only from NYSE_EARLY_FROM through NYSE_EARLY_TO (the announced years); outside it an
+ * early close is unknown, never a full day.
  */
 const NYSE_EARLY_FROM = 2013;
-const NYSE_EARLY_TO = 2027;
+const NYSE_EARLY_TO = 2028;
 const NYSE_EARLY_TIME = '13:00';
 
 function nyseEarlyCloses(y: number): (string | null)[] {
@@ -200,7 +201,7 @@ export const calendars: CalendarSource = {
     termsUrl: 'https://www.nyse.com/markets/hours-calendars',
   },
   calendars: [
-    table('xnys', 'xnys-2026.2', FROM, nyseHolidays, NYSE_SPECIAL, {
+    table('xnys', 'xnys-2026.3', FROM, nyseHolidays, NYSE_SPECIAL, {
       from: NYSE_EARLY_FROM,
       to: NYSE_EARLY_TO,
       time: NYSE_EARLY_TIME,

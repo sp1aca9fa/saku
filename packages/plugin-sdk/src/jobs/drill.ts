@@ -50,7 +50,7 @@ import { DATA_KIND, assignedOnly } from '../roles';
 import { assertServerOnly } from '../server-only';
 import type { Logger, Notifier, PluginContext } from '../types';
 import { type AlertOptions, type DayEntry, sendDataHealthAdmin, sendDayAlert } from './alerts';
-import { healthOf, parseVersion, reader, recordsDay } from './forward';
+import { healthOf, parseVersion, reader, recordClose, recordsDay } from './forward';
 import { DAILY_OVERLAP, supportedBy } from './ingest';
 import { lock } from './lock';
 import { declaredCalendars } from './run';
@@ -152,6 +152,14 @@ export async function redDrill(o: DrillOptions): Promise<DrillResult> {
   }
 }
 
+/** The close the forward step cuts at on `date`, as the drill tells it. */
+function closeLabel(date: TradingDate, sessions: Sessions): string {
+  const { time, kind } = recordClose(date, sessions);
+  if (kind === 'regular') return `${time} New York`;
+  if (kind === 'early') return `${time} New York, an early close`;
+  return `${time} New York, the earliest it could close: the calendar does not say whether it closed early`;
+}
+
 async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
   const pending = await pendingMigrations(db);
   if (pending.length > 0) {
@@ -192,14 +200,15 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
     const parsed = parseVersion(version);
     if ('error' in parsed) {
       problems.push(`${version.name} (${version.id}): definition does not parse: ${parsed.error}`);
-    } else if (!recordsDay(o.target, from, version.registeredAt)) {
+    } else if (!recordsDay(o.target, from, version.registeredAt, o.sessions)) {
       // The forward step records no entry and sends no alert for it on this day.
       notDrilled.push({
         name: version.name,
         id: version.id,
         reason:
-          `registered ${version.registeredAt}, not before the ${o.target} close (16:00 New ` +
-          'York); its record starts with the first close after registration',
+          `registered ${version.registeredAt}, not before the ${o.target} close (` +
+          `${closeLabel(o.target, o.sessions)}); its record starts with the first close after ` +
+          'registration',
       });
     } else versions.push({ version, strategy: parsed.strategy });
   }

@@ -88,6 +88,7 @@ describe('probeReport', () => {
     );
     expect(text).toContain('last probe: 2026-03-10 17:00, ok');
     expect(text).toContain('from calendar test-1');
+    expect(text).toContain('or the early close on a half-day ("13:00 early")');
   });
 
   it('shows a source whose last probe failed, and one with only errors', () => {
@@ -150,7 +151,10 @@ describe('probeReport', () => {
     expect(text).toContain(left);
     // No calendar loaded.
     text = probeReport({ lines: day, unreadable: 0 });
-    expect(text).toContain('from calendar (none loaded)');
+    expect(text).toContain('no calendar is loaded');
+    // Without a calendar the header makes no early-close claim.
+    expect(text).not.toContain('13:00');
+    expect(text).not.toContain('early close on a half-day');
     expect(text).toMatch(row);
     expect(text).toContain(left);
     // A date outside the calendar, and one that is no session (a Saturday): no throw.

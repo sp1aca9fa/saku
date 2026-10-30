@@ -7,6 +7,7 @@
 // so, and the date is left out of the summary: read as a full day, a half-day's delay would look
 // three hours shorter and could shorten the daily run's wait.
 import { readFileSync } from 'node:fs';
+import { zonedInstant } from '@saku/core';
 import type { Sessions } from '@saku/data';
 import { finalization, type ProbeLine } from './probe';
 
@@ -32,15 +33,7 @@ const REGULAR_CLOSE = '16:00';
 
 /** The instant (ms) of a New York wall-clock time (`HH:MM`, default the 16:00 close) on a date. */
 export function closeInstant(date: string, time: string = REGULAR_CLOSE): number {
-  const [y, m, d] = date.split('-').map(Number) as [number, number, number];
-  const [hh, mm] = time.split(':').map(Number) as [number, number];
-  const wall = Date.UTC(y, m - 1, d, hh, mm);
-  // New York is 4 or 5 hours behind UTC; the offset that reads back as the wall time is the one.
-  for (const hours of [4, 5]) {
-    const t = wall + hours * 3_600_000;
-    if (nyClock(t) === `${date} ${time}`) return t;
-  }
-  throw new Error(`No ${time} New York close for ${date}.`);
+  return Date.parse(zonedInstant(date, time, TZ));
 }
 
 /** The close a date's minutes count from, its label, and whether the calendar knows it. */
@@ -106,11 +99,21 @@ export function probeReport(o: {
   const out: string[] = [];
   out.push(
     'Probe report. Times are probe times (the hourly check), at most one hour late; New York time;',
-    '"after close" is minutes after the date\'s close, shown under "close": 16:00, or the early close',
-    `on a half-day ("${o.sessions?.calendar.earlyCloses?.time ?? '13:00'} early") from calendar ` +
-      `${o.sessions?.calendar.version ?? '(none loaded)'}; "16:00 ?" where the calendar`,
-    'cannot say whether the date closed early (counted from 16:00, left out of the summary).',
   );
+  if (o.sessions) {
+    const early = o.sessions.calendar.earlyCloses?.time;
+    out.push(
+      '"after close" is minutes after the date\'s close, shown under "close": 16:00' +
+        (early ? `, or the early close on a half-day ("${early} early")` : '') +
+        ` from calendar ${o.sessions.calendar.version}; "16:00 ?" where the calendar`,
+      'cannot say whether the date closed early (counted from 16:00, left out of the summary).',
+    );
+  } else {
+    out.push(
+      '"after close" is minutes after 16:00 on the date, shown as "16:00 ?": no calendar is loaded,',
+      'so whether the date closed early is unknown (left out of the summary).',
+    );
+  }
   const lines = o.lines.filter((l) => (o.from ? (l.date ?? l.at.slice(0, 10)) >= o.from : true));
   if (o.unreadable > 0)
     out.push(`Unreadable lines in the file (not counted below): ${o.unreadable}.`);
