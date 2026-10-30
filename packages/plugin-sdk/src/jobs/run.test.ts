@@ -241,8 +241,10 @@ describe('a daily run', () => {
       o,
     );
     expect(r).toMatchObject({ ok: true });
-    // No backup or heartbeat (the daily run's).
-    expect(o.hooks).toEqual([]);
+    // No backup (the daily run's); the weekly heartbeat after full success.
+    expect(o.hooks).toEqual(['heartbeat']);
+    const runs = await db.select().from(schema.jobRuns);
+    expect(runs.find((x) => x.jobType === 'weekly')).toMatchObject({ heartbeatSent: true });
     const ops = sent.filter((m) => m.target === 'ops').map((m) => m.text);
     expect(
       ops.find((t) => t.startsWith('Saku: the weekly refetch changed 8 stored values')),
@@ -252,6 +254,22 @@ describe('a daily run', () => {
       ['core_vs_reference', 1],
       ['incremental_vs_full', 1],
     ]);
+  });
+});
+
+describe('a weekly run that does not finish', () => {
+  it('sends no heartbeat', async () => {
+    const { db } = await setup();
+    const { notifier } = fakeNotifier();
+    expect(
+      (await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier))).ok,
+    ).toBe(true);
+    const o = options(notifier, { job: 'weekly' });
+    const r = await runJob(db, plugins([barSource('p'), barSource('s', true)]), o);
+    expect(r.ok).toBe(false);
+    expect(o.hooks).toEqual([]);
+    const runs = await db.select().from(schema.jobRuns);
+    expect(runs.find((x) => x.jobType === 'weekly')).toMatchObject({ heartbeatSent: false });
   });
 });
 

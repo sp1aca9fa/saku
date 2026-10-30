@@ -67,6 +67,11 @@ happens at the next start. Services run at lower priority with a CPU cap.
 After a fully successful daily run, Saku pings `HEALTHCHECK_URL` (healthchecks.io). When pings
 stop, the service alerts you. A failed ping is retried at the next check without redoing the run.
 
+The weekly refetch pings `HEALTHCHECK_WEEKLY_URL` the same way, after a fully successful run
+(optional; empty means no ping). Make it a second check on healthchecks.io with period 7 days and
+grace 1 day (the weekly run is long). A failed weekly ping is logged and does not fail the run; the
+weekly run is not repeated for it.
+
 ## Logs and where things live
 
 - `journalctl -u saku-daily` (and `saku-weekly`, `saku-update`): the service output.

@@ -68,8 +68,8 @@ export interface RunOptions {
   beforeRefetch?: () => Promise<void>;
   /** After the steps of a daily run, complete or not (the backup); a throw fails the run. */
   afterDaily?: () => Promise<void>;
-  /** On a complete daily run (stamp, heartbeat); returns whether the heartbeat was sent. */
-  onComplete?: () => Promise<boolean>;
+  /** On a complete daily or weekly run (stamp, heartbeat); returns whether the heartbeat was sent. */
+  onComplete?: (job: 'daily' | 'weekly') => Promise<boolean>;
 }
 
 export interface RunResult {
@@ -341,7 +341,8 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         ...failures,
       ].join('; ');
     }
-    if (ok && job === 'daily') heartbeatSent = (await o.onComplete?.()) ?? false;
+    if (ok && (job === 'daily' || job === 'weekly'))
+      heartbeatSent = (await o.onComplete?.(job)) ?? false;
   } catch (e) {
     ok = false;
     error = e instanceof Error ? (e.stack ?? e.message) : String(e);

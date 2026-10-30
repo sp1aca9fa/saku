@@ -112,6 +112,9 @@ as `HEALTHCHECK_URL`. Each fully successful daily run pings it; when pings stop 
 down, a source keeps failing, a backup failed), healthchecks.io tells you. The machine cannot report
 its own outage.
 
+Optional: a second check for the weekly refetch (period 7 days, grace 1 day) as
+`HEALTHCHECK_WEEKLY_URL`.
+
 Alerts (strategy changes, data health, failed runs for admins) go to Discord or Telegram:
 
 ```sh

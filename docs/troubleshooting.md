@@ -64,8 +64,9 @@ A lock left by a dead process is taken over on the next start.
 
 ## No healthchecks.io ping
 
-Pings only follow a fully successful daily run. Check the last run in `pnpm health`, the timer
-(`systemctl list-timers 'saku-*'`), and that `HEALTHCHECK_URL` is set.
+Pings only follow a fully successful run: the daily one (`HEALTHCHECK_URL`) and the weekly one
+(`HEALTHCHECK_WEEKLY_URL`). Check the last run in `pnpm health`, the timer
+(`systemctl list-timers 'saku-*'`), and that the variable is set.
 
 ## An update rolled back
 

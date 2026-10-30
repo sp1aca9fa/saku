@@ -146,7 +146,9 @@ try {
     parityDir: join(findRepoRoot(), 'plugins', 'test', 'testfol'),
     beforeRefetch: backup,
     afterDaily: backup,
-    onComplete: async () => {
+    onComplete: async (ran) => {
+      // The weekly run has its own check and no stamp.
+      if (ran === 'weekly') return heartbeat('HEALTHCHECK_WEEKLY_URL');
       writeStamp('daily', target);
       const sent = await heartbeat();
       if (sent) writeStamp('heartbeat', target);
@@ -167,14 +169,14 @@ async function backup() {
 }
 
 /** Pings healthchecks.io after a full success; the missing ping is what raises the alarm. */
-async function heartbeat(): Promise<boolean> {
-  const url = process.env.HEALTHCHECK_URL?.trim();
+async function heartbeat(envName = 'HEALTHCHECK_URL'): Promise<boolean> {
+  const url = process.env[envName]?.trim();
   if (!url) return false;
   try {
     await new PoliteHttp({ retries: 2 }).text(url);
     return true;
   } catch (e) {
-    log.warn('Heartbeat ping failed', { error: String(e) });
+    log.warn('Heartbeat ping failed', { check: envName, error: String(e) });
     return false;
   }
 }
