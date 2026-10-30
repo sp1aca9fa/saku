@@ -148,11 +148,12 @@ export interface SeriesFetch {
   points: SeriesPoint[];
   /**
    * True only when `points` hold every value the source still publishes for every date from the
-   * first point's date to the last one's, inclusive (e.g. a series served as current values only,
-   * without vintages, read to the last page). A stored date between them that is left out no
-   * longer has a value at the source: on a full fetch (bootstrap, weekly) core records a
-   * withdrawal for it, known from the fetch. A stored date outside that span is never inferred
-   * withdrawn (it is kept and noted). Never true for a response that may be partial (capped,
+   * first point's date through the requested end (`to`), inclusive (e.g. a series served as
+   * current values only, without vintages, read to the last page). A stored date in that span
+   * that is left out, also one after the last point, no longer has a value at the source: on a
+   * full fetch (bootstrap, weekly) core records a withdrawal for it, known from the fetch.
+   * Stored dates before the first point or after `to` are kept and noted. Never declare it for a
+   * source whose answer can end before `to` while it still has later values (an embargo or lag). Never true for a response that may be partial (capped,
    * truncated) or that leaves out a date it still has a value for.
    */
   completeSpan: boolean;

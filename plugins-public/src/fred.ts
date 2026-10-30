@@ -302,8 +302,8 @@ async function observations(
  * Vanished values (spec 2026-10-31 vanished-values): with no vintages, a value FRED stops
  * publishing (a date now '.' or left out) never arrives as a withdrawal. So this answer is
  * declared complete for its span (`fredSeries`): every page read and as many rows as FRED
- * announced (refused otherwise), so a date between the first and last value that is not in it is
- * one FRED no longer has a value for. Assumed (spec): FRED's current values over the asked range
+ * announced (refused otherwise), so a date from the first value through the asked end that is not
+ * in it is one FRED no longer has a value for. Assumed (spec): FRED's current values over the asked range
  * are every value it still publishes. Core compares only on full fetches.
  */
 async function currentValues(
