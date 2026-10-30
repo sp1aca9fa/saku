@@ -160,6 +160,7 @@ Calendars (NYSE, bond market, ECB) are versioned files from `CalendarSource` plu
 interface PluginInfo {
   key: string; kind: PluginKind; name: string; provides: unknown; suggestedRole: 'primary' | 'secondary' | 'check';
   limits?: { perMinute?: number; perHour?: number; perDay?: number; symbolsPerMonth?: number };
+  provider?: string; // default: the key; plug-ins of one provider share one count of requests (same limits)
   keyEnv?: string; termsUrl: string; noAi?: boolean; unofficial?: boolean;
   calendar?: string; // series and FX: the calendar it publishes on (a missing value on a closed day is an expected gap)
 }

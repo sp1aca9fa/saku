@@ -96,6 +96,67 @@ describe('probe', () => {
     expect(recorded).toEqual(['AAA']);
   });
 
+  it('bar sources of one provider share its count: together under 80% of the limit', async () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'saku-probe-')), 'probe.jsonl');
+    const run = async (provider: string | undefined) => {
+      let clock = 1_000_000;
+      const times: number[] = [];
+      const recorded: string[] = [];
+      const store: UsageStore = {
+        load: async () => ({ requests: [], symbols: new Map() }),
+        record: async (p) => {
+          recorded.push(p);
+        },
+      };
+      const fetching = (key: string): BarSource => ({
+        info: {
+          ...source(key, async () => []).info,
+          limits: { perMinute: 2 },
+          ...(provider && { provider }),
+        },
+        fetchBars: async (_t, _f, to, ctx) => {
+          await ctx.http.json('https://example.test/bars');
+          return [{ date: to, close: 1, closeIsSplitAdjusted: false, divCash: 0, splitFactor: 1 }];
+        },
+      });
+      const lines = await probe(
+        { ...emptyPlugins(), bars: [fetching('acme-a'), fetching('acme-b')] },
+        {
+          ticker: 'AAA',
+          from: '2026-01-01',
+          to: '2026-01-05',
+          context: (info) =>
+            pluginContext(info, quiet, {
+              usage: store,
+              http: {
+                minDelayMs: 0,
+                clock: () => clock,
+                wallClock: () => 0,
+                sleep: async (ms) => {
+                  clock += ms;
+                },
+                fetchImpl: (async () => {
+                  times.push(clock);
+                  return new Response('{}');
+                }) as typeof fetch,
+              },
+            }),
+          file,
+        },
+      );
+      return { lines, times, recorded };
+    };
+    // 80% of 2 per minute is 1: the second source waits out the first one's minute.
+    const shared = await run('acme');
+    expect(shared.lines.every((l) => l.error === undefined)).toBe(true);
+    expect(shared.times).toEqual([1_000_000, 1_060_001]);
+    expect(shared.recorded).toEqual(['acme', 'acme']);
+    // Default: each key is its own provider, paced alone.
+    const apart = await run(undefined);
+    expect(apart.times).toEqual([1_000_000, 1_000_000]);
+    expect(apart.recorded).toEqual(['acme-a', 'acme-b']);
+  });
+
   it('finds when a bar first appeared and last changed', () => {
     const l = (at: string, close: number) => ({ at, source: 'a', ticker: 'AAA', date: 'd', close });
     expect(finalization([l('t1', 10), l('t2', 10.1), l('t3', 10.1), l('t4', 10.1)])).toEqual([

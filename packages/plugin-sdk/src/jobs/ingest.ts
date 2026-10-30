@@ -5,8 +5,9 @@
 // like the others, but the caller does not count it against the run (`countsForRun`).
 //
 // Quota guard (requirements 04): every source's client counts its provider's requests across runs
-// (the database's `provider_usage`, unless the context already has a store), on the run's clock
-// when one is injected. A bar, meta or issuer fetch names its symbol first, so a provider's
+// (the database's `provider_usage`, unless the context already has a store, under the provider id:
+// `PluginInfo.provider`, default the key), on the run's clock when one is injected. The clients of
+// all sources of one provider share one count in the run, so together they stay under 80%. A bar, meta or issuer fetch names its symbol first, so a provider's
 // symbols-per-month limit holds: a new symbol it refuses fails that item only (symbols already
 // counted are still fetched); a request window it cannot wait out stops the source like a block.
 import type { TradingDate } from '@saku/core';
@@ -29,7 +30,7 @@ import {
   SymbolQuotaError,
   type UsageStore,
 } from '../http';
-import { type LoadedPlugins, providerUsageStore } from '../registry';
+import { type LoadedPlugins, providerQuotas, providerUsageStore } from '../registry';
 import type { IssuerSource, Logger, PluginContext, PluginInfo } from '../types';
 import type { IssuerAvailability } from './verify';
 
@@ -166,18 +167,20 @@ async function perItem(
 const clientOf = (ctx: PluginContext): PoliteHttp | null =>
   (ctx.http as PoliteHttp | null | undefined) ?? null;
 
-/** The source's context with the quota guard attached, or null (skipped, with the reason). */
-function contextOrSkip(db: Db, r: SourceReport, info: PluginInfo, o: IngestOptions) {
+/**
+ * The source's context with the quota guard attached and its provider's count shared (`quota`),
+ * or null (skipped, with the reason: a missing key, or a client that cannot share the count).
+ */
+function contextOrSkip(
+  r: SourceReport,
+  info: PluginInfo,
+  o: IngestOptions,
+  quota: ReturnType<typeof providerQuotas>,
+) {
   try {
     const ctx = o.context(info);
     const http = clientOf(ctx);
-    if (http && !http.guarded) {
-      const now = o.now;
-      http.guard(
-        { provider: info.key, store: o.usage ?? providerUsageStore(db) },
-        now && (() => now().getTime()),
-      );
-    }
+    if (http) quota(info, http);
     return ctx;
   } catch (e) {
     r.stopped = message(e);
@@ -196,6 +199,8 @@ export const countsForRun = (r: SourceReport): boolean => r.kind !== 'issuer';
 export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
   const now = o.now ?? (() => new Date());
   const reports: SourceReport[] = [];
+  // One count per provider for the whole run, guarded across runs on the run's clock.
+  const quota = providerQuotas(o.usage ?? providerUsageStore(db), o.now && (() => now().getTime()));
   const dailyFrom = o.sessions.before(o.sessions.onOrBefore(o.to), DAILY_OVERLAP);
   const wanted = (inception?: string | null) =>
     o.mode === 'daily'
@@ -208,7 +213,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
   for (const source of plugins.bars) {
     const r = report(source.info.key, 'bar');
     reports.push(r);
-    const ctx = contextOrSkip(db, r, source.info, o);
+    const ctx = contextOrSkip(r, source.info, o, quota);
     if (!ctx) continue;
     await perItem(
       r,
@@ -245,7 +250,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
   for (const source of plugins.series) {
     const r = report(source.info.key, 'series');
     reports.push(r);
-    const ctx = contextOrSkip(db, r, source.info, o);
+    const ctx = contextOrSkip(r, source.info, o, quota);
     if (!ctx) continue;
     await perItem(r, source.info.provides.series ?? [], o.log, async (id) => {
       const from = windowStart(source.info, wanted(), o.to);
@@ -271,7 +276,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
     reports.push(r);
     const supported = pairs.filter((p) => source.supports(p));
     if (supported.length === 0) continue;
-    const ctx = contextOrSkip(db, r, source.info, o);
+    const ctx = contextOrSkip(r, source.info, o, quota);
     if (!ctx) continue;
     await perItem(r, supported, o.log, async (pair) => {
       const from = windowStart(source.info, wanted(), o.to);
@@ -305,7 +310,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
     }
     const supported = symbols.filter((s) => support.supported.includes(s.ticker));
     if (supported.length === 0) continue;
-    const ctx = contextOrSkip(db, r, source.info, o);
+    const ctx = contextOrSkip(r, source.info, o, quota);
     if (!ctx) continue;
     await perItem(
       r,

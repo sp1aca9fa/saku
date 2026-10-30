@@ -38,6 +38,9 @@ export const exampleBars: BarSource = {
     name: 'Example Market Data',
     provides: { markets: ['US'] },
     suggestedRole: 'secondary',
+    // Another plug-in for this provider (e.g. its FX) sets the same `provider` and `limits`, so
+    // their requests share one count. Left out, the provider is the key.
+    // provider: 'example-market-data',
     limits: { perMinute: 60, perDay: 1000 },
     keyEnv: 'EXAMPLE_MARKET_DATA_KEY',
     termsUrl: 'https://example-market-data.test/terms',

@@ -388,6 +388,68 @@ describe('PoliteHttp quota guard', () => {
     expect(() => fresh.guard({ provider: 'p', store })).toThrow(/already attached/);
   });
 
+  it('clients sharing a count: one ledger, guard, clock and symbols; refusals stay per client', async () => {
+    const { store, rows } = memoryStore();
+    const at = { now: 1_000_000 };
+    let blockSecond = false;
+    const fetchImpl = (async (url: string) =>
+      blockSecond && url.includes('/b') ? new Response('', { status: 429 }) : ok()) as typeof fetch;
+    const limits = { perMinute: 5, symbolsPerMonth: 3 };
+    const first = new PoliteHttp({ limits, fetchImpl, minDelayMs: 0, wallClock: () => 0 });
+    // Guarded after it was joined, on the run's clock: the guard and the clock count for both.
+    const second = new PoliteHttp({ limits, fetchImpl, minDelayMs: 0, wallClock: () => 0 });
+    second.share(first);
+    first.guard({ provider: 'p', store }, () => at.now);
+    expect(second.guarded).toBe(true);
+    expect(second.provider).toBe('p');
+    await first.forSymbol('AAA');
+    await first.json('https://example.test/a');
+    await second.forSymbol('BBB');
+    await second.json('https://example.test/b');
+    expect(rows.map((r) => [r.provider, r.at, r.symbol])).toEqual([
+      ['p', 1_000_000, 'AAA'],
+      ['p', 1_000_000, 'BBB'],
+    ]);
+    // 80% of 3 symbols is 2, both counted (one by each client): a third is refused to either.
+    await expect(first.forSymbol('CCC')).rejects.toBeInstanceOf(SymbolQuotaError);
+    await expect(second.forSymbol('CCC')).rejects.toBeInstanceOf(SymbolQuotaError);
+    await second.forSymbol('AAA');
+    await first.forSymbol(null);
+    // 80% of 5 per minute is 4: two more from either, then neither can send this minute.
+    await first.json('https://example.test/a');
+    await second.json('https://example.test/b');
+    expect(first.sent).toHaveLength(4);
+    const opts = { limits, fetchImpl, minDelayMs: 0, maxWaitMs: 1000 };
+    const third = new PoliteHttp(opts);
+    third.share(first);
+    await expect(third.json('https://example.test/c')).rejects.toThrow(
+      /4 of 5 requests per minute/,
+    );
+    // A block stops only the client it was answered to.
+    at.now += 60_001;
+    blockSecond = true;
+    await expect(second.json('https://example.test/b')).rejects.toBeInstanceOf(BlockedError);
+    await first.json('https://example.test/a');
+  });
+
+  it('refuses to share after a request, across providers or limits', async () => {
+    const { store } = memoryStore();
+    const { http: used } = fakeClient([ok], { minDelayMs: 0 });
+    await used.json('https://example.test/a');
+    expect(() => used.share(new PoliteHttp())).toThrow(/before any request/);
+    const p = new PoliteHttp({ usage: { provider: 'p', store }, limits: { perMinute: 5 } });
+    const q = new PoliteHttp({ usage: { provider: 'q', store }, limits: { perMinute: 5 } });
+    expect(() => q.share(p)).toThrow(/same provider/);
+    // A guarded client never joins an unguarded count (its requests would not be stored).
+    expect(() => p.share(new PoliteHttp({ limits: { perMinute: 5 } }))).toThrow(/same provider/);
+    const other = new PoliteHttp({ limits: { perMinute: 6 } });
+    expect(() => other.share(p)).toThrow(/same limits/);
+    expect(() => new PoliteHttp({ shareQuotaWith: p })).toThrow(/same limits/);
+    const joined = new PoliteHttp({ limits: { perMinute: 5 } });
+    joined.share(p);
+    expect(joined.provider).toBe('p');
+  });
+
   it('records at the system time when the injected clock is frozen or behind', async () => {
     const { store, rows } = memoryStore();
     const wall = { now: 5_000_000 };

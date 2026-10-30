@@ -8,6 +8,9 @@
 // keeps what it sent), and a new symbol that would pass 80% of `symbolsPerMonth` is refused
 // (`SymbolQuotaError`: that symbol fails, symbols already counted are still fetched). History
 // that is unknown (the store fails) sends nothing: the source stops for the run.
+//
+// One provider, one count: the clients of all plug-ins with the same provider id (`share`) keep
+// one ledger in a run, and the store counts under the provider id across runs.
 import type { ProviderLimits } from './types';
 
 /** The provider refused us (403, 429, a challenge page): the source stops for this run. */
@@ -86,6 +89,12 @@ export interface UsageStore {
   record(provider: string, at: number, symbol: string | null): Promise<void>;
 }
 
+/** Whether two declarations state the same limits (an absent limit equals only an absent one). */
+export function sameLimits(a: ProviderLimits | undefined, b: ProviderLimits | undefined): boolean {
+  const fields = ['perMinute', 'perHour', 'perDay', 'symbolsPerMonth'] as const;
+  return fields.every((f) => a?.[f] === b?.[f]);
+}
+
 const CHALLENGE_MARKERS = [/captcha/i, /cf-challenge/i, /Just a moment\.\.\./];
 
 /** Query parameters that carry keys; their values never appear in errors or logs. */
@@ -100,11 +109,12 @@ export function redactUrl(url: string): string {
 
 export interface PoliteHttpOptions {
   limits?: ProviderLimits;
-  /** The quota guard's store and the provider key its requests are counted under. */
+  /** The quota guard's store and the provider id its requests are counted under. */
   usage?: { provider: string; store: UsageStore };
   /**
    * Another client of the same provider whose request and symbol counts this one shares (paced
    * together), e.g. the channels of one notifier service; refusals (403, 429) stay per client.
+   * See `share`.
    */
   shareQuotaWith?: PoliteHttp;
   /** Pause between any two requests. */
@@ -118,7 +128,10 @@ export interface PoliteHttpOptions {
   secrets?: string[];
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
-  /** The clock the windows are read on (a run's injected clock, see `guard`). */
+  /**
+   * The clock the windows are read on (a run's injected clock, see `guard`); a client that joins
+   * another's count reads on the other's.
+   */
   clock?: () => number;
   /**
    * The system clock. A request is recorded at the later of the two clocks, so an injected clock
@@ -129,7 +142,7 @@ export interface PoliteHttpOptions {
   wallClock?: () => number;
 }
 
-/** What the windows count, shared by clients of one provider (`shareQuotaWith`). */
+/** What the windows count, shared by clients of one provider (`share`, `shareQuotaWith`). */
 interface Ledger {
   /** Request times in this run plus the stored history, oldest first. */
   sent: number[];
@@ -137,27 +150,29 @@ interface Ledger {
   symbols: Map<string, number>;
   /** The stored history, loaded once before the first request or symbol check. */
   loaded?: Promise<void>;
+  /** The quota guard's store and the provider id the requests are counted under. */
+  usage?: { provider: string; store: UsageStore };
+  /** The clock the windows are read on and this run's times are kept on. */
+  clock: () => number;
 }
 
 export class PoliteHttp {
   private blocked: string | null = null;
-  private readonly o: Required<Omit<PoliteHttpOptions, 'usage' | 'shareQuotaWith'>>;
+  private readonly o: Required<Omit<PoliteHttpOptions, 'usage' | 'shareQuotaWith' | 'clock'>>;
   private readonly secrets: string[];
-  private usage: { provider: string; store: UsageStore } | undefined;
-  private readonly ledger: Ledger;
+  private ledger: Ledger;
   /** The symbol the next requests are for (`forSymbol`), recorded with each. */
   private symbol: string | null = null;
 
   constructor(options: PoliteHttpOptions = {}) {
-    const peer = options.shareQuotaWith;
-    if (peer && options.usage && peer.usage?.provider !== options.usage.provider) {
-      throw new Error('a shared quota needs the same provider');
-    }
-    this.ledger = peer ? peer.ledger : { sent: [], symbols: new Map() };
-    this.usage = options.usage ?? peer?.usage;
+    this.ledger = {
+      sent: [],
+      symbols: new Map(),
+      clock: options.clock ?? Date.now,
+      ...(options.usage && { usage: options.usage }),
+    };
     this.secrets = (options.secrets ?? []).filter((s) => s.length >= 4);
     this.o = {
-      limits: {},
       minDelayMs: 500,
       maxWaitMs: 120_000,
       retries: 3,
@@ -166,10 +181,44 @@ export class PoliteHttp {
       secrets: [],
       fetchImpl: fetch,
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-      clock: Date.now,
       wallClock: Date.now,
       ...options,
+      // A plug-in without limits hands over `limits: undefined`: no declared limit, not a crash.
+      limits: options.limits ?? {},
     };
+    if (options.shareQuotaWith) this.share(options.shareQuotaWith);
+  }
+
+  /**
+   * Joins the request and symbol counts of another client of the same provider before this one
+   * sends anything, so their requests together stay under 80% of each limit (requirements 04
+   * "Quota guard"): one ledger, one pace (the minimum gap counts from either's last request),
+   * one quota guard (attached to either, it counts for all) and one clock (the peer's, the one
+   * the shared times are kept on). Refusals (403, 429, a challenge) stay per client. Refused: a
+   * client that already sent or loaded its history, a different provider (or a guarded client
+   * joining an unguarded one), different limits (one count cannot honor two).
+   */
+  share(peer: PoliteHttp): void {
+    if (peer === this) return;
+    if (this.ledger.loaded || this.sent.length > 0) {
+      throw new Error('a shared quota is joined before any request');
+    }
+    if (this.usage && peer.usage?.provider !== this.usage.provider) {
+      throw new Error(
+        `a shared quota needs the same provider (${this.usage.provider}, not ${peer.usage?.provider ?? 'unguarded'})`,
+      );
+    }
+    if (!sameLimits(this.o.limits, peer.o.limits)) {
+      throw new Error(
+        `a shared quota needs the same limits (${peer.usage?.provider ?? 'unguarded'})`,
+      );
+    }
+    this.ledger = peer.ledger;
+  }
+
+  /** The quota guard of this client's ledger (shared by the clients of one provider). */
+  private get usage(): { provider: string; store: UsageStore } | undefined {
+    return this.ledger.usage;
   }
 
   /** Request times in this run plus the stored history, oldest first. */
@@ -181,6 +230,11 @@ export class PoliteHttp {
     return this.ledger.symbols;
   }
 
+  /** The provider id requests are counted under across runs; undefined when not guarded. */
+  get provider(): string | undefined {
+    return this.usage?.provider;
+  }
+
   /** Whether requests are counted across runs (a usage store is attached). */
   get guarded(): boolean {
     return this.usage !== undefined;
@@ -188,15 +242,16 @@ export class PoliteHttp {
 
   /**
    * Attaches the quota guard's store before the first request (a run's jobs do this for every
-   * source's client). `clock`: the run's clock, so an injected one sets the windows.
+   * source's client). `clock`: the run's clock, so an injected one sets the windows. Attached to
+   * one of the clients sharing a count (`share`), it guards them all.
    */
   guard(usage: { provider: string; store: UsageStore }, clock?: () => number): void {
     if (this.usage) throw new Error(`quota guard already attached (${this.usage.provider})`);
     if (this.ledger.loaded || this.sent.length > 0) {
       throw new Error('quota guard attached after requests were sent');
     }
-    this.usage = usage;
-    if (clock) this.o.clock = clock;
+    this.ledger.usage = usage;
+    if (clock) this.ledger.clock = clock;
   }
 
   /**
@@ -212,7 +267,7 @@ export class PoliteHttp {
     const limit = this.o.limits.symbolsPerMonth;
     if (limit !== undefined) {
       const allowed = Math.max(1, Math.floor(limit * LIMIT_SHARE));
-      const since = this.o.clock() - SYMBOL_WINDOW_MS;
+      const since = this.ledger.clock() - SYMBOL_WINDOW_MS;
       const counted = [...this.symbols].filter(([, at]) => at > since).map(([s]) => s);
       if (!counted.includes(symbol) && counted.length >= allowed) {
         throw new SymbolQuotaError(
@@ -233,7 +288,10 @@ export class PoliteHttp {
         // Read (and pruned) at the earlier of the two clocks, the mirror of recording at the
         // later: an injected clock ahead of the system one never prunes or skips rows that are
         // still inside a real window. The windows then filter on the run's clock.
-        h = await usage.store.load(usage.provider, Math.min(this.o.clock(), this.o.wallClock()));
+        h = await usage.store.load(
+          usage.provider,
+          Math.min(this.ledger.clock(), this.o.wallClock()),
+        );
       } catch (e) {
         throw new QuotaError(`earlier requests of ${usage.provider} unknown: ${message(e)}`);
       }
@@ -341,7 +399,7 @@ export class PoliteHttp {
     for (let attempt = 0; ; attempt++) {
       if (this.blocked) throw new BlockedError(`stopped for this run: ${this.blocked}`);
       await this.pace();
-      await this.note(this.o.clock());
+      await this.note(this.ledger.clock());
       let res: Response;
       try {
         res = await this.o.fetchImpl(url, {
@@ -430,7 +488,7 @@ export class PoliteHttp {
   /** Waits for the minimum gap and for every limit window to have room under 80%. */
   private async pace(): Promise<void> {
     // The gap counts from the latest request not after now (a stored time may be its bucket's end).
-    const start = this.o.clock();
+    const start = this.ledger.clock();
     const last = this.sent.findLast((t) => t <= start);
     if (last !== undefined) {
       const gap = this.o.minDelayMs - (start - last);
@@ -440,7 +498,7 @@ export class PoliteHttp {
       const limit = w.limit(this.o.limits);
       if (!limit) continue;
       const allowed = Math.max(1, Math.floor(limit * LIMIT_SHARE));
-      const now = this.o.clock();
+      const now = this.ledger.clock();
       const inWindow = this.sent.filter((t) => t > now - w.ms);
       if (inWindow.length < allowed) continue;
       // Room opens when the oldest request that keeps the window full falls out of it.

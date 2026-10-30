@@ -55,6 +55,12 @@ the descriptions to the database. The fields:
 - `suggestedRole`: used the first time; you decide afterwards with `pnpm sources` (see
   `docs/running.md`).
 - `limits`: the provider's requests per minute, hour and day, and symbols per month.
+- `provider` (optional, default the key): the provider whose limits the requests count against.
+  Plug-ins of one provider (its bars and its FX, two plug-ins on one key) declare the same
+  `provider` and the same `limits`; loading refuses a set where they differ. Their requests then
+  share one count: in a run their clients are paced together, and across runs the usage is
+  stored under the provider id. Same form as a key; keep it once usage is stored (a new id
+  starts without history).
 - `keyEnv`: the environment variable(s) holding the key, read from `.env`.
 - `termsUrl`: the provider's terms.
 - `noAi`: the terms forbid giving its data to AI models (left out of MCP and AI exports).
@@ -89,7 +95,9 @@ data within the asked range; a later run's window covers the date.
 - It stops that source for the run on 403, 429 or a captcha or challenge page, and never works
   around a block. A 4xx error carries a short excerpt of the provider's reason.
 - Keys and tokens in URLs are masked in errors and logs. Prefer sending a key in a header.
-- Sources run one after another, each with its own client.
+- Sources run one after another, each with its own client. The clients of one provider
+  (`provider`) share one count of requests and symbols, so together they stay under 80%; a
+  block stops only the source it was answered to.
 
 ## Start from the template
 

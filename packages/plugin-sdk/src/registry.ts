@@ -11,7 +11,7 @@ import { findRepoRoot } from '@saku/db/env';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { PoliteHttp, type PoliteHttpOptions, type UsageStore } from './http';
+import { PoliteHttp, type PoliteHttpOptions, type UsageStore, sameLimits } from './http';
 import type {
   IssuerSource,
   Logger,
@@ -81,15 +81,39 @@ export function issuerPublishesOf(issuers: IssuerSource[] = []): Record<string, 
  * adjusted-close rounding is a small positive number, and a `publishes` declaration is an issuer
  * source's, naming at least one known kind, each `true` (a declaration of nothing, or with a
  * misspelt kind, would silently leave its checks out of layer D).
+ *
+ * A declared provider id has the form of a key, and plug-ins of one provider (`providerOf`,
+ * notifiers by their key) declare the same limits: they share one count of requests, which
+ * cannot honor two different limits (requirements 04 "Quota guard"). Calendar plug-ins send no
+ * requests and are left out of this.
  */
 export function validateInfos(
-  infos: (Pick<PluginInfo | NotifierInfo, 'key' | 'kind' | 'termsUrl'> &
-    Pick<Partial<PluginInfo>, 'adjCloseRounding' | 'publishes'>)[],
+  infos: (Pick<PluginInfo | NotifierInfo, 'key' | 'kind' | 'termsUrl' | 'limits'> &
+    Pick<Partial<PluginInfo>, 'adjCloseRounding' | 'publishes' | 'provider'>)[],
 ): void {
   const seen = new Set<string>();
+  const byProvider = new Map<string, (typeof infos)[number]>();
   for (const info of infos) {
-    if (!/^[a-z][a-z0-9-]{1,39}$/.test(info.key)) {
+    if (!KEY.test(info.key)) {
       throw new Error(`Plug-in key "${info.key}" must be 2-40 of a-z, 0-9 and -.`);
+    }
+    if (
+      info.provider !== undefined &&
+      (typeof info.provider !== 'string' || !KEY.test(info.provider))
+    ) {
+      throw new Error(
+        `Plug-in "${info.key}": provider "${String(info.provider)}" must be 2-40 of a-z, 0-9 and -.`,
+      );
+    }
+    if (info.kind !== 'calendar') {
+      const provider = providerOf(info);
+      const other = byProvider.get(provider);
+      if (!other) byProvider.set(provider, info);
+      else if (!sameLimits(other.limits, info.limits)) {
+        throw new Error(
+          `Plug-ins "${other.kind} ${other.key}" and "${info.kind} ${info.key}" share the provider "${provider}" but declare different limits; one count cannot honor two.`,
+        );
+      }
     }
     const id = `${info.kind}:${info.key}`;
     if (seen.has(id)) throw new Error(`Two ${info.kind} plug-ins use the key "${info.key}".`);
@@ -114,6 +138,47 @@ export function validateInfos(
       }
     }
   }
+}
+
+/** Plug-in keys and provider ids: 2-40 of a-z, 0-9 and -, starting with a letter. */
+const KEY = /^[a-z][a-z0-9-]{1,39}$/;
+
+/**
+ * The provider a plug-in's requests count against (its declared `provider`, default its key):
+ * the id its quota is shared and stored under (requirements 04 "Quota guard").
+ */
+export function providerOf(info: Pick<PluginInfo, 'key'> & Pick<Partial<PluginInfo>, 'provider'>) {
+  return info.provider ?? info.key;
+}
+
+/**
+ * Within one run, the clients of all plug-ins of one provider share one count (`PoliteHttp.share`):
+ * the first client of a provider is guarded (with `usage`, unless its context already did) and
+ * the later ones join it. Returns the function to call with each source's client before it sends
+ * anything; it throws when a client cannot join (another provider's guard, different limits), so
+ * that source sends nothing. `clock`: the run's clock, when injected.
+ */
+export function providerQuotas(
+  usage?: UsageStore,
+  clock?: () => number,
+): (
+  info: Pick<PluginInfo, 'key'> & Pick<Partial<PluginInfo>, 'provider'>,
+  http: PoliteHttp,
+) => void {
+  const first = new Map<string, PoliteHttp>();
+  return (info, http) => {
+    const provider = providerOf(info);
+    if (http.guarded && http.provider !== provider) {
+      throw new Error(`client counted under ${http.provider}, not its provider ${provider}`);
+    }
+    const peer = first.get(provider);
+    if (peer) {
+      http.share(peer);
+      return;
+    }
+    if (usage && !http.guarded) http.guard({ provider, store: usage }, clock);
+    first.set(provider, http);
+  };
 }
 
 /** Saves every plug-in's description (done by each job run); Settings lists them from here. */
@@ -147,10 +212,12 @@ export function providerUsageStore(db: Db): UsageStore {
 /**
  * A run's context for one source: its own HTTP client at the provider's pace, and its key.
  * `usage`: the quota guard's store, so the provider's limits hold across runs (counted under the
- * plug-in's key).
+ * provider id, `providerOf`). A run's jobs make the clients of one provider share their count
+ * (`providerQuotas`).
  */
 export function pluginContext(
-  info: Pick<PluginInfo | NotifierInfo, 'key' | 'name' | 'keyEnv' | 'limits'>,
+  info: Pick<PluginInfo | NotifierInfo, 'key' | 'name' | 'keyEnv' | 'limits'> &
+    Pick<Partial<PluginInfo>, 'provider'>,
   log: Logger,
   options: {
     env?: Record<string, string | undefined>;
@@ -173,7 +240,7 @@ export function pluginContext(
     http: new PoliteHttp({
       limits: info.limits,
       secrets: Object.values(keys),
-      ...(options.usage && { usage: { provider: info.key, store: options.usage } }),
+      ...(options.usage && { usage: { provider: providerOf(info), store: options.usage } }),
       ...options.http,
     }),
     now: options.now ?? new Date(),

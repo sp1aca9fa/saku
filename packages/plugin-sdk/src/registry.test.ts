@@ -8,6 +8,8 @@ import {
   loadPlugins,
   notifierContexts,
   pluginContext,
+  providerOf,
+  providerQuotas,
   providerUsageStore,
   savePluginInfos,
   validateInfos,
@@ -64,6 +66,82 @@ describe('plug-in registry', () => {
       ).toThrow(/publishes/);
     }
     expect(() => validateInfos([{ ...info, publishes: { nav: true } }])).toThrow(/publishes/);
+  });
+
+  it('refuses plug-ins of one provider with different limits, naming both', () => {
+    const bars = { ...info, key: 'acme-bars', provider: 'acme', limits: { perMinute: 10 } };
+    const fx = { ...info, key: 'acme-fx', kind: 'fx' as const, provider: 'acme' };
+    expect(() => validateInfos([bars, { ...fx, limits: { perMinute: 10 } }])).not.toThrow();
+    for (const limits of [undefined, { perMinute: 20 }, { perMinute: 10, perDay: 100 }]) {
+      expect(() => validateInfos([bars, { ...fx, limits }])).toThrow(
+        /"bar acme-bars" and "fx acme-fx" share the provider "acme" but declare different limits/,
+      );
+    }
+    // Default provider: the key. The same key in two kinds is one provider.
+    expect(() => validateInfos([info, { ...info, kind: 'fx', limits: { perDay: 5 } }])).toThrow(
+      /share the provider "example"/,
+    );
+    // A provider id that is another plug-in's key is that plug-in's provider.
+    expect(() =>
+      validateInfos([
+        { ...info, key: 'acme', limits: { perMinute: 10 } },
+        { ...fx, limits: { perMinute: 10 } },
+      ]),
+    ).not.toThrow();
+    // A notifier is its own provider (its key); calendars send no requests.
+    const notifier = { key: 'acme', kind: 'notifier' as const, termsUrl: 'x', limits: {} };
+    expect(() => validateInfos([bars, notifier])).toThrow(/different limits/);
+    expect(() => validateInfos([bars, { ...info, key: 'acme', kind: 'calendar' }])).not.toThrow();
+    for (const provider of ['Acme', 'a', '', 'acme provider']) {
+      expect(() => validateInfos([{ ...bars, provider }])).toThrow(/provider/);
+    }
+  });
+
+  it('counts a context under its provider id, by default its key', async () => {
+    const asked: string[] = [];
+    const store: UsageStore = {
+      load: async (provider) => {
+        asked.push(provider);
+        throw new Error('database locked');
+      },
+      record: async () => {},
+    };
+    for (const i of [info, { ...info, provider: 'acme' }]) {
+      const ctx = pluginContext(i, log, { env: {}, usage: store });
+      expect(ctx.http.provider).toBe(providerOf(i));
+      await expect(ctx.http.text('https://example.test/a')).rejects.toBeInstanceOf(QuotaError);
+    }
+    expect(asked).toEqual(['example', 'acme']);
+  });
+
+  it('providerQuotas: the clients of one provider share a guarded count; others stay apart', () => {
+    const store: UsageStore = {
+      load: async () => ({ requests: [], symbols: new Map() }),
+      record: async () => {},
+    };
+    const quota = providerQuotas(store);
+    const a = new PoliteHttp();
+    const b = new PoliteHttp();
+    const c = new PoliteHttp();
+    quota({ key: 'acme-bars', provider: 'acme' }, a);
+    quota({ key: 'acme-fx', provider: 'acme' }, b);
+    quota({ key: 'other' }, c);
+    expect([a.provider, b.provider, c.provider]).toEqual(['acme', 'acme', 'other']);
+    // A client already counted under another id is refused (it would store under the wrong one).
+    const wrong = new PoliteHttp({ usage: { provider: 'x', store } });
+    expect(() => quota({ key: 'new' }, wrong)).toThrow(/counted under x/);
+    expect(() =>
+      quota({ key: 'z', provider: 'acme' }, new PoliteHttp({ limits: { perDay: 1 } })),
+    ).toThrow(/same limits/);
+  });
+
+  it('a plug-in without limits can send (no declared limit)', async () => {
+    const ctx = pluginContext(info, log, {
+      env: {},
+      http: { minDelayMs: 0, fetchImpl: (async () => new Response('{}')) as typeof fetch },
+    });
+    await ctx.http.forSymbol('AAA');
+    await expect(ctx.http.json('https://example.test/a')).resolves.toEqual({});
   });
 
   it("hands over the run's final time when given", () => {

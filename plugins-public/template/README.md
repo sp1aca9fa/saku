@@ -9,6 +9,9 @@ not loaded by the jobs (only `src/index.ts` of `plugins-public/` and `plugins/` 
   private repo)
 - `test/example-bars.test.ts`: the test, run by `pnpm test`
 
+A second plug-in for the same provider (its FX, say) sets the same `info.provider` and
+`info.limits` as the first, so their requests share the provider's limits; see `docs/plugins.md`.
+
 An issuer source (`IssuerSource`) also declares what its records hold in `info.publishes`
 (`{ nav: true }` for a NAV-only file); see `docs/plugins.md`.
 

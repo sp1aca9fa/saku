@@ -10,7 +10,7 @@ import {
 import { testDb } from '@saku/db/testing';
 import { Sessions } from '@saku/data';
 import { describe, expect, it } from 'vitest';
-import { BlockedError, PoliteHttp } from '../http';
+import { BlockedError, PoliteHttp, type UsageStore } from '../http';
 import { emptyPlugins } from '../registry';
 import type {
   BarSource,
@@ -354,6 +354,135 @@ describe('ingest: quota guard across runs', () => {
     expect(r[0]!.failed[0]!.error).toMatch(/1 of 2 symbols per 31 days used .*AAA is new/);
     expect(r[0]!.stopped).toBeUndefined();
     expect(calls.map((u) => new URL(u).pathname)).toEqual(['/BBB']);
+  });
+
+  describe('two plug-ins of one provider', () => {
+    /**
+     * A bar source (5 requests per ticker) and a series source (4 per series) on one fake clock;
+     * `provider` set on both or neither. 80% of 10 per minute is 8.
+     */
+    function pair(provider: string | undefined) {
+      let clock = Date.parse('2026-01-17T01:00:00Z');
+      const times: number[] = [];
+      const limits = { perMinute: 10 };
+      const ask = async (ctx: { http: PoliteHttp }, n: number) => {
+        for (let k = 0; k < n; k++) await ctx.http.json('https://example.test/x');
+      };
+      const bars: BarSource = {
+        info: { ...info('acme-bars'), limits, ...(provider && { provider }) },
+        async fetchBars(_t, _f, to, ctx) {
+          await ask(ctx, 5);
+          return [bar(to, 1)];
+        },
+      };
+      const series: SeriesSource = {
+        info: {
+          ...info('acme-series', 'series'),
+          provides: { series: ['S1', 'S2', 'S3'] },
+          limits,
+          ...(provider && { provider }),
+        },
+        async fetchSeries(_id, _f, to, ctx) {
+          await ask(ctx, 4);
+          return [{ date: to, value: 1 }];
+        },
+      };
+      const context = () => ({
+        http: new PoliteHttp({
+          minDelayMs: 0,
+          limits,
+          sleep: async (ms) => {
+            clock += ms;
+          },
+          wallClock: () => 0,
+          fetchImpl: (async () => {
+            times.push(clock);
+            return new Response('{}');
+          }) as typeof fetch,
+        }),
+        now: new Date(),
+        log,
+      });
+      return {
+        plugins: { ...emptyPlugins(), bars: [bars], series: [series] },
+        context,
+        times,
+        now: () => new Date(clock),
+      };
+    }
+    /** The most requests in any rolling minute. */
+    const busiest = (times: number[]) =>
+      Math.max(...times.map((t) => times.filter((u) => u > t - 60_000 && u <= t).length));
+    /** A store whose history is empty, so only the run's own ledger can hold them back. */
+    const blank = () => {
+      const recorded: string[] = [];
+      const usage: UsageStore = {
+        load: async () => ({ requests: [], symbols: new Map() }),
+        record: async (p) => {
+          recorded.push(p);
+        },
+      };
+      return { usage, recorded };
+    };
+
+    it('share one count in the run: together never above 80% of the per-minute limit', async () => {
+      const db = await setup();
+      const p = pair('acme');
+      const { usage, recorded } = blank();
+      const r = await ingest(db, p.plugins, {
+        ...options('daily'),
+        context: p.context,
+        now: p.now,
+        usage,
+      });
+      expect(r.map((x) => [x.source, x.ok.length, x.stopped])).toEqual([
+        ['acme-bars', 2, undefined],
+        ['acme-series', 3, undefined],
+      ]);
+      expect(p.times).toHaveLength(22);
+      expect(busiest(p.times)).toBe(8);
+      expect(new Set(recorded)).toEqual(new Set(['acme']));
+    });
+
+    it('without a provider, each key is its own provider (stored under the key)', async () => {
+      const db = await setup();
+      const p = pair(undefined);
+      const { usage, recorded } = blank();
+      await ingest(db, p.plugins, { ...options('daily'), context: p.context, now: p.now, usage });
+      expect(new Set(recorded)).toEqual(new Set(['acme-bars', 'acme-series']));
+      // Each paced alone: the series starts at once after the bars' last request.
+      expect(busiest(p.times)).toBeGreaterThan(8);
+    });
+
+    it('across runs, the database counts them under the provider id', async () => {
+      const db = await setup();
+      const p = pair('acme');
+      await ingest(db, p.plugins, { ...options('daily'), context: p.context, now: p.now });
+      const rows = await db.select().from(schema.providerUsage);
+      expect(new Set(rows.map((x) => x.provider))).toEqual(new Set(['acme']));
+      const second = await ingest(db, p.plugins, {
+        ...options('daily'),
+        context: p.context,
+        now: p.now,
+      });
+      expect(second.every((x) => x.stopped === undefined)).toBe(true);
+      expect(busiest(p.times)).toBeLessThanOrEqual(8);
+    });
+
+    it('a client that cannot share the count is skipped, sending nothing', async () => {
+      const db = await setup();
+      const p = pair('acme');
+      const { usage } = blank();
+      const context = (i: PluginInfo) => {
+        const ctx = p.context();
+        // Counted under another id by its context: storing it as 'acme' would be wrong.
+        if (i.kind === 'series') ctx.http.guard({ provider: 'elsewhere', store: usage });
+        return ctx;
+      };
+      const r = await ingest(db, p.plugins, { ...options('daily'), context, now: p.now, usage });
+      expect(r[1]!.stopped).toMatch(/counted under elsewhere/);
+      expect(p.times).toHaveLength(10);
+    });
   });
 
   it('stores only provider buckets, counts and tickers (no URL or key)', async () => {
