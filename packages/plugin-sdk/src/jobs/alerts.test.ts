@@ -192,6 +192,50 @@ describe('strategy alerts', () => {
     );
   });
 
+  it('a version that no longer parses gets no alert and is reported; the others are told', async () => {
+    const { db, owner, day } = await setup();
+    const broken = await registerVersion(db, {
+      ownerId: owner,
+      name: 'Old',
+      strategy: {
+        ...strategy,
+        safeState: {
+          holdings: [
+            { ticker: 'AAA', weight: 50 },
+            { ticker: 'AAA', weight: 50 },
+          ],
+        },
+      },
+    });
+    await appendForward(
+      db,
+      broken,
+      {
+        date: '2026-01-05',
+        allocation: 'Calm',
+        holdings: [{ ticker: 'CASH_USD', weight: 100 }],
+        safeStateApplied: false,
+        dataStatus: 'green',
+        equity: 1,
+        detail: { reasons: [] },
+      },
+      null,
+    );
+    await day('2026-01-05', 'Calm');
+    const { notifier, sent } = fakeNotifier();
+    const r = await sendStrategyAlerts(db, options(notifier, '2026-01-05'));
+    expect(r.sent).toBe(1);
+    expect(sent[0]!.text).toMatch(/^Trend: /);
+    expect(r.failed).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^Old \\(${broken.id}\\): definition does not parse: .*"AAA" is listed twice`,
+          's',
+        ),
+      ),
+    ]);
+  });
+
   it('retries a failed delivery on the next run and skips disabled channels', async () => {
     const { db, owner, day } = await setup();
     await day('2026-01-05', 'Calm');

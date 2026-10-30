@@ -138,6 +138,44 @@ describe('forward', () => {
     expect(await verifyChain(db, version)).toEqual([]);
   });
 
+  it('a stored version that no longer parses is reported and skipped; the others still run', async () => {
+    const { db, version, runId } = await setup();
+    // Registered before the good one (so read first), with a rule added later: a ticker twice.
+    const broken = await registerVersion(db, {
+      ownerId: version.ownerId,
+      name: 'Old',
+      strategy: {
+        ...strategy,
+        allocations: [
+          strategy.allocations[0]!,
+          {
+            name: 'Calm',
+            holdings: [
+              { ticker: 'AAA', weight: 50 },
+              { ticker: 'AAA', weight: 50 },
+            ],
+          },
+        ],
+      },
+      at: new Date('2026-01-06T21:30:00Z'),
+    });
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    const f = await forward(db, { runId, sessions, to: D[3]! });
+    expect(f.appended).toBe(2);
+    expect(f.errors).toEqual([
+      { version: `Old (${broken.id})`, error: expect.stringContaining('"AAA" is listed twice') },
+    ]);
+    // Nothing is appended for it: no decision is guessed.
+    expect(await forwardRecord(db, broken.id)).toEqual([]);
+    expect((await forwardRecord(db, version.id)).map((e) => e.date)).toEqual([D[2], D[3]]);
+    // Recompute reports it too (it has no record yet), and still checks the good one.
+    const r = await recompute(db, { runId, code: 'c1' });
+    expect(r.checked).toBe(2);
+    expect(r.errors).toEqual([
+      { version: 'Old', error: expect.stringContaining('"AAA" is listed twice') },
+    ]);
+  });
+
   it('recompute: the record reproduces, and a difference is annotated once', async () => {
     const { db, version, runId, store } = await setup();
     await setSetting(db, 'forward_records_from', '2026-01-05');

@@ -50,6 +50,36 @@ export interface ForwardSummary {
   annotations: number;
   /** Today's decisions, for the log (and the alerts, later in A2). */
   today: { version: string; allocation: string; dataStatus: string; reasons: string[] }[];
+  /**
+   * Versions whose stored definition no longer parses (e.g. a rule added after registration):
+   * nothing is appended for them (no guessed decision); the others still run. The run is then
+   * incomplete; the days are caught up once the definition parses again.
+   */
+  errors: { version: string; error: string }[];
+}
+
+/**
+ * A registered version's strategy, or the reason it does not parse. Registered versions are
+ * immutable, so a stricter schema can refuse one stored before: that version is reported and
+ * skipped, never evaluated on a guess, and never stops the other versions.
+ */
+export function parseVersion(version: {
+  canonicalJson: string;
+}): { strategy: Strategy } | { error: string } {
+  let stored: unknown;
+  try {
+    stored = (JSON.parse(version.canonicalJson) as { strategy?: unknown }).strategy;
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+  const parsed = Strategy.safeParse(stored);
+  if (parsed.success) return { strategy: parsed.data };
+  // One line per problem, where it is: readable in the log and the admins' job-failure alert.
+  return {
+    error: parsed.error.issues
+      .map((i) => (i.path.length ? `${i.path.join('.')}: ${i.message}` : i.message))
+      .join('; '),
+  };
 }
 
 const toRaw = (r: Awaited<ReturnType<typeof canonicalBars>>[number]): RawBar => ({
@@ -65,7 +95,13 @@ const toRaw = (r: Awaited<ReturnType<typeof canonicalBars>>[number]): RawBar => 
 });
 
 export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary> {
-  const summary: ForwardSummary = { appended: 0, safeStateDays: 0, annotations: 0, today: [] };
+  const summary: ForwardSummary = {
+    appended: 0,
+    safeStateDays: 0,
+    annotations: 0,
+    today: [],
+    errors: [],
+  };
   const from = await getSetting(db, 'forward_records_from');
   if (!from) return { ...summary, skipped: 'forward records not started (forward_records_from)' };
 
@@ -99,7 +135,12 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   };
 
   for (const version of await allVersions(db)) {
-    const strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
+    const parsed = parseVersion(version);
+    if ('error' in parsed) {
+      summary.errors.push({ version: `${version.name} (${version.id})`, error: parsed.error });
+      continue;
+    }
+    const { strategy } = parsed;
     const deps = dependencies(strategy);
     const last = await lastEntry(db, version.id);
     const start = last ? last.date : from;
@@ -249,9 +290,16 @@ export async function recompute(
   const summary: RecomputeSummary = { checked: 0, differences: [], errors: [] };
   const { loadRows, barsOf } = await reader(db);
   for (const version of await allVersions(db)) {
+    // Before the record check: a version that no longer parses is reported even without a
+    // record yet (the forward step skipped it too), so the run is incomplete.
+    const parsed = parseVersion(version);
+    if ('error' in parsed) {
+      summary.errors.push({ version: version.name, error: parsed.error });
+      continue;
+    }
+    const { strategy } = parsed;
     const record = await forwardRecord(db, version.id);
     if (record.length === 0) continue;
-    const strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
     const deps = dependencies(strategy);
     let days: Map<TradingDate, StrategyDay>;
     try {

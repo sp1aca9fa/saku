@@ -183,20 +183,40 @@ describe('Strategy schema', () => {
         allocations: [{ name: 'a', holdings: [{ ticker: 'X', weight: 60 }] }],
       }),
     ).toThrow(/add up to 100/);
-    expect(() =>
-      Strategy.parse({
-        ...base,
-        allocations: [
-          {
-            name: 'a',
-            holdings: [
-              { ticker: 'X', weight: 50 },
-              { ticker: 'X', weight: 50 },
-            ],
-          },
+    const twice = Strategy.safeParse({
+      ...base,
+      allocations: [
+        {
+          name: 'a',
+          holdings: [
+            { ticker: 'X', weight: 50 },
+            { ticker: 'X', weight: 50 },
+          ],
+        },
+      ],
+    });
+    expect(twice.error!.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      [
+        'allocations.0.holdings',
+        '"X" is listed twice; list each ticker once with its total weight',
+      ],
+    ]);
+    // The safe state too, reported at its own path.
+    const safe = Strategy.safeParse({
+      ...base,
+      safeState: {
+        holdings: [
+          { ticker: 'Y', weight: 30 },
+          { ticker: 'X', weight: 40 },
+          { ticker: 'Y', weight: 30 },
         ],
-      }),
-    ).toThrow(/at most once/);
+      },
+      allocations: [{ name: 'a', holdings: [{ ticker: 'X', weight: 100 }] }],
+    });
+    expect(safe.success).toBe(false);
+    expect(safe.error!.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['safeState.holdings', '"Y" is listed twice; list each ticker once with its total weight'],
+    ]);
   });
 
   it('defaults to next-day execution', () => {

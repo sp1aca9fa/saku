@@ -4,7 +4,7 @@
 // type). A state change compares the day's allocation with what the channel was last told, so a
 // run that caught up several days still reports the change, and a new channel gets the current
 // state first.
-import { CASH_USD, SAFE_STATE, Strategy, type TradingDate } from '@saku/core';
+import { CASH_USD, SAFE_STATE, type Strategy, type TradingDate } from '@saku/core';
 import { type Translate, hasText, translator } from '@saku/content';
 import type { Sessions } from '@saku/data';
 import {
@@ -23,6 +23,7 @@ import {
 } from '@saku/db';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { Logger, Notifier, PluginContext } from '../types';
+import { parseVersion } from './forward';
 
 export type AlertType =
   | 'state_change'
@@ -155,7 +156,15 @@ export async function sendStrategyAlerts(
     if (!version.ownerId) continue;
     const entry = await lastEntry(db, version.id);
     if (!entry || entry.date !== o.date) continue;
-    const strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
+    const parsed = parseVersion(version);
+    if ('error' in parsed) {
+      // Its timing is unknown: no alert is guessed; the run is incomplete and the admins told.
+      summary.failed.push(
+        `${version.name} (${version.id}): definition does not parse: ${parsed.error}`,
+      );
+      continue;
+    }
+    const { strategy } = parsed;
     let owner = owners.get(version.ownerId);
     if (!owner) {
       const language = await languageOf(db, version.ownerId);

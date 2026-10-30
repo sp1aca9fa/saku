@@ -50,8 +50,19 @@ const holdings = z
     message: 'weights must add up to 100',
   })
   // A ticker listed twice would trade only one of its weights (the trade keeps one per ticker).
-  .refine((hs) => new Set(hs.map((h) => h.ticker)).size === hs.length, {
-    message: 'each ticker at most once per allocation',
+  .superRefine((hs, ctx) => {
+    const seen = new Set<string>();
+    const repeated = new Set<string>();
+    for (const h of hs) {
+      if (seen.has(h.ticker)) repeated.add(h.ticker);
+      seen.add(h.ticker);
+    }
+    for (const t of repeated) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `"${t}" is listed twice; list each ticker once with its total weight`,
+      });
+    }
   });
 
 export const Condition = z
