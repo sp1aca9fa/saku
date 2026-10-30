@@ -11,9 +11,10 @@
 //   holdings of its declared safe state, which it holds on red days) must be an active symbol.
 // - Each such symbol must have passed the data checks over its full history (03 intro: "usable
 //   only after passing the data quality checks (04) over its full history"). Read as:
-//   - no stored canonical bar of the symbol graded red or not graded at all (`bars.status`, the
-//     per-date grade the forward record reads, rewritten by every run that grades the date, daily
-//     runs included; NULL is unknown, never green);
+//   - no stored canonical bar of the symbol on a day the market was closed (or the calendar does
+//     not cover), graded red, or not graded at all (`bars.status`, the per-date grade the forward
+//     record reads, rewritten by every run that grades the date, daily runs included; NULL is
+//     unknown, never green);
 //   - the latest full-history run (bootstrap, weekly or checks, by start, whatever its status)
 //     succeeded (one that failed may have stopped on a calculation or data fault; one still
 //     marked running was interrupted, since registration holds the jobs lock; an older pass is
@@ -39,6 +40,7 @@ import {
   isTradingDate,
   parseTicker,
 } from '@saku/core';
+import type { Sessions } from '@saku/data';
 import { type Db, activeSymbols, getSetting, schema } from '@saku/db';
 import { and, desc, eq, inArray, isNull, max, min } from 'drizzle-orm';
 
@@ -65,6 +67,8 @@ export async function registrationProblems(
   o: {
     /** The latest session whose data is final now (`dailyTarget`). */
     through: TradingDate;
+    /** The market calendar (bars on days that are not sessions are named apart). */
+    sessions: Sessions;
   },
 ): Promise<string[]> {
   const problems: string[] = [];
@@ -104,7 +108,9 @@ export async function registrationProblems(
     );
   }
   for (const ticker of used) {
-    problems.push(...(await symbolProblems(db, ticker, known.get(ticker)!, o.through, pass)));
+    problems.push(
+      ...(await symbolProblems(db, ticker, known.get(ticker)!, o.through, o.sessions, pass)),
+    );
   }
   return problems;
 }
@@ -129,6 +135,7 @@ async function symbolProblems(
   ticker: string,
   symbolId: number,
   through: TradingDate,
+  sessions: Sessions,
   pass: Pass | undefined,
 ): Promise<string[]> {
   const b = schema.bars;
@@ -142,33 +149,54 @@ async function symbolProblems(
   const problems: string[] = [];
 
   // Each stored bar's grade as the latest run that graded it set it (what the forward record
-  // reads; a daily run after the pass rewrites it): no red one, whatever the pass found.
-  const redBars = (
-    await db
-      .select({ date: b.date })
-      .from(b)
-      .where(and(eq(b.symbolId, symbolId), eq(b.status, 'red')))
-      .orderBy(b.date)
-  ).map((x) => x.date);
-  if (redBars.length > 0) {
+  // reads; a daily run after the pass rewrites it), whatever the pass found:
+  // - a bar on a day the market was closed is wrong data no check run can fix (verify grades it
+  //   red, layer A `bar_valid`): named apart, with what removes it;
+  // - a bar on a day the calendar does not cover cannot be judged: unknown;
+  // - otherwise no red bar, and no bar no run has graded (NULL is unknown, never green).
+  const closed: string[] = [];
+  const outside: string[] = [];
+  const redBars: string[] = [];
+  const ungraded: string[] = [];
+  for (const x of await db
+    .select({ date: b.date, status: b.status })
+    .from(b)
+    .where(eq(b.symbolId, symbolId))
+    .orderBy(b.date)) {
+    let session: boolean;
+    try {
+      session = sessions.isSession(x.date);
+    } catch {
+      outside.push(x.date);
+      continue;
+    }
+    if (!session) closed.push(x.date);
+    else if (x.status === 'red') redBars.push(x.date);
+    else if (x.status === null) ungraded.push(x.date);
+  }
+  const barsAre = (n: number) => `${n} stored ${n === 1 ? 'bar is' : 'bars are'}`;
+  if (closed.length > 0) {
     problems.push(
-      `${ticker}: ${redBars.length} stored ${redBars.length === 1 ? 'bar is' : 'bars are'} graded red: ` +
-        `${listed(redBars)}. Its data has not passed the checks (pnpm health --date <date> explains a day).`,
+      `${ticker}: ${closed.length} stored ${closed.length === 1 ? 'bar' : 'bars'} on days the market was ` +
+        `closed: ${listed(closed)}. The primary must withdraw them or an admin removes them ` +
+        'through the revision log.',
     );
   }
-
-  // A bar no run has graded (status NULL) is unknown, never taken as green.
-  const ungraded = (
-    await db
-      .select({ date: b.date })
-      .from(b)
-      .where(and(eq(b.symbolId, symbolId), isNull(b.status)))
-      .orderBy(b.date)
-  ).map((x) => x.date);
+  if (outside.length > 0) {
+    problems.push(
+      `${ticker}: ${barsAre(outside.length)} on days the market calendar does not cover: ` +
+        `${listed(outside)}. Update the calendar plug-in.`,
+    );
+  }
+  if (redBars.length > 0) {
+    problems.push(
+      `${ticker}: ${barsAre(redBars.length)} graded red: ${listed(redBars)}. Its data has not passed the ` +
+        'checks (pnpm health --date <date> explains a day).',
+    );
+  }
   if (ungraded.length > 0) {
     problems.push(
-      `${ticker}: ${ungraded.length} stored ${ungraded.length === 1 ? 'bar is' : 'bars are'} not graded: ` +
-        `${listed(ungraded)}. Run pnpm verify (full).`,
+      `${ticker}: ${barsAre(ungraded.length)} not graded: ${listed(ungraded)}. Run pnpm verify (full).`,
     );
   }
 

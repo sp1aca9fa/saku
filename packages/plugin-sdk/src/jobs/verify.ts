@@ -504,7 +504,11 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     ].sort((a, b) => (a.date < b.date ? -1 : 1));
     canonical.set(s.id, merged);
 
-    const dates = o.sessions.between(primary[0]!.date, o.to);
+    // The sessions from the primary's first bar, and every canonical bar's day that is not a
+    // session (layer A flags it red, `bar_valid` "not a trading day"): graded with the sessions,
+    // so such a bar is stored red with its reason, never left ungraded.
+    const closed = merged.filter((b) => !o.sessions.isSession(b.date)).map((b) => b.date);
+    const dates = [...new Set([...o.sessions.between(primary[0]!.date, o.to), ...closed])].sort();
     const sources = new Map<TradingDate, number>();
     for (const list of [primary, ...secondaries.map(([, l]) => l)]) {
       for (const b of list) sources.set(b.date, (sources.get(b.date) ?? 0) + 1);

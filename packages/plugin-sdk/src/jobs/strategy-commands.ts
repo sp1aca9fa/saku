@@ -4,6 +4,7 @@
 // too (a race could store one twice or compute on half-rebuilt bars). The CLI prints the output
 // and exits with the code.
 import type { Strategy, TradingDate } from '@saku/core';
+import type { Sessions } from '@saku/data';
 import { type Db, registerVersion } from '@saku/db';
 import { annotateStandInCorrections, recompute } from './forward';
 import { lock } from './lock';
@@ -45,12 +46,17 @@ export function registerStrategy(
     ownerId: string | null;
     /** The latest session whose data is final now (`dailyTarget`). */
     through: TradingDate;
+    /** The market calendar. */
+    sessions: Sessions;
     /** The jobs lock's folder (default: the state dir's). */
     lockDir?: string;
   },
 ): Promise<CommandOutput> {
   return withJobsLock(o.lockDir, async () => {
-    const problems = await registrationProblems(db, o.strategy, { through: o.through });
+    const problems = await registrationProblems(db, o.strategy, {
+      through: o.through,
+      sessions: o.sessions,
+    });
     if (problems.length > 0) {
       return refused(`Not registered:\n${problems.map((p) => `- ${p}`).join('\n')}`);
     }

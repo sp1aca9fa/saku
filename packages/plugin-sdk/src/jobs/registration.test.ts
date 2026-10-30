@@ -124,7 +124,7 @@ async function setup(o: { tickers?: string[]; recordsFrom?: boolean } = {}) {
 }
 
 const check = (db: Db, s = strategy(), through: string = LAST) =>
-  registrationProblems(db, s, { through });
+  registrationProblems(db, s, { through, sessions });
 
 describe('registrationProblems', () => {
   it('passes when the latest full pass covers the whole history with no red day', async () => {
@@ -290,6 +290,27 @@ describe('registrationProblems', () => {
       expect.stringMatching(
         /^AAA: 3 stored bars are graded red: 2026-01-06, 2026-01-07, 2026-01-08\./,
       ),
+    ]);
+  });
+
+  it('names bars on closed days apart, with what removes them', async () => {
+    const { db, ids, pass } = await setup();
+    await pass();
+    // A Saturday bar, graded red by verify (layer A), and one the calendar does not cover.
+    await db.insert(schema.bars).values([
+      { symbolId: ids.AAA!, date: '2026-01-10', close: 1, source: 'p', status: 'red' },
+      { symbolId: ids.AAA!, date: '2024-12-31', close: 1, source: 'p', status: 'red' },
+    ]);
+    expect(await check(db, strategy(), '2026-01-12')).toEqual([
+      'AAA: 1 stored bar on days the market was closed: 2026-01-10. The primary must withdraw ' +
+        'them or an admin removes them through the revision log.',
+      'AAA: 1 stored bar is on days the market calendar does not cover: 2024-12-31. Update the ' +
+        'calendar plug-in.',
+      // The pass is also stale and started after the (uncovered) first bar.
+      expect.stringMatching(
+        /stored bars from 2024-12-31 to before 2026-01-05 are graded by no check/,
+      ),
+      expect.stringMatching(/registration needs it through 2026-01-12/),
     ]);
   });
 

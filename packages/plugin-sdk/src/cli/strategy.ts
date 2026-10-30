@@ -99,18 +99,15 @@ if (tool === 'strategy' && command === 'check') {
     .flatMap((c) => c.calendars)
     .find((c) => c.id === 'xnys');
   if (!calendar) fail('No xnys calendar plug-in is loaded.');
+  const sessions = new Sessions(calendar!);
   let through: string;
   try {
     // The latest session whose data is final now: a full check must have graded through it.
-    through = dailyTarget(
-      new Sessions(calendar!),
-      new Date(),
-      dailyAfterOf(process.env.SAKU_DAILY_AFTER),
-    );
+    through = dailyTarget(sessions, new Date(), dailyAfterOf(process.env.SAKU_DAILY_AFTER));
   } catch (e) {
     fail(e instanceof Error ? e.message : String(e));
   }
-  finish(await registerStrategy(db, { strategy: s, ownerId, through: through! }));
+  finish(await registerStrategy(db, { strategy: s, ownerId, through: through!, sessions }));
 } else if (tool === 'strategy' && command === 'list') {
   for (const v of await allVersions(db)) {
     const record = await forwardRecord(db, v.id);

@@ -174,6 +174,34 @@ describe('verify', () => {
     expect(canonical.map((b) => b.status).sort()).toEqual(['red', 'yellow']);
   });
 
+  it('grades a primary bar on a day that is not a session red, never leaving it ungraded', async () => {
+    const { db, store } = await setup();
+    // A Saturday bar from the primary, before its sessions.
+    await store('AAA', 'p', [{ ...bars([99])[0]!, date: '2026-01-03' }]);
+    const runId = await startRun(db, 'weekly');
+    await verify(db, { runId, sessions, mode: 'full', to: '2026-01-08' });
+    const aaa = (await symbolId(db, 'AAA'))!;
+    const [bar] = await db
+      .select()
+      .from(schema.bars)
+      .where(and(eq(schema.bars.symbolId, aaa), eq(schema.bars.date, '2026-01-03')));
+    expect(bar!.status).toBe('red');
+    const [row] = await db
+      .select()
+      .from(schema.dataHealth)
+      .where(and(eq(schema.dataHealth.symbolId, aaa), eq(schema.dataHealth.date, '2026-01-03')));
+    expect(row).toMatchObject({ status: 'red' });
+    expect(row!.reasons).toContain('A.bar_valid@p');
+    // No canonical bar is left ungraded; the coverage starts at the first bar.
+    const ungraded = await db.select().from(schema.bars).where(isNull(schema.bars.status));
+    expect(ungraded).toEqual([]);
+    const [coverage] = await db
+      .select()
+      .from(schema.healthCoverage)
+      .where(eq(schema.healthCoverage.symbolId, aaa));
+    expect(coverage).toMatchObject({ fromDate: '2026-01-03', toDate: '2026-01-08' });
+  });
+
   it('grades the cash series freshness on the run date', async () => {
     const { db } = await setup();
     const runFor = async (to: string) => {

@@ -1,4 +1,5 @@
 import { Strategy } from '@saku/core';
+import { Sessions } from '@saku/data';
 import { finishRun, schema, setSetting, startRun, symbolId, upsertSymbols } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { existsSync, mkdtempSync } from 'node:fs';
@@ -8,6 +9,13 @@ import { describe, expect, it } from 'vitest';
 import { lock } from './lock';
 import { recomputeRecords, registerStrategy } from './strategy-commands';
 
+const sessions = new Sessions({
+  id: 't',
+  version: 't',
+  validFrom: '2025-01-01',
+  validTo: '2026-12-31',
+  holidays: [],
+});
 const D = ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08'] as const;
 const strategy = (execution = 'next_open') =>
   Strategy.parse({
@@ -57,6 +65,7 @@ describe('registerStrategy', () => {
       strategy: strategy(),
       ownerId: null,
       through: D[3],
+      sessions,
       lockDir: dir,
     });
     expect(out.exitCode).toBe(0);
@@ -71,6 +80,7 @@ describe('registerStrategy', () => {
       strategy: strategy('same_close'),
       ownerId: null,
       through: D[3],
+      sessions,
       lockDir: lockDir(),
     });
     expect(out.exitCode).toBe(1);
@@ -88,6 +98,7 @@ describe('registerStrategy', () => {
       strategy: strategy(),
       ownerId: null,
       through: D[3],
+      sessions,
       lockDir: dir,
     });
     expect(out).toEqual({
