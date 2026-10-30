@@ -2,6 +2,8 @@
 // Anything not understood is refused with a message, never ignored (a typo such as `--form`, or
 // `--from=<date>`, must not silently run with the default).
 
+import { isRealDate } from '../jobs/probe-report';
+
 export const JOBS = ['bootstrap', 'daily', 'weekly', 'verify', 'checks', 'probe', 'spike'] as const;
 export type Job = (typeof JOBS)[number];
 
@@ -69,7 +71,7 @@ export function parseJobArgs(argv: string[]): JobArgs | { error: string } {
   if (job === 'probe' && !report && (from !== undefined || file !== undefined)) {
     return { error: `--from and --file belong to pnpm probe --report.\n${USAGE}` };
   }
-  if (from !== undefined && job === 'probe' && !/^\d{4}-\d{2}-\d{2}$/.test(from)) {
+  if (from !== undefined && job === 'probe' && !isRealDate(from)) {
     return { error: 'Give --from as YYYY-MM-DD.' };
   }
   return {

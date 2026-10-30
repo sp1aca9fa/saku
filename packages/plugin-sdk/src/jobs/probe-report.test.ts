@@ -56,6 +56,35 @@ describe('probeReport', () => {
     expect(text).not.toMatch(/^2026-03-06/m);
   });
 
+  it('sorts out-of-order lines and says what the last probe was', () => {
+    const text = probeReport({ lines: [...lines].reverse(), unreadable: 0 });
+    expect(text).toMatch(/2026-03-06\s+2026-03-06 16:30\s+30\s+2026-03-06 18:30\s+150\s+1\s*$/m);
+    expect(text).toContain('last probe: 2026-03-10 17:00, ok');
+    expect(text).toContain('early-close days');
+  });
+
+  it('shows a source whose last probe failed, and one with only errors', () => {
+    const text = probeReport({
+      lines: [
+        bar('2026-03-06T21:30:00.000Z', '2026-03-06', 10),
+        { at: '2026-03-07T10:00:00.000Z', source: 'alpha', ticker: 'T', error: 'timeout' },
+        { at: '2026-03-07T10:00:00.000Z', source: 'beta', ticker: 'T', error: 'no bars' },
+      ],
+      unreadable: 0,
+    });
+    expect(text).toContain('last probe: 2026-03-07 05:00, error: timeout');
+    expect(text).toContain('last probe: 2026-03-07 05:00, error: no bars');
+    expect(text).toContain('Summary beta: dates seen 0; last change after close: no settled dates');
+  });
+
+  it('has no settled dates when only one probe remains', () => {
+    const text = probeReport({
+      lines: [bar('2026-03-06T21:30:00.000Z', '2026-03-06', 10)],
+      unreadable: 0,
+    });
+    expect(text).toContain('no settled dates (1 left out, may still change)');
+  });
+
   it('says so with no lines', () => {
     expect(probeReport({ lines: [], unreadable: 0 })).toContain('No probe lines.');
   });
@@ -71,11 +100,13 @@ describe('readProbeFile', () => {
         '{not json',
         JSON.stringify({ source: 'a' }),
         JSON.stringify({ at: 'x', source: 'a' }),
+        JSON.stringify({ ...bar('2026-03-06T21:30:00.000Z', '2026-02-30', 1) }),
+        JSON.stringify({ ...bar('2026-03-06T21:30:00.000Z', '2026-13-45', 1) }),
         '',
       ].join('\n'),
     );
     const r = readProbeFile(file);
     expect(r.lines).toHaveLength(1);
-    expect(r.unreadable).toBe(3);
+    expect(r.unreadable).toBe(5);
   });
 });

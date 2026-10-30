@@ -34,6 +34,12 @@ export function closeInstant(date: string): number {
   throw new Error(`No 16:00 New York close for ${date}.`);
 }
 
+/** A real calendar date `YYYY-MM-DD` (2026-02-30 is not). */
+export function isRealDate(d: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+  return new Date(`${d}T00:00:00Z`).toISOString().slice(0, 10) === d;
+}
+
 /** Reads the probe file: the lines that parse, and how many lines did not. */
 export function readProbeFile(file: string): { lines: ProbeLine[]; unreadable: number } {
   const lines: ProbeLine[] = [];
@@ -46,7 +52,7 @@ export function readProbeFile(file: string): { lines: ProbeLine[]; unreadable: n
         typeof l.at === 'string' &&
         !Number.isNaN(Date.parse(l.at)) &&
         typeof l.source === 'string' &&
-        (l.date === undefined || /^\d{4}-\d{2}-\d{2}$/.test(l.date));
+        (l.date === undefined || (typeof l.date === 'string' && isRealDate(l.date)));
       if (ok) lines.push(l);
       else unreadable++;
     } catch {
@@ -66,7 +72,7 @@ export function probeReport(o: { lines: ProbeLine[]; unreadable: number; from?: 
   const out: string[] = [];
   out.push(
     'Probe report. Times are probe times (the hourly check), at most one hour late; New York time;',
-    '"after close" is minutes after that date\'s 16:00 New York close.',
+    '"after close" is minutes after that date\'s 16:00 New York close, also on early-close days (13:00).',
   );
   const lines = o.lines.filter((l) => (o.from ? (l.date ?? l.at.slice(0, 10)) >= o.from : true));
   if (o.unreadable > 0)
@@ -75,10 +81,19 @@ export function probeReport(o: { lines: ProbeLine[]; unreadable: number; from?: 
   if (sources.length === 0) out.push('No probe lines.');
   for (const source of sources) {
     const mine = lines.filter((l) => l.source === source);
-    const bars = mine.filter((l) => l.date);
+    const bars = mine.filter((l) => l.date).sort((a, b) => a.at.localeCompare(b.at));
     const latest = bars.reduce((m, l) => (l.at > m ? l.at : m), '');
     const rows = finalization(bars).sort((a, b) => a.date.localeCompare(b.date));
     out.push('', `Source ${source}`);
+    const lastProbe = mine.reduce((m, l) => (l.at > m.at ? l : m));
+    const lastAt = Date.parse(lastProbe.at);
+    const lastOk = mine.some((l) => l.at === lastProbe.at && l.date);
+    out.push(
+      `last probe: ${nyClock(lastAt)}, ` +
+        (lastOk
+          ? 'ok'
+          : `error: ${mine.find((l) => l.at === lastProbe.at && l.error)?.error ?? 'unknown'}`),
+    );
     out.push('date        first seen (NY)   after close  last change (NY)  after close  changes');
     const settled: number[] = [];
     let open = 0;

@@ -28,6 +28,7 @@ describe('parseJobArgs', () => {
       ['probe', '--file', 'x'],
       ['probe', '--report', '--report'],
       ['probe', '--report', '--from', 'soon'],
+      ['probe', '--report', '--from', '2026-02-30'],
       ['probe', '--report', '--file'],
       ['probe', '--report', '--bogus'],
     ])
