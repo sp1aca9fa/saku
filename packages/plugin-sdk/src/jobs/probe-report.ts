@@ -1,8 +1,13 @@
 // `pnpm probe --report`: the probe file as a short table. Per bar source and date, when the bar
 // first appeared and when its values last changed, in New York time and in minutes after that
-// date's 16:00 close (negative: before it). Reads a local file, sends nothing.
-// An early close (13:00) is not special-cased: the minutes are always from 16:00.
+// date's close (negative: before it). Reads a local file, sends nothing.
+// The close is 16:00 New York, or the calendar's early close (13:00) on a half-day (requirements
+// 04, Calendars). Where the calendar cannot say whether a date closed early (outside its
+// early-close range, not a session, or no calendar), the minutes count from 16:00, the row says
+// so, and the date is left out of the summary: read as a full day, a half-day's delay would look
+// three hours shorter and could shorten the daily run's wait.
 import { readFileSync } from 'node:fs';
+import type { Sessions } from '@saku/data';
 import { finalization, type ProbeLine } from './probe';
 
 const TZ = 'America/New_York';
@@ -22,16 +27,39 @@ function nyClock(ms: number): string {
   return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
 }
 
-/** The instant (ms) of 16:00 New York on a trading date. */
-export function closeInstant(date: string): number {
+/** The regular close of a US equity session, New York time. */
+const REGULAR_CLOSE = '16:00';
+
+/** The instant (ms) of a New York wall-clock time (`HH:MM`, default the 16:00 close) on a date. */
+export function closeInstant(date: string, time: string = REGULAR_CLOSE): number {
   const [y, m, d] = date.split('-').map(Number) as [number, number, number];
-  const wall = Date.UTC(y, m - 1, d, 16, 0);
-  // New York is 4 or 5 hours behind UTC; the offset that reads back as 16:00 is the right one.
+  const [hh, mm] = time.split(':').map(Number) as [number, number];
+  const wall = Date.UTC(y, m - 1, d, hh, mm);
+  // New York is 4 or 5 hours behind UTC; the offset that reads back as the wall time is the one.
   for (const hours of [4, 5]) {
     const t = wall + hours * 3_600_000;
-    if (nyClock(t) === `${date} 16:00`) return t;
+    if (nyClock(t) === `${date} ${time}`) return t;
   }
-  throw new Error(`No 16:00 New York close for ${date}.`);
+  throw new Error(`No ${time} New York close for ${date}.`);
+}
+
+/** The close a date's minutes count from, its label, and whether the calendar knows it. */
+interface CloseBasis {
+  at: number;
+  label: string;
+  known: boolean;
+}
+
+function closeBasis(date: string, sessions: Sessions | undefined): CloseBasis {
+  const unknown = { at: closeInstant(date), label: `${REGULAR_CLOSE} ?`, known: false };
+  if (!sessions) return unknown;
+  const { validFrom, validTo, earlyCloses } = sessions.calendar;
+  if (date < validFrom || date > validTo || !sessions.isSession(date)) return unknown;
+  const kind = sessions.closeOf(date);
+  if (kind === 'unknown') return unknown;
+  if (kind === 'regular') return { at: closeInstant(date), label: REGULAR_CLOSE, known: true };
+  const time = earlyCloses!.time;
+  return { at: closeInstant(date, time), label: `${time} early`, known: true };
 }
 
 /** A real calendar date `YYYY-MM-DD` (2026-02-30 is not). */
@@ -68,11 +96,20 @@ const median = (xs: number[]) => {
   return n % 2 ? s[(n - 1) / 2]! : (s[n / 2 - 1]! + s[n / 2]!) / 2;
 };
 
-export function probeReport(o: { lines: ProbeLine[]; unreadable: number; from?: string }): string {
+export function probeReport(o: {
+  lines: ProbeLine[];
+  unreadable: number;
+  from?: string;
+  /** The NYSE calendar, for early closes; without it every date reads "16:00 ?". */
+  sessions?: Sessions;
+}): string {
   const out: string[] = [];
   out.push(
     'Probe report. Times are probe times (the hourly check), at most one hour late; New York time;',
-    '"after close" is minutes after that date\'s 16:00 New York close, also on early-close days (13:00).',
+    '"after close" is minutes after the date\'s close, shown under "close": 16:00, or the early close',
+    `on a half-day ("${o.sessions?.calendar.earlyCloses?.time ?? '13:00'} early") from calendar ` +
+      `${o.sessions?.calendar.version ?? '(none loaded)'}; "16:00 ?" where the calendar`,
+    'cannot say whether the date closed early (counted from 16:00, left out of the summary).',
   );
   const lines = o.lines.filter((l) => (o.from ? (l.date ?? l.at.slice(0, 10)) >= o.from : true));
   if (o.unreadable > 0)
@@ -94,19 +131,25 @@ export function probeReport(o: { lines: ProbeLine[]; unreadable: number; from?: 
           ? 'ok'
           : `error: ${mine.find((l) => l.at === lastProbe.at && l.error)?.error ?? 'unknown'}`),
     );
-    out.push('date        first seen (NY)   after close  last change (NY)  after close  changes');
+    out.push(
+      'date        close        first seen (NY)   after close  last change (NY)  after close  changes',
+    );
     const settled: number[] = [];
     let open = 0;
+    let unknownClose = 0;
     for (const r of rows) {
-      const close = closeInstant(r.date);
+      const basis = closeBasis(r.date, o.sessions);
+      const close = basis.at;
       const first = Date.parse(r.first);
       const change = Date.parse(r.lastChange);
       const still = r.lastChange === latest;
       if (still) open++;
+      else if (!basis.known) unknownClose++;
       else settled.push(Math.round((change - close) / 60_000));
       out.push(
         [
           r.date,
+          basis.label.padEnd(11),
           nyClock(first).padEnd(17),
           String(Math.round((first - close) / 60_000)).padStart(11),
           nyClock(change).padEnd(17),
@@ -125,7 +168,9 @@ export function probeReport(o: { lines: ProbeLine[]; unreadable: number; from?: 
         (settled.length > 0
           ? `median ${median(settled)} min, maximum ${Math.max(...settled)} min`
           : 'no settled dates') +
-        ` (${open} left out, may still change); error lines ${errors.length}` +
+        ` (${open} left out, may still change` +
+        (unknownClose > 0 ? `; ${unknownClose} left out, close time unknown` : '') +
+        `); error lines ${errors.length}` +
         (top ? `, most frequent: ${top[0]} (${top[1]}x)` : '') +
         '.',
     );

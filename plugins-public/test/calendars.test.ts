@@ -49,6 +49,44 @@ describe('calendars', () => {
     expect(holidays('xnys', 1995)).not.toContain('1995-01-16'); // no MLK Day before 1998
   });
 
+  // NYSE holiday and early closings calendars (2026-2028 announcement of 2025-12-23 for 2026-2027).
+  describe('NYSE early closes', () => {
+    const xnys = calendars.calendars.find((c) => c.id === 'xnys')!;
+    const early = (year: number) => xnys.earlyCloses!.dates.filter((d) => d.startsWith(`${year}-`));
+
+    it('lists the published half-days at 13:00', () => {
+      expect(xnys.earlyCloses!.time).toBe('13:00');
+      expect(early(2024)).toEqual(['2024-07-03', '2024-11-29', '2024-12-24']);
+      expect(early(2025)).toEqual(['2025-07-03', '2025-11-28', '2025-12-24']);
+      // July 3 is the Independence Day holiday (July 4 a Saturday): no July 2 or 3 early close.
+      expect(early(2026)).toEqual(['2026-11-27', '2026-12-24']);
+      // July 4 a Sunday (July 5 closed); December 24 is the Christmas holiday.
+      expect(early(2027)).toEqual(['2027-11-26']);
+      // July 4 a Monday, December 24 a Saturday: the day after Thanksgiving only.
+      expect(early(2016)).toEqual(['2016-11-25']);
+    });
+
+    it('is complete only from 2013 through 2027: other years are unknown', () => {
+      expect(xnys.earlyCloses!.from).toBe('2013-01-01');
+      expect(xnys.earlyCloses!.to).toBe('2027-12-31');
+      expect(early(2012)).toEqual([]);
+      expect(early(2028)).toEqual([]);
+    });
+
+    it('never lists a holiday or a weekend, and stays sorted inside its range', () => {
+      const e = xnys.earlyCloses!;
+      expect([...e.dates].sort()).toEqual(e.dates);
+      for (const d of e.dates) {
+        expect(new Date(`${d}T00:00:00Z`).getUTCDay() % 6).not.toBe(0);
+        expect(xnys.holidays).not.toContain(d);
+        expect(d >= e.from && d <= e.to).toBe(true);
+      }
+      // Every year in the range has the day after Thanksgiving.
+      for (let y = 2013; y <= 2027; y++)
+        expect(early(y).some((d) => d.slice(5, 7) === '11')).toBe(true);
+    });
+  });
+
   it('Federal Reserve: Saturday holidays are not moved', () => {
     expect(holidays('us-fed', 2026)).toEqual([
       '2026-01-01',

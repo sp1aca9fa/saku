@@ -31,4 +31,47 @@ describe('Sessions', () => {
   it('refuses dates the calendar does not cover', () => {
     expect(() => s.isSession('2027-01-04')).toThrow(/outside/);
   });
+
+  it('has no early-close knowledge without a list', () => {
+    expect(s.closeOf('2026-01-02')).toBe('unknown');
+  });
+});
+
+describe('Sessions.closeOf', () => {
+  const early: Calendar = {
+    ...cal,
+    earlyCloses: {
+      from: '2026-06-01',
+      to: '2026-12-31',
+      time: '13:00',
+      dates: ['2026-11-27', '2026-12-24'],
+    },
+  };
+  const s = new Sessions(early);
+
+  it('reads early, regular, or unknown outside the early-close range', () => {
+    expect(s.closeOf('2026-11-27')).toBe('early');
+    expect(s.closeOf('2026-11-30')).toBe('regular');
+    expect(s.closeOf('2026-06-01')).toBe('regular');
+    // Before the range: unknown, never a full day.
+    expect(s.closeOf('2026-05-29')).toBe('unknown');
+  });
+
+  it('throws for a date with no session or outside the calendar', () => {
+    expect(() => s.closeOf('2026-11-28')).toThrow(/not a session/);
+    expect(() => s.closeOf('2026-01-19')).toThrow(/not a session/);
+    expect(() => s.closeOf('2027-01-04')).toThrow(/outside/);
+  });
+
+  it('refuses a table whose early closes are not sessions inside their range', () => {
+    const bad = (e: Partial<NonNullable<Calendar['earlyCloses']>>) => () =>
+      new Sessions({ ...early, earlyCloses: { ...early.earlyCloses!, ...e } });
+    expect(bad({ dates: ['2026-11-28'] })).toThrow(/not a session/); // a Saturday
+    expect(bad({ dates: ['2026-01-19'], from: '2026-01-01' })).toThrow(/not a session/); // a holiday
+    expect(bad({ dates: ['2026-05-29'] })).toThrow(/outside 2026-06-01/);
+    expect(bad({ to: '2027-01-31' })).toThrow(/range/);
+    expect(bad({ from: '2026-12-31', to: '2026-06-01' })).toThrow(/range/);
+    expect(bad({ time: '1pm' })).toThrow(/HH:MM/);
+    expect(bad({ time: '24:00' })).toThrow(/HH:MM/);
+  });
 });

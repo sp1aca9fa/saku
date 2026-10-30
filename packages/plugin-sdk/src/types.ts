@@ -2,6 +2,7 @@
 // array per kind from `src/index.ts`, only the kinds it has.
 import type {
   Calendar,
+  EarlyCloses,
   FxRate,
   FxValue,
   FxWithdrawal,
@@ -19,6 +20,7 @@ import type { PoliteHttp } from './http';
 
 export type {
   Calendar,
+  EarlyCloses,
   FxRate,
   FxValue,
   FxWithdrawal,

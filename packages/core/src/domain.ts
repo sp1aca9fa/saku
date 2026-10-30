@@ -157,6 +157,20 @@ export interface Calendar {
   validTo: TradingDate;
   /** Weekdays with no session. Weekends are always closed. */
   holidays: TradingDate[];
-  /** Weekdays with a shortened session. */
-  earlyCloses?: TradingDate[];
+  /**
+   * Sessions that close early, complete only inside `from`..`to` (within the valid range). Outside
+   * it, or without this field, whether a session closed early is unknown: never read as a full
+   * day.
+   */
+  earlyCloses?: EarlyCloses;
+}
+
+/** A calendar's early closes: one close time, the dates and the range the list is complete for. */
+export interface EarlyCloses {
+  from: TradingDate;
+  to: TradingDate;
+  /** The early close as a wall-clock time `HH:MM` in the market's own time zone. */
+  time: string;
+  /** Sessions (never a weekend or holiday) that close at `time`. */
+  dates: TradingDate[];
 }

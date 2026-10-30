@@ -12,7 +12,8 @@
 //   pnpm probe             A1: the last sessions of one ticker from every bar source, to a log
 //   pnpm probe --report [--from <YYYY-MM-DD>] [--file <path>]
 //                          A1: the probe file as a table (first seen and last change per bar
-//                          source and date, minutes after the 16:00 New York close); no request
+//                          source and date, minutes after the close: 16:00 New York, or 13:00
+//                          on an early close from the NYSE calendar); no request
 //   pnpm spike             A1: the gate, every NYSE session from the first daily run to the
 //                          latest final day (a session without a run fails; the latest one is
 //                          pending until its run finishes); passed needs 20 judged sessions
@@ -50,11 +51,20 @@ if ('error' in args) {
 }
 const { job, force } = args;
 if (job === 'probe' && args.report) {
-  // A local file only: no lock, no database, no plug-ins.
+  // A local file and the NYSE calendar table only: no lock, no database, no request.
   const { probeReport, readProbeFile } = await import('../jobs/probe-report');
   const { stateDir } = await import('@saku/db/env');
   const read = readProbeFile(args.file ?? join(stateDir(), 'probe.jsonl'));
-  console.log(probeReport({ ...read, ...(args.from !== undefined && { from: args.from }) }));
+  const xnys = (await loadPlugins()).calendars
+    .flatMap((c) => c.calendars)
+    .find((c) => c.id === 'xnys');
+  console.log(
+    probeReport({
+      ...read,
+      ...(args.from !== undefined && { from: args.from }),
+      ...(xnys && { sessions: new Sessions(xnys) }),
+    }),
+  );
   process.exit(0);
 }
 // `pnpm spike --from <date>`: the counted range starts at the first session on or after it.
