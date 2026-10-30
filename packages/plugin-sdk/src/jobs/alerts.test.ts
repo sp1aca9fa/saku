@@ -368,7 +368,7 @@ describe('admin alerts', () => {
         target: 'ops',
         text: [
           'Saku: the daily run for 2026-01-05 did not finish',
-          'What failed (1):',
+          'Details (1):',
           '- incomplete: tiingo',
           'It runs again at the next hourly check. The job log on the server has the details.',
           'Data health: unknown (the run did not finish).',
@@ -379,13 +379,15 @@ describe('admin alerts', () => {
 
   it('lists 5 failures one per line and counts the rest exactly (EN, JA)', async () => {
     const failures = Array.from({ length: 7 }, (_, i) => `Version ${i + 1} (v${i + 1}): broken`);
-    for (const [language, more] of [
+    for (const [language, details, more] of [
       [
         'en',
+        'Details (7):',
         "...and 2 more. The full list is in the run's error (job_runs.error) and the job log on the server.",
       ],
       [
         'ja',
+        '詳細(7 件):',
         'ほか 2 件。全件は実行記録のエラー欄(job_runs.error)とサーバーのジョブログにあります。',
       ],
     ] as const) {
@@ -398,7 +400,7 @@ describe('admin alerts', () => {
       const t = translator(language);
       expect(sent[0]!.text.split('\n')).toEqual([
         t('alerts.jobFailure.title', { job: 'daily', date: '2026-01-05' }),
-        t('alerts.jobFailure.failed', { count: 7 }),
+        details,
         ...failures.slice(0, 5).map((f) => `- ${f}`),
         more,
         t('alerts.jobFailure.body'),

@@ -17,7 +17,7 @@ import { describe, expect, it } from 'vitest';
 import { emptyPlugins } from '../registry';
 import type { BarSource, IssuerSource, Notifier, PluginInfo, SeriesSource } from '../types';
 import { type RunOptions, runJob } from './run';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
 
 const sessions = new Sessions({
@@ -195,6 +195,143 @@ describe('a daily run', () => {
     expect(r.error).toContain('disk full');
     expect(o.hooks).toEqual([]);
     expect(sent.some((m) => m.target === 'ops' && m.text.includes('did not finish'))).toBe(true);
+  });
+
+  it('keeps what failed before a throw; the alert names the thrown error right after "incomplete:"', async () => {
+    const { db, version } = await setup();
+    // A version that does not parse adds a per-item failure line before the throw.
+    const broken = await registerVersion(db, {
+      ownerId: version.ownerId,
+      name: 'Old',
+      at: new Date('2026-01-13T22:00:00Z'),
+      strategy: {
+        name: 'Old',
+        account: 'taxable',
+        safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [],
+        allocations: [
+          {
+            name: 'Calm',
+            holdings: [
+              { ticker: 'AAA', weight: 50 },
+              { ticker: 'AAA', weight: 50 },
+            ],
+          },
+        ],
+      },
+    });
+    const { notifier, sent } = fakeNotifier();
+    const o = options(notifier, {
+      afterDaily: async () => {
+        throw new Error('disk full');
+      },
+    });
+    const r = await runJob(db, plugins([barSource('p', true), barSource('s')]), o);
+    expect(r.ok).toBe(false);
+    const old = `Old (${broken.id}): definition does not parse`;
+    // job_runs.error: run order, the thrown error last and in full.
+    const [run] = await db.select().from(schema.jobRuns);
+    for (const error of [r.error!, run!.error!]) {
+      expect(error).toMatch(/^incomplete: p\b/);
+      expect(error).toContain(old);
+      expect(error.indexOf(old)).toBeLessThan(error.indexOf('Error: disk full'));
+    }
+    expect(run).toMatchObject({ status: 'failed', heartbeatSent: false });
+    const failure = sent.find((m) => m.target === 'ops' && m.text.includes('did not finish'));
+    const lines = failure!.text.split('\n');
+    const at = (prefix: string) => lines.findIndex((l) => l.startsWith(prefix));
+    expect(at('- incomplete: p')).toBeGreaterThan(0);
+    expect(at('- Error: disk full')).toBe(at('- incomplete: p') + 1);
+    expect(at(`- ${old}`)).toBe(at('- Error: disk full') + 1);
+  });
+
+  /** A database error as the driver wraps it: the SQL text first, the reason in `cause`. */
+  const queryError = (reason: string) =>
+    new Error('Failed query: insert into "backups" ("at") values (?)\nparams: 1', {
+      cause: new Error(reason),
+    });
+
+  it('a run that cannot be recorded still tells the admins, the reason right after "incomplete:"', async () => {
+    const { db, version } = await setup();
+    // A version that does not parse adds a per-item failure line, listed after the run's own.
+    const broken = await registerVersion(db, {
+      ownerId: version.ownerId,
+      name: 'Old',
+      at: new Date('2026-01-13T22:00:00Z'),
+      strategy: {
+        name: 'Old',
+        account: 'taxable',
+        safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [],
+        allocations: [
+          {
+            name: 'Calm',
+            holdings: [
+              { ticker: 'AAA', weight: 50 },
+              { ticker: 'AAA', weight: 50 },
+            ],
+          },
+        ],
+      },
+    });
+    // finishRun fails (the run row stays as started).
+    await db.run(
+      sql`CREATE TRIGGER job_runs_locked BEFORE UPDATE ON job_runs BEGIN SELECT RAISE(ABORT, 'database is locked'); END`,
+    );
+    const { notifier, sent } = fakeNotifier();
+    const o = options(notifier, {
+      afterDaily: async () => {
+        throw queryError('disk I/O error');
+      },
+    });
+    const r = await runJob(db, plugins([barSource('p', true), barSource('s')]), o);
+    expect(r.ok).toBe(false);
+    const failure = sent.find((m) => m.target === 'ops' && m.text.includes('did not finish'));
+    const lines = failure!.text.split('\n');
+    const at = (prefix: string) => lines.findIndex((l) => l.startsWith(prefix));
+    expect(at('- incomplete: p')).toBeGreaterThan(0);
+    // The reasons, not the SQL text.
+    expect(lines[at('- incomplete: p') + 1]).toBe('- Error: disk I/O error');
+    expect(lines[at('- incomplete: p') + 2]).toMatch(/^- run not recorded: .*database is locked$/);
+    expect(at(`- Old (${broken.id}): definition does not parse`)).toBe(at('- incomplete: p') + 3);
+    expect(failure!.text).not.toContain('Failed query');
+    const [run] = await db.select().from(schema.jobRuns);
+    expect(run).toMatchObject({ status: 'running', finishedAt: null });
+  });
+
+  it('a complete run that cannot be recorded is reported to the admins as not finished', async () => {
+    const { db } = await setup();
+    await db.run(
+      sql`CREATE TRIGGER job_runs_locked BEFORE UPDATE ON job_runs BEGIN SELECT RAISE(ABORT, 'database is locked'); END`,
+    );
+    const { notifier, sent } = fakeNotifier();
+    const r = await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier));
+    expect(r.ok).toBe(false);
+    const failure = sent.find((m) => m.target === 'ops' && m.text.includes('did not finish'));
+    expect(failure!.text).toMatch(/\n- run not recorded: .*database is locked\n/);
+    expect(failure!.text).not.toContain('Failed query');
+  });
+
+  it('a database error is told by its reason; job_runs.error keeps the SQL text and the cause', async () => {
+    const { db } = await setup();
+    const { notifier, sent } = fakeNotifier();
+    const o = options(notifier, {
+      afterDaily: async () => {
+        throw queryError('disk I/O error');
+      },
+    });
+    const r = await runJob(db, plugins([barSource('p'), barSource('s')]), o);
+    expect(r.ok).toBe(false);
+    const [run] = await db.select().from(schema.jobRuns);
+    for (const error of [r.error!, run!.error!]) {
+      expect(error).toContain('Failed query: insert into "backups"');
+      expect(error).toContain('Caused by: Error: disk I/O error');
+    }
+    const failure = sent.find((m) => m.target === 'ops' && m.text.includes('did not finish'));
+    expect(failure!.text).toContain('\n- Error: disk I/O error\n');
+    expect(failure!.text).not.toContain('Failed query');
   });
 
   it('an undelivered alert leaves the run incomplete (tried again at the next check)', async () => {

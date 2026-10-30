@@ -96,8 +96,12 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     ...(incomplete.length ? [`incomplete: ${incomplete.join(', ')}`] : []),
     ...failures,
   ];
-  /** The failure lines the admins are told (a thrown error by its first line). */
-  let told: string[] = [];
+  /**
+   * What stopped the run itself (a thrown error, a run row not recorded), one line each: the
+   * alert lists these right after the "incomplete:" line, so they are never among the lines
+   * counted as "and N more".
+   */
+  const stopped: string[] = [];
   try {
     const infos = allInfos(plugins);
     await savePluginInfos(db, infos, now);
@@ -226,7 +230,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         ...told(r, r.withdrawnValues, 'withdrawn'),
       ]);
       const failing = reports.filter((r) => r.stopped || r.failed.length > 0);
-      incomplete.push(...failing.filter(countsForRun).map((r) => r.source));
+      for (const r of failing.filter(countsForRun)) markIncomplete(r.source);
       // Best effort (issuer data): logged, graded yellow by verify (the fund's staleness and the
       // day's `issuer_unavailable`, which the admins are told), the run still complete.
       for (const r of failing.filter((x) => !countsForRun(x))) {
@@ -387,18 +391,16 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     // backup was made.
     if (job === 'daily') await o.afterDaily?.();
     ok = incomplete.length === 0 && failures.length === 0;
-    if (!ok) {
-      told = collected();
-      error = told.join('; ');
-    }
+    if (!ok) error = collected().join('; ');
     if (ok && (job === 'daily' || job === 'weekly'))
       heartbeatSent = (await o.onComplete?.(job)) ?? false;
   } catch (e) {
     ok = false;
-    const thrown = e instanceof Error ? (e.stack ?? e.message) : String(e);
+    const thrown = fullText(e);
     log.warn('Run failed', { error: thrown });
-    // What failed before the throw is kept, the thrown error last (in full: its stack).
-    told = [...collected(), thrown.split('\n')[0]!];
+    // What failed before the throw is kept; job_runs.error keeps the run order with the thrown
+    // error last, in full (its stack and cause).
+    stopped.push(alertLine(e));
     error = [...collected(), thrown].join('; ');
   } finally {
     try {
@@ -406,15 +408,18 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     } catch (e) {
       // Still tell the admins below; the run row stays as started.
       ok = false;
-      log.warn('Run not recorded', { error: String(e) });
-      told = [...told, `run not recorded: ${String(e).split('\n')[0]}`];
+      log.warn('Run not recorded', { error: fullText(e) });
+      stopped.push(`run not recorded: ${alertLine(e)}`);
     }
     if (!ok) {
+      // The "incomplete:" line first, then what stopped the run, then each failure in run order.
+      const c = collected();
+      const lead = incomplete.length > 0 ? 1 : 0;
       try {
         const sent = await sendJobFailure(db, {
           ...alerting,
           job,
-          failures: told,
+          failures: [...c.slice(0, lead), ...stopped, ...c.slice(lead)],
           ...(health && { health }),
         });
         if (sent.failed.length) log.warn('Admin alert not delivered', { failed: sent.failed });
@@ -425,6 +430,31 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
   }
   log.info(ok ? `${job} done` : `${job} not complete: ${error}`);
   return { runId, ok, ...(error && { error }) };
+}
+
+/**
+ * An error in full for job_runs.error and the log: its stack (or message), then its causes'
+ * (up to 5 deep, so a cause chain that loops still ends).
+ */
+function fullText(e: unknown, depth = 0): string {
+  const text = e instanceof Error ? (e.stack ?? e.message) : String(e);
+  return e instanceof Error && e.cause !== undefined && depth < 5
+    ? `${text}\nCaused by: ${fullText(e.cause, depth + 1)}`
+    : text;
+}
+
+/**
+ * An error's first line for the admins' alert. A database error whose first line is the SQL text
+ * ("Failed query: ...") says nothing about why: its cause's first line is shown instead (the full
+ * text, both included, stays in job_runs.error and the log).
+ */
+function alertLine(e: unknown): string {
+  const first = (x: unknown) =>
+    (x instanceof Error ? (x.stack ?? x.message) : String(x)).split('\n')[0]!;
+  const line = first(e);
+  return e instanceof Error && e.cause !== undefined && /^(\w+: )?Failed query:/.test(line)
+    ? first(e.cause)
+    : line;
 }
 
 function summary(r: SourceReport): string {

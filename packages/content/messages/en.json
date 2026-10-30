@@ -30,7 +30,7 @@
     "reasons": "Details: {reasons}.",
     "jobFailure": {
       "title": "Saku: the {job} run for {date} did not finish",
-      "failed": "What failed ({count}):",
+      "failed": "Details ({count}):",
       "more": "...and {count} more. The full list is in the run's error (job_runs.error) and the job log on the server.",
       "body": "It runs again at the next hourly check. The job log on the server has the details."
     },
