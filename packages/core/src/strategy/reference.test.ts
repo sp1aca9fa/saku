@@ -4,6 +4,7 @@ import { refBacktest, refEvaluate } from '@saku/reference';
 import { describe, expect, it } from 'vitest';
 import type { RawBar } from '../domain';
 import { backtest } from './backtest';
+import type { StrategyDay } from './engine';
 import { evaluate } from './engine';
 import { Strategy } from './schema';
 
@@ -122,5 +123,41 @@ describe('core vs reference', () => {
         });
       });
     }
+  }
+});
+
+describe('core vs reference: a reorder of the same holdings', () => {
+  const mix = [
+    { ticker: 'X', weight: 40 },
+    { ticker: 'Y', weight: 60 },
+  ];
+  const reordered = [mix[1]!, mix[0]!];
+  const other = [
+    { ticker: 'X', weight: 70 },
+    { ticker: 'Y', weight: 30 },
+  ];
+  const cash = [{ ticker: 'CASH_USD', weight: 100 }];
+  for (const execution of ['next_open', 'next_close', 'same_close'] as const) {
+    it(`agrees on switches and equity, ${execution}`, () => {
+      const bars = { X: walk(7, 60, 0.04), Y: walk(107, 60, 0.02) };
+      const cycle = [mix, reordered, reordered, mix, other, other, reordered, cash, mix, reordered];
+      const days: StrategyDay[] = bars.X.map((b, i) => ({
+        date: b.date,
+        signals: {},
+        allocation: `a${i % cycle.length}`,
+        holdings: cycle[i % cycle.length]!,
+        ties: [],
+      }));
+      const strategy = { execution, costs: { slippageBps: 5, feePct: 0.1 } };
+      const cashRate = (date: string) => 1 + (Date.parse(date) % 7) / 10;
+      const a = backtest({ strategy, days, bars, cashRate });
+      const b = refBacktest(strategy, days, bars, cashRate);
+      // Per 10-day cycle: mix -> other -> reordered mix -> cash -> mix, 4 switches (reorders: none).
+      expect(a.switches).toBe(b.switches);
+      expect(a.switches).toBe(4 * 6);
+      a.points.forEach((p, i) => {
+        expect(Math.abs(p.equity / b.equity[i]! - 1)).toBeLessThanOrEqual(1e-9);
+      });
+    });
   }
 });

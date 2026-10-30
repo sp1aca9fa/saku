@@ -65,9 +65,20 @@ function assetReturn(prev: RawBar, bar: RawBar, segment: Segment, ticker: string
 const targetWeights = (holdings: Holding[]) =>
   Object.fromEntries(holdings.map((h) => [h.ticker, h.weight / 100]));
 
-const sameHoldings = (a: Holding[], b: Holding[]) =>
-  a.length === b.length &&
-  a.every((h, i) => h.ticker === b[i]!.ticker && h.weight === b[i]!.weight);
+/**
+ * Two holdings lists are the same position when they list the same tickers at the same weights,
+ * in any order (requirements 05 positions; 13 testfol parity: a reorder is no trade, so no
+ * switch and no cost). Weights compare exactly. Compared as sorted (ticker, weight) pairs, so a
+ * repeated ticker matches only the same repeats: duplicates are never merged into one weight.
+ */
+export function sameHoldings(a: readonly Holding[], b: readonly Holding[]): boolean {
+  if (a.length !== b.length) return false;
+  const order = (x: Holding, y: Holding) =>
+    x.ticker < y.ticker ? -1 : x.ticker > y.ticker ? 1 : x.weight - y.weight;
+  const sa = [...a].sort(order);
+  const sb = [...b].sort(order);
+  return sa.every((h, i) => h.ticker === sb[i]!.ticker && h.weight === sb[i]!.weight);
+}
 
 export function backtest(input: BacktestInput): BacktestResult {
   const { days, strategy } = input;

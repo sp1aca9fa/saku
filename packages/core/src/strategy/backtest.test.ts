@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { RawBar } from '../domain';
-import { backtest, parseTicker, summary } from './backtest';
+import { backtest, parseTicker, sameHoldings, summary } from './backtest';
 import type { StrategyDay } from './engine';
+import type { Holding } from './schema';
 
 const D = ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08'];
 const bar = (date: string, close: number, extra: Partial<RawBar> = {}): RawBar => ({
@@ -150,4 +151,115 @@ describe('backtest', () => {
     expect(s.maxDrawdown).toBeCloseTo(-0.2, 12);
     expect(s.cagr).toBeCloseTo(1.1 ** (365.25 / 365) - 1, 12);
   });
+});
+
+describe('holdings compare order-insensitively (a reorder is no trade)', () => {
+  const A: Holding[] = [
+    { ticker: 'SPY', weight: 50 },
+    { ticker: 'SSO', weight: 50 },
+  ];
+  const B: Holding[] = [
+    { ticker: 'SSO', weight: 50 },
+    { ticker: 'SPY', weight: 50 },
+  ];
+  const C: Holding[] = [
+    { ticker: 'SPY', weight: 60 },
+    { ticker: 'SSO', weight: 40 },
+  ];
+  const days = (lists: Holding[][]): StrategyDay[] =>
+    lists.map((holdings, i) => ({
+      date: D[i]!,
+      signals: {},
+      allocation: `alloc${i}`,
+      holdings,
+      ties: [],
+    }));
+  const flat = (closes: number[]) =>
+    closes.map((c, i) => bar(D[i]!, c, { open: c * (i % 2 === 0 ? 0.99 : 1.01) }));
+  const bars = { SPY: flat([100, 101, 99, 102]), SSO: flat([50, 52, 49, 53]) };
+  const costs = { slippageBps: 10, feePct: 0.1 };
+
+  it('compares tickers and weights as a multiset, exactly', () => {
+    expect(sameHoldings(A, B)).toBe(true);
+    expect(sameHoldings(A, C)).toBe(false);
+    expect(sameHoldings(A, [{ ticker: 'SPY', weight: 100 }])).toBe(false);
+    // A repeated ticker never matches a list without the repeat; weights are not merged.
+    expect(
+      sameHoldings(
+        [{ ticker: 'SPY', weight: 100 }],
+        [
+          { ticker: 'SPY', weight: 50 },
+          { ticker: 'SPY', weight: 50 },
+        ],
+      ),
+    ).toBe(false);
+    expect(
+      sameHoldings(
+        [
+          { ticker: 'SPY', weight: 50 },
+          { ticker: 'SPY', weight: 25 },
+          { ticker: 'SSO', weight: 25 },
+        ],
+        [
+          { ticker: 'SPY', weight: 50 },
+          { ticker: 'SSO', weight: 25 },
+          { ticker: 'SSO', weight: 25 },
+        ],
+      ),
+    ).toBe(false);
+    expect(
+      sameHoldings(
+        [
+          { ticker: 'SPY', weight: 25 },
+          { ticker: 'SSO', weight: 50 },
+          { ticker: 'SPY', weight: 25 },
+        ],
+        [
+          { ticker: 'SPY', weight: 25 },
+          { ticker: 'SPY', weight: 25 },
+          { ticker: 'SSO', weight: 50 },
+        ],
+      ),
+    ).toBe(true);
+    // Exact weights: no tolerance (out of scope).
+    expect(
+      sameHoldings(
+        [
+          { ticker: 'SPY', weight: 50 },
+          { ticker: 'SSO', weight: 50 },
+        ],
+        [
+          { ticker: 'SPY', weight: 50 + 1e-12 },
+          { ticker: 'SSO', weight: 50 - 1e-12 },
+        ],
+      ),
+    ).toBe(false);
+    // The inputs are not reordered in place.
+    expect(B[0]!.ticker).toBe('SSO');
+  });
+
+  for (const execution of ['next_open', 'next_close', 'same_close'] as const) {
+    it(`${execution}: alternating A and B gives no switch and no cost after entry`, () => {
+      const run = (lists: Holding[][]) =>
+        backtest({ strategy: { execution, costs }, days: days(lists), bars, cashRate: none });
+      const alternating = run([A, B, A, B]);
+      const constant = run([A, A, A, A]);
+      expect(alternating.switches).toBe(0);
+      expect(alternating.costs).toBe(constant.costs);
+      expect(alternating.costs).toBeCloseTo(0.002, 12); // entry only: turnover 1 at 0.2%
+      expect(alternating.points.map((p) => p.equity)).toEqual(constant.points.map((p) => p.equity));
+      expect(alternating.points.map((p) => p.traded)).toEqual(constant.points.map((p) => p.traded));
+    });
+
+    it(`${execution}: a real weight change still counts`, () => {
+      const r = backtest({
+        strategy: { execution, costs },
+        days: days([A, B, C, C]),
+        bars,
+        cashRate: none,
+      });
+      expect(r.switches).toBe(1);
+      expect(r.costs).toBeGreaterThan(0.002);
+    });
+  }
 });

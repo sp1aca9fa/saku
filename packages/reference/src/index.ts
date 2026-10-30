@@ -270,8 +270,14 @@ export function refBacktest(
     for (const h of holdings) value[h.ticker] = (after * h.weight) / 100;
     if (!start) switches++;
   };
+  // A position's identity: its (ticker, weight) pairs as a multiset, so listing the same
+  // holdings in another order is no trade (requirements 05, 13). Each pair is JSON text (no raw
+  // newline inside), sorted and joined by newlines; repeated tickers stay separate entries.
   const key = (h: { ticker: string; weight: number }[]) =>
-    h.map((x) => `${x.ticker}:${x.weight}`).join(',');
+    h
+      .map((x) => JSON.stringify([x.ticker, x.weight]))
+      .sort()
+      .join('\n');
 
   const equity: number[] = [];
   let current: string | undefined;
