@@ -13,7 +13,6 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  CASH_USD,
   type PointInTime,
   type StrategyDay,
   type TradingDate,
@@ -23,6 +22,7 @@ import {
   evaluate,
   isTradingDate,
   parseTicker,
+  readsCashRate,
   summary,
 } from '@saku/core';
 import { type CheckResult, MAX_STALE_DAYS, type Sessions, seriesHealthAtOpen } from '@saku/data';
@@ -214,12 +214,6 @@ interface WindowHealth {
   yellow: TradingDate[];
 }
 
-/**
- * Whether the backtest reads the cash rate for a holding, as core's `backtest` does: CASH_USD
- * accrues it, and any leverage other than 1 (an unparsable one included) is financed with it.
- */
-const readsCashRate = (ticker: string) => ticker === CASH_USD || parseTicker(ticker).leverage !== 1;
-
 /** A strategy that can hold cash or a financed holding (the backtest holds allocations only). */
 export const usesCashRate = (strategy: Strategy) =>
   strategy.allocations.some((a) => a.holdings.some((h) => readsCashRate(h.ticker)));
@@ -234,18 +228,24 @@ interface CashHealth {
 /**
  * The cash rate as the backtest reads it on each decision day (the value known at `cashReadAt`,
  * the instant `cashRateOf` uses), graded on the cash series' own calendar by `seriesHealthAtOpen`
- * (04 "Point-in-time series"). A day outside that calendar's valid range is unknown: refused,
- * never green.
+ * (04 "Point-in-time series"). A day, or its last known value, outside that calendar's valid
+ * range is unknown: refused, never green, and the message says which was outside.
  */
 function cashHealth(dates: TradingDate[], values: PointInTime, calendar: Sessions): CashHealth {
   const h: CashHealth = { bad: [], yellow: [] };
   for (const d of dates) {
     const last = values.asOf(d, cashReadAt(d))?.date;
     const g = seriesHealthAtOpen(calendar, d, last);
-    if (!g) {
+    const { version, validFrom, validTo } = calendar.calendar;
+    if (g.status === 'unknown') {
       h.bad.push({
         date: d,
-        why: `outside the cash calendar ${calendar.calendar.version} (${calendar.calendar.validFrom} to ${calendar.calendar.validTo})`,
+        why:
+          g.outside === 'date'
+            ? `outside the cash calendar ${version} (${validFrom} to ${validTo})`
+            : last! < validFrom
+              ? `last value ${last} is before the cash calendar ${version} (from ${validFrom})`
+              : `last value ${last} is after the decision day`,
       });
     } else if (g.status === 'red') {
       h.bad.push({

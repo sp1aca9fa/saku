@@ -40,23 +40,31 @@ export function seriesHealth(
  * strictly between `lastObservation` and `date`: the previous business day's value not yet
  * published is the normal publication lag (green, 04: `DTB3` is published the next business day,
  * one-day lag); more is a gap (yellow); more than MAX_STALE_DAYS is red; no value at all is red.
- * Undefined when the lag cannot be counted on this calendar (`date` or `lastObservation` outside
- * its valid range): unknown, never green.
+ * Unknown (never green) when the lag cannot be counted on this calendar; `outside` names the
+ * input out of its valid range: the read `date`, or `lastObservation` (before `validFrom`, or
+ * after `date`). The date is checked first: a date outside the calendar is not graded red either.
  */
 export function seriesHealthAtOpen(
   sessions: Sessions,
   date: TradingDate,
   lastObservation: TradingDate | undefined,
-): { status: HealthStatus; behind: number } | undefined {
+): OpenHealth {
   const { validFrom, validTo } = sessions.calendar;
-  if (date < validFrom || date > validTo) return undefined;
+  if (date < validFrom || date > validTo) return { status: 'unknown', outside: 'date' };
   if (lastObservation === undefined) return { status: 'red', behind: Infinity };
-  if (lastObservation < validFrom || lastObservation > date) return undefined;
+  if (lastObservation < validFrom || lastObservation > date) {
+    return { status: 'unknown', outside: 'lastObservation' };
+  }
   const behind = sessions
     .between(lastObservation, date)
     .filter((d) => d > lastObservation && d < date).length;
   return { status: freshnessStatus(behind), behind };
 }
+
+/** `seriesHealthAtOpen`'s result: a grade, or unknown with the input that was out of range. */
+export type OpenHealth =
+  | { status: HealthStatus; behind: number }
+  | { status: 'unknown'; outside: 'date' | 'lastObservation' };
 
 /** The grade of a series `behind` business days behind (Infinity: no value at all). */
 export function freshnessStatus(behind: number): HealthStatus {

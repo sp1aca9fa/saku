@@ -529,6 +529,27 @@ describe('parity on stored bars', () => {
         ),
       );
     });
+
+    it('a last value before the cash calendar is unknown and named as such', async () => {
+      // FROM is inside the calendar; the value read at its open is two sessions older.
+      const late = new Sessions({ ...sessions.calendar, validFrom: FROM });
+      const [r] = await run(casesDir({ c: leveraged() }), db, late);
+      expect(r!.status).toBe('red');
+      expect(r!.message).toMatch(
+        new RegExp(
+          `\\(first ${FROM}: last value ${DATES[fromIndex - 2]} is before the cash calendar t \\(from ${FROM}\\)\\)$`,
+        ),
+      );
+    });
+
+    it('warm-up days before FROM are not graded on the cash rate', async () => {
+      // The indicators and bands never read the rate; the backtest reads it from FROM on.
+      const own = await seeded();
+      await dropCash(own, fromIndex - 15, 10);
+      const [r] = await run(casesDir({ c: leveraged() }), own);
+      // Compared, not refused (the placeholder stats decide the status, not the cash rate).
+      expect(r!.message).not.toMatch(/cannot run|cash rate/);
+    });
   });
 
   it('runJob stores every case in full and fails the checks run on a red one', async () => {

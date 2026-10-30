@@ -223,7 +223,10 @@ describe('seriesHealthAtOpen', () => {
       behind: 0,
     });
     // A value dated the read date (a fixed rate) is not behind.
-    expect(seriesHealthAtOpen(fed, '2026-01-08', '2026-01-08')!.behind).toBe(0);
+    expect(seriesHealthAtOpen(fed, '2026-01-08', '2026-01-08')).toEqual({
+      status: 'green',
+      behind: 0,
+    });
     // Tuesday after the Monday holiday with Thursday's value: only Friday is missing.
     expect(seriesHealthAtOpen(fed, '2026-01-20', '2026-01-15')).toEqual({
       status: 'green',
@@ -248,10 +251,16 @@ describe('seriesHealthAtOpen', () => {
   });
 
   it('outside the calendar the lag is unknown (never green)', () => {
-    expect(seriesHealthAtOpen(fed, '2025-12-31', '2025-12-30')).toBeUndefined();
-    expect(seriesHealthAtOpen(fed, '2027-01-04', '2026-12-31')).toBeUndefined();
-    expect(seriesHealthAtOpen(fed, '2026-01-05', '2025-12-31')).toBeUndefined();
+    const date = { status: 'unknown', outside: 'date' };
+    const last = { status: 'unknown', outside: 'lastObservation' };
+    expect(seriesHealthAtOpen(fed, '2025-12-31', '2025-12-30')).toEqual(date);
+    expect(seriesHealthAtOpen(fed, '2027-01-04', '2026-12-31')).toEqual(date);
+    // The read date is inside, the last value before the calendar: the value is out of range.
+    expect(seriesHealthAtOpen(fed, '2026-01-05', '2025-12-31')).toEqual(last);
+    expect(seriesHealthAtOpen(fed, '2026-01-01', '2025-12-31')).toEqual(last);
+    // A last value after the read date cannot be counted either.
+    expect(seriesHealthAtOpen(fed, '2026-01-05', '2026-01-06')).toEqual(last);
     // Unknown before missing: a date outside the calendar is not graded red either.
-    expect(seriesHealthAtOpen(fed, '2025-12-31', undefined)).toBeUndefined();
+    expect(seriesHealthAtOpen(fed, '2025-12-31', undefined)).toEqual(date);
   });
 });

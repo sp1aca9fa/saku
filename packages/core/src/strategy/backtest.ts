@@ -22,6 +22,15 @@ export function parseTicker(ticker: string): {
   };
 }
 
+/**
+ * Whether the backtest reads the cash rate for a holding (requirements 05, execution model):
+ * CASH_USD accrues it, and any leverage other than 1 (an unparsable one included) pays
+ * `(leverage - 1)` times it as financing. The one rule; parity's cash health check uses it too.
+ */
+export function readsCashRate(ticker: string): boolean {
+  return ticker === CASH_USD || parseTicker(ticker).leverage !== 1;
+}
+
 export interface BacktestInput {
   strategy: Pick<Strategy, 'execution' | 'costs'>;
   days: StrategyDay[];
@@ -108,7 +117,7 @@ export function backtest(input: BacktestInput): BacktestResult {
     const [prev, bar] = barAt(t.base, date);
     const r = t.leverage * assetReturn(prev, bar, segment, t.base);
     if (!financed) return r;
-    const financing = t.leverage === 1 ? 0 : (t.leverage - 1) * cashDay();
+    const financing = readsCashRate(ticker) ? (t.leverage - 1) * cashDay() : 0;
     return r - financing - t.expensePct / 100 / 252;
   };
 
