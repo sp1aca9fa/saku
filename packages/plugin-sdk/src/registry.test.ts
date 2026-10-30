@@ -42,6 +42,18 @@ describe('plug-in registry', () => {
     expect(() => validateInfos([info, { ...info, kind: 'fx' }])).not.toThrow();
   });
 
+  it('refuses a declared adjusted-close rounding that is not a small positive number', () => {
+    expect(() => validateInfos([{ ...info, adjCloseRounding: 1e-6 }])).not.toThrow();
+    for (const bad of [0, -1e-6, 1e-4, Number.NaN]) {
+      expect(() => validateInfos([{ ...info, adjCloseRounding: bad }])).toThrow(/adjCloseRounding/);
+    }
+  });
+
+  it("hands over the run's final time when given", () => {
+    expect(pluginContext(info, log, { env: {}, finalAfter: '18:30' }).finalAfter).toBe('18:30');
+    expect(pluginContext(info, log, { env: {} }).finalAfter).toBeUndefined();
+  });
+
   it('saves descriptions, replacing the previous run’s', async () => {
     const db = await testDb();
     await savePluginInfos(db, [info], new Date('2026-01-01T00:00:00Z'));

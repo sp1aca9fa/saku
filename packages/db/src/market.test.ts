@@ -2,7 +2,7 @@ import type { RawBar } from '@saku/core';
 import { describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import {
-  ADJ_CLOSE_ROUNDING,
+  DEFAULT_ADJ_CLOSE_ROUNDING,
   groupFactors,
   issuerRecordsOf,
   storeFx,
@@ -55,7 +55,19 @@ const store = (
   symbolId: number,
   bars: RawBar[],
   at: string,
-) => storeRawBars(db, { symbolId, source: 'example', bars, runId: null, fetchedAt: at });
+  adjCloseRounding?: number,
+) =>
+  storeRawBars(db, {
+    symbolId,
+    source: 'example',
+    bars,
+    runId: null,
+    fetchedAt: at,
+    ...(adjCloseRounding !== undefined && { adjCloseRounding }),
+  });
+
+/** A source declaring single-precision rounding of its adjusted closes. */
+const ROUNDING = 1e-6;
 
 describe('symbols', () => {
   it('links a leveraged fund to its underlying and refuses an unknown one', async () => {
@@ -125,11 +137,13 @@ describe('storeRawBars', () => {
   });
 
   // A provider sending single-precision floats: each adjusted close as float32 of the exact
-  // value, the exact value itself recomputed with a little relative error (deterministic).
+  // value, the exact value itself recomputed with a relative error of at most 1.5e-7
+  // (deterministic). A ratio is then within 4.2e-7 of the true factor, two ratios within 8.4e-7:
+  // inside the declared 1e-6.
   const days = Array.from({ length: 300 }, (_, i) =>
     new Date(Date.UTC(2020, 0, 1) + i * 86_400_000).toISOString().slice(0, 10),
   );
-  const wobble = (i: number, seed: number) => 1 + 3e-7 * Math.sin(i * 12.9898 + seed * 78.233);
+  const wobble = (i: number, seed: number) => 1 + 1.5e-7 * Math.sin(i * 12.9898 + seed * 78.233);
   const sent = (factorOf: (i: number) => number, seed: number) =>
     days.map((d, i) => {
       const close = 20 + i * 0.37;
@@ -141,12 +155,12 @@ describe('storeRawBars', () => {
   it('stores rounding changes of adjusted closes without a re-adjustment event', async () => {
     const { db, id } = await setup();
     const first = sent(() => 1, 1);
-    await store(db, id, first, 't1');
+    await store(db, id, first, 't1', ROUNDING);
     const again = sent(() => 1, 2);
     // Most values differ, by far more than float noise of double precision.
     const moved = again.filter((b, i) => b.providerAdjClose !== first[i]!.providerAdjClose);
     expect(moved.length).toBeGreaterThan(250);
-    const result = await store(db, id, again, 't2');
+    const result = await store(db, id, again, 't2', ROUNDING);
     expect(result).toMatchObject({ inserted: 0, revised: 0, readjustments: 0 });
     expect(await db.select().from(readjustments)).toHaveLength(0);
     expect(await db.select().from(barRevisions)).toHaveLength(0);
@@ -169,24 +183,24 @@ describe('storeRawBars', () => {
     // Two distributions since the last fetch: one going ex on day 100 (0.995), one on day 250
     // (0.99); every earlier adjusted close is rescaled, each value rounded anew.
     const factor = (i: number) => (i < 100 ? 0.995 * 0.99 : i < 250 ? 0.99 : 1);
-    const result = await store(db, id, sent(factor, 2), 't2');
+    const result = await store(db, id, sent(factor, 2), 't2', ROUNDING);
     expect(result.readjustments).toBe(2);
     const events = await db.select().from(readjustments);
     expect(events.map((e) => [e.fromDate, e.toDate])).toEqual([
       [days[0], days[99]],
       [days[100], days[249]],
     ]);
-    expect(Math.abs(events[0]!.factor / (0.995 * 0.99) - 1)).toBeLessThan(ADJ_CLOSE_ROUNDING);
-    expect(Math.abs(events[1]!.factor / 0.99 - 1)).toBeLessThan(ADJ_CLOSE_ROUNDING);
+    expect(Math.abs(events[0]!.factor / (0.995 * 0.99) - 1)).toBeLessThan(ROUNDING);
+    expect(Math.abs(events[1]!.factor / 0.99 - 1)).toBeLessThan(ROUNDING);
     expect(await db.select().from(barRevisions)).toHaveLength(0);
   });
 
   it('records a change just above the rounding threshold as a re-adjustment', async () => {
     const { db, id } = await setup();
     const adj = (d: string, a: number) => bar(d, 10, { providerAdjClose: a });
-    await store(db, id, [adj('2026-01-02', 10), adj('2026-01-05', 10)], 't1');
-    const f = 1 - 2 * ADJ_CLOSE_ROUNDING;
-    await store(db, id, [adj('2026-01-02', 10 * f), adj('2026-01-05', 10)], 't2');
+    await store(db, id, [adj('2026-01-02', 10), adj('2026-01-05', 10)], 't1', ROUNDING);
+    const f = 1 - 2 * ROUNDING;
+    await store(db, id, [adj('2026-01-02', 10 * f), adj('2026-01-05', 10)], 't2', ROUNDING);
     const events = await db.select().from(readjustments);
     expect(events.map((e) => [e.fromDate, e.toDate])).toEqual([['2026-01-02', '2026-01-02']]);
   });
@@ -197,6 +211,36 @@ describe('storeRawBars', () => {
     const result = await store(db, id, [bar('2026-01-02', 10 * (1 + 1e-9))], 't2');
     expect(result.revised).toBe(1);
     expect((await db.select().from(barRevisions)).map((r) => r.field)).toEqual(['close']);
+  });
+
+  it('without a declared rounding, the default records the same noise as events', async () => {
+    const { db, id } = await setup();
+    await store(
+      db,
+      id,
+      sent(() => 1, 1),
+      't1',
+    );
+    expect(
+      (
+        await store(
+          db,
+          id,
+          sent(() => 1, 2),
+          't2',
+        )
+      ).readjustments,
+    ).toBeGreaterThan(0);
+    expect(DEFAULT_ADJ_CLOSE_ROUNDING).toBe(1e-9);
+  });
+
+  it('refuses a declared rounding that is not a small positive number', async () => {
+    const { db, id } = await setup();
+    for (const bad of [0, -1e-6, 2e-5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(store(db, id, [bar('2026-01-02', 10)], 't1', bad)).rejects.toThrow(
+        /adjCloseRounding/,
+      );
+    }
   });
 
   it('reports stored dates the source stopped returning, and keeps them', async () => {
@@ -221,19 +265,21 @@ describe('storeRawBars', () => {
 });
 
 describe('groupFactors', () => {
-  it('keeps slowly drifting rounding in one event and splits on a real step', () => {
-    const step = ADJ_CLOSE_ROUNDING / 2;
+  it('compares each date with the event factor: small steps adding up past it split', () => {
+    const step = 0.6 * ROUNDING;
     expect(
-      groupFactors([
-        { date: 'a', factor: 0.99 },
-        { date: 'b', factor: 0.99 * (1 + step) },
-        { date: 'c', factor: 0.99 * (1 + 2 * step) },
-        { date: 'd', factor: 0.99 * (1 + 3 * step) },
-        { date: 'e', factor: 0.99 * (1 + 3 * step) * (1 + 3 * ADJ_CLOSE_ROUNDING) },
-      ]),
+      groupFactors(
+        [
+          { date: 'a', factor: 0.99 },
+          { date: 'b', factor: 0.99 * (1 + step) },
+          { date: 'c', factor: 0.99 * (1 + 2 * step) },
+          { date: 'd', factor: 0.99 * (1 + 3 * step) },
+        ],
+        ROUNDING,
+      ),
     ).toEqual([
-      { from: 'a', to: 'd', factor: 0.99 },
-      { from: 'e', to: 'e', factor: 0.99 * (1 + 3 * step) * (1 + 3 * ADJ_CLOSE_ROUNDING) },
+      { from: 'a', to: 'b', factor: 0.99 },
+      { from: 'c', to: 'd', factor: 0.99 * (1 + 2 * step) },
     ]);
   });
 

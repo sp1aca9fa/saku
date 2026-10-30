@@ -32,7 +32,7 @@ import { jobLogger } from '../jobs/log';
 import { probe } from '../jobs/probe';
 import { runJob } from '../jobs/run';
 import { GATE, type SpikeReport, spikeFrom, spikeReport, verdict } from '../jobs/spike';
-import { dailyTarget } from '../jobs/target';
+import { dailyAfterOf, dailyTarget } from '../jobs/target';
 import { loadPlugins, notifierContexts, pluginContext, providerUsageStore } from '../registry';
 import { assertServerOnly } from '../server-only';
 import { USAGE, parseJobArgs } from './jobs-args';
@@ -66,7 +66,9 @@ const sessions = new Sessions(calendar);
 const fed = plugins.calendars.flatMap((c) => c.calendars).find((c) => c.id === 'us-fed');
 const seriesSessions = fed ? new Sessions(fed) : undefined;
 const now = new Date();
-const target = dailyTarget(sessions, now, process.env.SAKU_DAILY_AFTER || undefined);
+// The time a session's data counts as final: the daily target and the plug-ins use the same.
+const finalAfter = dailyAfterOf(process.env.SAKU_DAILY_AFTER);
+const target = dailyTarget(sessions, now, finalAfter);
 
 if (job === 'spike') {
   // Through the current daily target: a session without a run fails, except the target while its
@@ -100,7 +102,7 @@ if (job === 'probe') {
     ticker,
     from: sessions.before(today, 2),
     to: today,
-    context: (info) => pluginContext(info, log, { usage: providerUsageStore(db) }),
+    context: (info) => pluginContext(info, log, { usage: providerUsageStore(db), finalAfter }),
   });
   for (const l of lines.filter((l) => l.error)) log.warn(`probe ${l.source}: ${l.error}`);
   held.release();
@@ -125,7 +127,7 @@ try {
     seriesSessions,
     now,
     log,
-    context: (info) => pluginContext(info, log),
+    context: (info) => pluginContext(info, log, { finalAfter }),
     alerting: {
       date: target,
       notifiers: plugins.notifiers,

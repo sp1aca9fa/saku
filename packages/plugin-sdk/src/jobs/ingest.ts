@@ -196,6 +196,9 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
           bars,
           runId: o.runId,
           fetchedAt: now().toISOString(),
+          ...(source.info.adjCloseRounding !== undefined && {
+            adjCloseRounding: source.info.adjCloseRounding,
+          }),
         });
         r.inserted += stored.inserted;
         r.revised += stored.revised;

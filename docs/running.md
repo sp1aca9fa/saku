@@ -27,7 +27,7 @@ last two only when every source answered for every item. Details: `docs/data-pip
 | `pnpm symbols import <file>` | Loads a universe file (see `templates/universe/`) |
 | `pnpm user create <username>` | Creates an account (the first is an admin) |
 | `pnpm plugins` | Loads and validates every plug-in and lists them |
-| `pnpm sources list` | Source roles per data kind. `pnpm sources set <bars\|series\|fx\|issuer> <key> <primary\|secondary\|check>`, `pnpm sources remove <kind> <key>`, `pnpm sources issuer-stats [--years N]` |
+| `pnpm sources list` | Source roles per data kind. `pnpm sources set <bars\|series\|fx\|issuer> <key> <primary\|secondary\|check>`, `pnpm sources remove <kind> <key>`, `pnpm sources issuer-stats [--years N]`, `pnpm sources readjustments [--source <key>] [--run <id>]` (see `docs/data-pipeline.md`) |
 | `pnpm csv import <file> --ticker <T> --prices raw\|split-adjusted [--source csv-<name>]` | Imports daily bars from a CSV as their own source (give it a role to use it) |
 | `pnpm health [--date <D>] [--days <N>] [--lang <code>]` | The data-health report; the last 5 trading days by default |
 | `pnpm strategy check\|register\|list\|show\|verify\|recompute` | Strategy definitions, versions and the forward record (`templates/strategies/` has examples) |

@@ -1,6 +1,6 @@
 import { Sessions } from '@saku/data';
 import { describe, expect, it } from 'vitest';
-import { dailyTarget } from './target';
+import { DEFAULT_DAILY_AFTER, dailyAfterOf, dailyTarget } from './target';
 
 const sessions = new Sessions({
   id: 't',
@@ -20,5 +20,16 @@ describe('dailyTarget', () => {
   it('on a weekend or holiday, the last session', () => {
     expect(dailyTarget(sessions, new Date('2026-01-18T03:00:00Z'))).toBe('2026-01-16');
     expect(dailyTarget(sessions, new Date('2026-01-20T03:00:00Z'))).toBe('2026-01-16');
+  });
+});
+
+describe('dailyAfterOf', () => {
+  it('reads HH:MM, defaults when unset, and refuses anything else', () => {
+    expect(dailyAfterOf(undefined)).toBe(DEFAULT_DAILY_AFTER);
+    expect(dailyAfterOf(' ')).toBe(DEFAULT_DAILY_AFTER);
+    expect(dailyAfterOf(' 18:30 ')).toBe('18:30');
+    for (const bad of ['8pm', '24:00', '20:60', '2000', '20:00:00']) {
+      expect(() => dailyAfterOf(bad)).toThrow(/SAKU_DAILY_AFTER/);
+    }
   });
 });

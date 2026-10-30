@@ -50,10 +50,17 @@ the descriptions to the database. The fields:
 - `unofficial`: not an official API.
 - `history`: how far back the plan reaches. `calendar`: the days it publishes on, so a gap on a
   closed day is expected.
+- `adjCloseRounding` (bar sources sending adjusted closes): their relative rounding, how far two
+  fetches' ratios of one real re-adjustment can differ. A change within it is stored without a
+  re-adjustment event. Default 1e-9 (double precision), at most 1e-5. State the provider's
+  precision it rests on next to the value, and check it with `pnpm sources readjustments`.
 
 ### The context
 
-`ctx` has `http` (the SDK client), `now`, `log`, `apiKey` (the first `keyEnv`) and `keys`.
+`ctx` has `http` (the SDK client), `now`, `log`, `apiKey` (the first `keyEnv`) and `keys`. In a
+job run it also has `finalAfter`: the New York time (`HH:MM`, `SAKU_DAILY_AFTER`, default 20:00)
+from which a session's data counts as final, the same as for the daily target. Return only final
+data within the asked range; a later run's window covers the date.
 
 ## The HTTP client
 

@@ -31,22 +31,35 @@ import {
 const CHUNK = 500;
 
 /**
- * Relative size below which a change in a provider's adjusted close is rounding, not a
- * re-adjustment (requirements 04: provider adjusted values keep the latest snapshot plus one
- * re-adjustment event per factor; they are for verification only). Rule: the coarsest provider
- * we store sends single-precision floats (Yahoo's chart values, e.g. 453.1600036621094 for 453.16:
- * 24 significant bits, about 7.2 significant decimals, relative rounding at most 2^-24 = 6e-8 per
- * value). A ratio of two such values is off by up to 2^-23 = 1.2e-7 and two ratios differ by up to
- * 2.4e-7; the provider recomputing its factors in that precision adds a few more units. 1e-6
- * leaves about 4x that margin and stays far below a real re-adjustment, whose size is a dividend
- * relative to the price (a 0.01 distribution on a 500 share is 2e-5) or a split. Used both for
- * "this date did not change" (|ratio - 1|) and for "these dates share one factor". A smaller real
- * change is still stored (latest snapshot); it only records no event. Raw fields are compared
- * exactly (revision log), never with this tolerance.
+ * Re-adjustment detection (requirements 04: provider adjusted values keep the latest snapshot
+ * plus one re-adjustment event per factor; they are for verification only, and raw fields are
+ * compared exactly in the revision log, never with this tolerance).
+ *
+ * Rule: a change of a provider's adjusted close whose relative size is within the source's
+ * declared rounding (`PluginInfo.adjCloseRounding`, relative) is rounding, not a re-adjustment:
+ * the new value is stored (latest snapshot), no event is recorded. The same tolerance decides
+ * whether changed dates share one factor. A source that declares none gets the default, 1e-9
+ * (double-precision recomputation; one dividend is orders of magnitude larger).
  */
-export const ADJ_CLOSE_ROUNDING = 1e-6;
+export const DEFAULT_ADJ_CLOSE_ROUNDING = 1e-9;
 
-const sameFactor = (a: number, b: number) => Math.abs(a - b) <= ADJ_CLOSE_ROUNDING * Math.abs(b);
+/**
+ * The largest rounding a source may declare: it must stay below the smallest real
+ * re-adjustment, a dividend relative to the price (a 0.01 distribution on a 500 share is 2e-5).
+ */
+export const MAX_ADJ_CLOSE_ROUNDING = 1e-5;
+
+/** Refuses a rounding that is not a number in (0, MAX_ADJ_CLOSE_ROUNDING]. */
+export function checkAdjCloseRounding(rounding: number, owner: string): void {
+  if (!Number.isFinite(rounding) || rounding <= 0 || rounding > MAX_ADJ_CLOSE_ROUNDING) {
+    throw new Error(
+      `${owner}: adjCloseRounding ${rounding} is not above 0 and at most ${MAX_ADJ_CLOSE_ROUNDING}.`,
+    );
+  }
+}
+
+const sameFactor = (a: number, b: number, rounding: number) =>
+  Math.abs(a - b) <= rounding * Math.abs(b);
 
 export interface SymbolInput {
   ticker: string;
@@ -151,7 +164,8 @@ function asRawBar(row: StoredBar): RawBar {
  * Stores one source's bars for one symbol: new dates are inserted; for stored dates, every
  * changed raw field is logged in `bar_revisions` before the row is updated. Changed provider
  * adjusted closes are stored (latest snapshot) and grouped into one `readjustments` event per
- * factor; a change within ADJ_CLOSE_ROUNDING of the stored value is rounding and makes no event.
+ * factor; a change within the source's rounding (`adjCloseRounding`, default
+ * DEFAULT_ADJ_CLOSE_ROUNDING) of the stored value is rounding and makes no event.
  */
 export async function storeRawBars(
   db: Db,
@@ -161,8 +175,12 @@ export async function storeRawBars(
     bars: RawBar[];
     runId: string | null;
     fetchedAt: string;
+    /** The source's declared relative rounding of its adjusted closes. */
+    adjCloseRounding?: number;
   },
 ): Promise<RawBarsResult> {
+  const rounding = input.adjCloseRounding ?? DEFAULT_ADJ_CLOSE_ROUNDING;
+  checkAdjCloseRounding(rounding, input.source);
   const result: RawBarsResult = { inserted: 0, revised: 0, readjustments: 0, missing: [] };
   if (input.bars.length === 0) return result;
   const sorted = [...input.bars].sort((a, b) => a.date.localeCompare(b.date));
@@ -229,7 +247,7 @@ export async function storeRawBars(
       if (adjChanged && oldAdj !== null && newAdj !== null && oldAdj !== 0) {
         const factor = newAdj / oldAdj;
         // Rounding noise: the new value is stored below, but it is no re-adjustment.
-        if (!sameFactor(factor, 1)) ratios.push({ date: bar.date, factor });
+        if (!sameFactor(factor, 1, rounding)) ratios.push({ date: bar.date, factor });
       }
       if (changed.length > 0 || adjChanged) {
         await tx
@@ -244,7 +262,7 @@ export async function storeRawBars(
     for (let i = 0; i < revisions.length; i += CHUNK) {
       await tx.insert(barRevisions).values(revisions.slice(i, i + CHUNK));
     }
-    const groups = groupFactors(ratios);
+    const groups = groupFactors(ratios, rounding);
     for (const g of groups) {
       await tx.insert(readjustments).values({
         symbolId: input.symbolId,
@@ -264,24 +282,22 @@ export async function storeRawBars(
 }
 
 /**
- * Consecutive changed dates sharing one factor form one re-adjustment event. Each date is compared
- * with the previous one (within ADJ_CLOSE_ROUNDING), so rounding that drifts slowly across a long
- * history stays one event, while a real step (another dividend or split between the two dates)
- * starts a new one. The event's factor is its first date's.
+ * Consecutive changed dates sharing one factor form one re-adjustment event: each date is compared
+ * with the event's factor (its first date's ratio), within `rounding` relative. No chaining from
+ * date to date, so small steps that add up to more than the rounding start a new event.
  */
 export function groupFactors(
   ratios: { date: string; factor: number }[],
+  rounding = DEFAULT_ADJ_CLOSE_ROUNDING,
 ): { from: string; to: string; factor: number }[] {
   const groups: { from: string; to: string; factor: number }[] = [];
-  let previous: number | undefined;
   for (const r of ratios) {
     const last = groups.at(-1);
-    if (last && previous !== undefined && sameFactor(r.factor, previous)) {
+    if (last && sameFactor(r.factor, last.factor, rounding)) {
       last.to = r.date;
     } else {
       groups.push({ from: r.date, to: r.date, factor: r.factor });
     }
-    previous = r.factor;
   }
   return groups;
 }

@@ -10,6 +10,12 @@
 //                                                         observed |close / NAV - 1| over the
 //                                                         last N years (default 2), to set
 //                                                         issuer_nav_tolerance from
+//   pnpm sources readjustments [--source <key>] [--run <id>]
+//                                                         per source, the spread of |factor - 1|
+//                                                         of one run's re-adjustment events (by
+//                                                         adjusted-close level), to confirm a
+//                                                         declared adjCloseRounding; default the
+//                                                         latest bootstrap or weekly run with any
 //   pnpm csv import <file> --ticker <TICKER> --prices raw|split-adjusted [--source csv-<name>]
 //                                                         validated daily bars, stored as their
 //                                                         own source (default `csv`); give it a
@@ -32,6 +38,13 @@ import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { issuerStats } from '../jobs/issuer';
 import { lock } from '../jobs/lock';
+import {
+  defaultReadjustmentRun,
+  parseReadjustmentArgs,
+  readjustmentRun,
+  readjustmentStats,
+  readjustmentText,
+} from '../jobs/readjustments';
 import { allInfos, loadPlugins } from '../registry';
 import { DATA_KIND, dataKindOf, unassigned } from '../roles';
 import { assertServerOnly } from '../server-only';
@@ -150,6 +163,24 @@ if (tool === 'sources' && command === 'list') {
         'above 0, at most 0.2; every fund in one map).',
     );
   }
+} else if (tool === 'sources' && command === 'readjustments') {
+  const args = parseReadjustmentArgs(rest);
+  if ('error' in args) fail(args.error);
+  const { source, run: runId } = args as { source?: string; run?: string };
+  const run =
+    runId === undefined
+      ? await defaultReadjustmentRun(db, source)
+      : ((await readjustmentRun(db, runId)) ?? fail(`No run ${runId}.`));
+  if (!run) {
+    console.log(
+      `No bootstrap or weekly run stored re-adjustment events${source ? ` of ${source}` : ''}.`,
+    );
+  } else {
+    const stats = await readjustmentStats(db, { runId: run.id, ...(source && { source }) });
+    const declared = (key: string) =>
+      plugins.bars.find((b) => b.info.key === key)?.info.adjCloseRounding;
+    console.log(readjustmentText(run, stats, declared));
+  }
 } else if (tool === 'csv' && command === 'import') {
   const file = rest[0] && !rest[0].startsWith('--') ? rest[0] : fail('Name the CSV file.');
   const ticker = flag('ticker') ?? fail('Name the ticker: --ticker <TICKER>.');
@@ -218,7 +249,7 @@ if (tool === 'sources' && command === 'list') {
 } else {
   fail(
     'Usage: pnpm sources list | set <kind> <key> <role> | remove <kind> <key> | ' +
-      'issuer-stats [--years N] | ' +
+      'issuer-stats [--years N] | readjustments [--source <key>] [--run <id>] | ' +
       'pnpm csv import <file> --ticker <TICKER> --prices raw|split-adjusted [--source csv-<name>]',
   );
 }

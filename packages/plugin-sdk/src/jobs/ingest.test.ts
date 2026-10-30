@@ -78,6 +78,20 @@ describe('ingest', () => {
     expect(report).toMatchObject({ source: 'a', ok: ['AAA', 'BBB'], inserted: 2 });
   });
 
+  it("stores adjusted closes with the source's declared rounding", async () => {
+    const db = await setup();
+    const adj = (a: number) => ({ ...bar('2026-01-16', 10), providerAdjClose: a });
+    const run = async (value: number, adjCloseRounding?: number) => {
+      const a = source('a', (t) => (t === 'AAA' ? [adj(value)] : []));
+      if (adjCloseRounding !== undefined) a.info.adjCloseRounding = adjCloseRounding;
+      return (await ingest(db, { ...emptyPlugins(), bars: [a] }, options('daily')))[0]!;
+    };
+    await run(9);
+    // 5e-7 relative: rounding for a source declaring 1e-6, a re-adjustment by default.
+    expect((await run(9 * (1 + 5e-7), 1e-6)).readjustments).toBe(0);
+    expect((await run(9 * (1 + 5e-7) * (1 + 5e-7))).readjustments).toBe(1);
+  });
+
   it('a block stops the source; another error only skips that ticker', async () => {
     const db = await setup();
     const blocked = source('blocked', () => {

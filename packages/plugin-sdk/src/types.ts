@@ -57,6 +57,14 @@ export interface PluginInfo {
    * Not declared, or not loaded: no day counts as closed.
    */
   calendar?: string;
+  /**
+   * Bar sources sending adjusted closes: their relative rounding, i.e. how far apart two fetches'
+   * ratios (new / stored) of one real factor can be. A change within it is stored without a
+   * re-adjustment event, and dates within it of an event's factor share that event. Default
+   * 1e-9 (double precision); at most 1e-5 (below the smallest real re-adjustment). State the
+   * provider's precision it rests on next to the value.
+   */
+  adjCloseRounding?: number;
 }
 
 export interface Logger {
@@ -73,6 +81,12 @@ export interface PluginContext {
   apiKey?: string;
   /** Every declared `keyEnv` with its value. */
   keys?: Record<string, string>;
+  /**
+   * The run's final time (`HH:MM`, New York): a session's data counts as final from this time on
+   * the session's date (`SAKU_DAILY_AFTER`, default 20:00), as for the daily target. Absent in
+   * contexts that are not a run's (a plug-in then uses its own default).
+   */
+  finalAfter?: string;
 }
 
 export interface TickerMeta {

@@ -1,5 +1,6 @@
 import {
   type Db,
+  checkAdjCloseRounding,
   providerUsageSince,
   pruneProviderUsage,
   recordProviderRequest,
@@ -66,9 +67,13 @@ export function allInfos(plugins: PluginModule): PluginInfo[] {
   ].map((p) => p.info);
 }
 
-/** Keys are lowercase identifiers, unique per kind, and each source names its terms. */
+/**
+ * Keys are lowercase identifiers, unique per kind, each source names its terms, and a declared
+ * adjusted-close rounding is a small positive number.
+ */
 export function validateInfos(
-  infos: Pick<PluginInfo | NotifierInfo, 'key' | 'kind' | 'termsUrl'>[],
+  infos: (Pick<PluginInfo | NotifierInfo, 'key' | 'kind' | 'termsUrl'> &
+    Pick<Partial<PluginInfo>, 'adjCloseRounding'>)[],
 ): void {
   const seen = new Set<string>();
   for (const info of infos) {
@@ -79,6 +84,9 @@ export function validateInfos(
     if (seen.has(id)) throw new Error(`Two ${info.kind} plug-ins use the key "${info.key}".`);
     seen.add(id);
     if (!info.termsUrl) throw new Error(`Plug-in "${info.key}" has no termsUrl.`);
+    if (info.adjCloseRounding !== undefined) {
+      checkAdjCloseRounding(info.adjCloseRounding, `Plug-in "${info.key}"`);
+    }
   }
 }
 
@@ -123,6 +131,8 @@ export function pluginContext(
     http?: PoliteHttpOptions;
     now?: Date;
     usage?: UsageStore;
+    /** The run's final time (`HH:MM` New York), see `PluginContext.finalAfter`. */
+    finalAfter?: string;
   } = {},
 ): PluginContext {
   const env = options.env ?? process.env;
@@ -143,6 +153,7 @@ export function pluginContext(
     now: options.now ?? new Date(),
     log,
     ...(names.length > 0 && { apiKey: keys[names[0]!], keys }),
+    ...(options.finalAfter !== undefined && { finalAfter: options.finalAfter }),
   };
 }
 
