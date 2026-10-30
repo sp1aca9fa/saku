@@ -2,9 +2,12 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { emptyPlugins } from '../registry';
+import type { UsageStore } from '../http';
+import { emptyPlugins, pluginContext } from '../registry';
 import type { BarSource } from '../types';
 import { finalization, probe } from './probe';
+
+const quiet = { info() {}, warn() {} };
 
 const source = (
   key: string,
@@ -50,6 +53,47 @@ describe('probe', () => {
       },
       { at: '2026-01-05T22:20:00.000Z', source: 'b', ticker: 'AAA', error: 'HTTP 503' },
     ]);
+  });
+
+  it('names its ticker to the quota guard: a new one over the symbol cap is refused', async () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'saku-probe-')), 'probe.jsonl');
+    const recorded: (string | null)[] = [];
+    const store: UsageStore = {
+      load: async () => ({ requests: [], symbols: new Map([['OLD', Date.now()]]) }),
+      record: async (_provider, _at, symbol) => {
+        recorded.push(symbol);
+      },
+    };
+    const fetching: BarSource = {
+      ...source('a', async () => []),
+      fetchBars: async (_t, _f, to, ctx) => {
+        await ctx.http.json('https://example.test/bars');
+        return [{ date: to, close: 1, closeIsSplitAdjusted: false, divCash: 0, splitFactor: 1 }];
+      },
+    };
+    const run = (ticker: string, symbolsPerMonth: number) =>
+      probe(
+        { ...emptyPlugins(), bars: [fetching] },
+        {
+          ticker,
+          from: '2026-01-01',
+          to: '2026-01-05',
+          context: (info) =>
+            pluginContext({ ...info, limits: { symbolsPerMonth } }, quiet, {
+              usage: store,
+              http: {
+                minDelayMs: 0,
+                fetchImpl: (async () => new Response('{}')) as typeof fetch,
+              },
+            }),
+          file,
+        },
+      );
+    // 80% of 1 is 1 symbol: OLD is counted, AAA is new.
+    expect((await run('AAA', 1))[0]).toMatchObject({ error: expect.stringMatching(/symbols/) });
+    expect(recorded).toEqual([]);
+    expect((await run('AAA', 10))[0]).toMatchObject({ close: 1 });
+    expect(recorded).toEqual(['AAA']);
   });
 
   it('finds when a bar first appeared and last changed', () => {

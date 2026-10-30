@@ -33,7 +33,7 @@ import { probe } from '../jobs/probe';
 import { runJob } from '../jobs/run';
 import { GATE, type SpikeReport, spikeFrom, spikeReport, verdict } from '../jobs/spike';
 import { dailyTarget } from '../jobs/target';
-import { loadPlugins, notifierContexts, pluginContext } from '../registry';
+import { loadPlugins, notifierContexts, pluginContext, providerUsageStore } from '../registry';
 import { assertServerOnly } from '../server-only';
 import { USAGE, parseJobArgs } from './jobs-args';
 
@@ -100,7 +100,7 @@ if (job === 'probe') {
     ticker,
     from: sessions.before(today, 2),
     to: today,
-    context: (info) => pluginContext(info, log),
+    context: (info) => pluginContext(info, log, { usage: providerUsageStore(db) }),
   });
   for (const l of lines.filter((l) => l.error)) log.warn(`probe ${l.source}: ${l.error}`);
   held.release();

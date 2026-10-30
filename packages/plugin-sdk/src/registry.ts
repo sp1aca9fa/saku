@@ -1,9 +1,15 @@
-import { type Db, schema } from '@saku/db';
+import {
+  type Db,
+  providerUsageSince,
+  pruneProviderUsage,
+  recordProviderRequest,
+  schema,
+} from '@saku/db';
 import { findRepoRoot } from '@saku/db/env';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { PoliteHttp, type PoliteHttpOptions } from './http';
+import { PoliteHttp, type PoliteHttpOptions, type UsageStore } from './http';
 import type {
   Logger,
   Notifier,
@@ -90,11 +96,34 @@ export async function savePluginInfos(db: Db, infos: PluginInfo[], now = new Dat
   }
 }
 
-/** A run's context for one source: its own HTTP client at the provider's pace, and its key. */
+/**
+ * The quota guard's store in the database (`provider_usage`): loading prunes buckets no window
+ * can count any more, then reads the provider's last day of requests and 31 days of symbols.
+ */
+export function providerUsageStore(db: Db): UsageStore {
+  return {
+    async load(provider, now) {
+      await pruneProviderUsage(db, now);
+      return providerUsageSince(db, provider, now);
+    },
+    record: (provider, at, symbol) => recordProviderRequest(db, { provider, at, symbol }),
+  };
+}
+
+/**
+ * A run's context for one source: its own HTTP client at the provider's pace, and its key.
+ * `usage`: the quota guard's store, so the provider's limits hold across runs (counted under the
+ * plug-in's key).
+ */
 export function pluginContext(
-  info: Pick<PluginInfo | NotifierInfo, 'name' | 'keyEnv' | 'limits'>,
+  info: Pick<PluginInfo | NotifierInfo, 'key' | 'name' | 'keyEnv' | 'limits'>,
   log: Logger,
-  options: { env?: Record<string, string | undefined>; http?: PoliteHttpOptions; now?: Date } = {},
+  options: {
+    env?: Record<string, string | undefined>;
+    http?: PoliteHttpOptions;
+    now?: Date;
+    usage?: UsageStore;
+  } = {},
 ): PluginContext {
   const env = options.env ?? process.env;
   const names = info.keyEnv === undefined ? [] : [info.keyEnv].flat();
@@ -105,7 +134,12 @@ export function pluginContext(
     keys[name] = value;
   }
   return {
-    http: new PoliteHttp({ limits: info.limits, secrets: Object.values(keys), ...options.http }),
+    http: new PoliteHttp({
+      limits: info.limits,
+      secrets: Object.values(keys),
+      ...(options.usage && { usage: { provider: info.key, store: options.usage } }),
+      ...options.http,
+    }),
     now: options.now ?? new Date(),
     log,
     ...(names.length > 0 && { apiKey: keys[names[0]!], keys }),

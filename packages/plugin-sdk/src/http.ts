@@ -1,6 +1,12 @@
 // The polite HTTP client every plug-in uses (requirements 15): it keeps under 80% of each of the
 // provider's declared limits, retries server errors and timeouts with backoff, and stops the
 // source for the run on 403, 429 or a challenge page. It never works around a block.
+//
+// Quota guard (requirements 04 "Quota guard"): with a usage store attached, the limits hold across
+// runs, not only inside one. The provider's earlier requests (last day) and symbols (last 31 days)
+// are loaded before the first request, each request is recorded as it is sent (a run that crashes
+// keeps what it sent), and a new symbol that would pass 80% of `symbolsPerMonth` is refused.
+// History that is unknown (the store fails) sends nothing: the source stops for the run.
 import type { ProviderLimits } from './types';
 
 /** The provider refused us (403, 429, a challenge page): the source stops for this run. */
@@ -31,17 +37,42 @@ export class HttpError extends Error {
   }
 }
 
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
 /** Longest excerpt of an error answer kept in a message. */
 const EXCERPT_CHARS = 200;
 
 /** Share of each provider limit the client may use. */
 export const LIMIT_SHARE = 0.8;
 
-const WINDOWS = [
+/** The request windows, rolling. The longest (a day) is what a usage store must return. */
+export const WINDOWS = [
   { name: 'minute', ms: 60_000, limit: (l: ProviderLimits) => l.perMinute },
   { name: 'hour', ms: 3_600_000, limit: (l: ProviderLimits) => l.perHour },
   { name: 'day', ms: 86_400_000, limit: (l: ProviderLimits) => l.perDay },
 ] as const;
+
+/**
+ * The symbols-per-month window: a rolling 31 days. Providers do not say whether "a month" is a
+ * calendar month; 31 rolling days is never shorter than one, so it is the conservative reading.
+ */
+export const SYMBOL_WINDOW_MS = 31 * 86_400_000;
+
+/** A provider's earlier requests, each at a time (ms) no earlier than it was actually sent. */
+export interface UsageHistory {
+  /** Requests within the last day, oldest first. */
+  requests: number[];
+  /** Symbols requested within the last 31 days, each with the latest time it counts from. */
+  symbols: Map<string, number>;
+}
+
+/** Where the quota guard keeps each provider's requests across runs (the database in jobs). */
+export interface UsageStore {
+  /** The provider's requests in the last day and symbols in the last 31 days, as seen at `now`. */
+  load(provider: string, now: number): Promise<UsageHistory>;
+  /** Records one request as it is sent; given no URL, key or body. */
+  record(provider: string, at: number, symbol: string | null): Promise<void>;
+}
 
 const CHALLENGE_MARKERS = [/captcha/i, /cf-challenge/i, /Just a moment\.\.\./];
 
@@ -57,8 +88,10 @@ export function redactUrl(url: string): string {
 
 export interface PoliteHttpOptions {
   limits?: ProviderLimits;
-  /** Times (ms since epoch) of this provider's earlier requests, from the quota guard. */
+  /** Times (ms since epoch) of this provider's earlier requests, exact (kept in memory only). */
   history?: number[];
+  /** The quota guard's store and the provider key its requests are counted under. */
+  usage?: { provider: string; store: UsageStore };
   /** Pause between any two requests. */
   minDelayMs?: number;
   /** Longest the client waits for a limit window to free up before giving up for the run. */
@@ -74,14 +107,22 @@ export interface PoliteHttpOptions {
 }
 
 export class PoliteHttp {
-  /** Request times in this run plus the history passed in, oldest first. */
+  /** Request times in this run plus the history passed in or loaded, oldest first. */
   readonly sent: number[];
   private blocked: string | null = null;
-  private readonly o: Required<Omit<PoliteHttpOptions, 'history'>>;
+  private readonly o: Required<Omit<PoliteHttpOptions, 'history' | 'usage'>>;
   private readonly secrets: string[];
+  private usage: { provider: string; store: UsageStore } | undefined;
+  /** The stored history, loaded once before the first request or symbol check. */
+  private loaded: Promise<void> | undefined;
+  /** Symbols this provider received (stored and this run), with the latest time each counts from. */
+  private readonly symbols = new Map<string, number>();
+  /** The symbol the next requests are for (`forSymbol`), recorded with each. */
+  private symbol: string | null = null;
 
   constructor(options: PoliteHttpOptions = {}) {
     this.sent = [...(options.history ?? [])].sort((a, b) => a - b);
+    this.usage = options.usage;
     this.secrets = (options.secrets ?? []).filter((s) => s.length >= 4);
     this.o = {
       limits: {},
@@ -96,6 +137,86 @@ export class PoliteHttp {
       clock: Date.now,
       ...options,
     };
+  }
+
+  /** Whether requests are counted across runs (a usage store is attached). */
+  get guarded(): boolean {
+    return this.usage !== undefined;
+  }
+
+  /**
+   * Attaches the quota guard's store before the first request (a run's jobs do this for every
+   * source's client). `clock`: the run's clock, so an injected one sets the windows.
+   */
+  guard(usage: { provider: string; store: UsageStore }, clock?: () => number): void {
+    if (this.usage) throw new Error(`quota guard already attached (${this.usage.provider})`);
+    if (this.loaded || this.sent.length > 0) {
+      throw new Error('quota guard attached after requests were sent');
+    }
+    this.usage = usage;
+    if (clock) this.o.clock = clock;
+  }
+
+  /**
+   * The symbol the following requests are for (a bar, meta or corporate-action fetch), recorded
+   * with each; null for requests about no symbol. With a `symbolsPerMonth` limit, a symbol not
+   * yet counted in the last 31 days is refused (QuotaError) when it would pass 80% of the limit;
+   * a symbol already counted is always allowed.
+   */
+  async forSymbol(symbol: string | null): Promise<void> {
+    this.symbol = null;
+    if (symbol === null) return;
+    await this.ready();
+    const limit = this.o.limits.symbolsPerMonth;
+    if (limit !== undefined) {
+      const allowed = Math.max(1, Math.floor(limit * LIMIT_SHARE));
+      const since = this.o.clock() - SYMBOL_WINDOW_MS;
+      const counted = [...this.symbols].filter(([, at]) => at > since).map(([s]) => s);
+      if (!counted.includes(symbol) && counted.length >= allowed) {
+        throw new QuotaError(
+          `${counted.length} of ${limit} symbols per 31 days used (80% cap); ${symbol} is new`,
+        );
+      }
+    }
+    this.symbol = symbol;
+  }
+
+  /** Loads the stored history once; unknown history sends nothing (QuotaError). */
+  private ready(): Promise<void> {
+    const usage = this.usage;
+    if (!usage) return Promise.resolve();
+    this.loaded ??= (async () => {
+      let h: UsageHistory;
+      try {
+        h = await usage.store.load(usage.provider, this.o.clock());
+      } catch (e) {
+        throw new QuotaError(`earlier requests of ${usage.provider} unknown: ${message(e)}`);
+      }
+      this.sent.push(...h.requests);
+      this.sent.sort((a, b) => a - b);
+      for (const [s, at] of h.symbols) this.noteSymbol(s, at);
+    })();
+    return this.loaded;
+  }
+
+  private noteSymbol(symbol: string, at: number): void {
+    if ((this.symbols.get(symbol) ?? -Infinity) < at) this.symbols.set(symbol, at);
+  }
+
+  /** Records a request about to be sent; one that cannot be recorded is not sent. */
+  private async note(at: number): Promise<void> {
+    if (this.usage) {
+      try {
+        await this.usage.store.record(this.usage.provider, at, this.symbol);
+      } catch (e) {
+        throw new QuotaError(`request of ${this.usage.provider} not recorded: ${message(e)}`);
+      }
+    }
+    // Kept in order: stored times may lie after this one (the end of their bucket).
+    let i = this.sent.length;
+    while (i > 0 && this.sent[i - 1]! > at) i--;
+    this.sent.splice(i, 0, at);
+    if (this.symbol !== null) this.noteSymbol(this.symbol, at);
   }
 
   async json<T>(url: string, headers: Record<string, string> = {}): Promise<T> {
@@ -165,10 +286,11 @@ export class PoliteHttp {
     body?: Uint8Array,
   ): Promise<Response> {
     const shown = this.shown(url);
+    await this.ready();
     for (let attempt = 0; ; attempt++) {
       if (this.blocked) throw new BlockedError(`stopped for this run: ${this.blocked}`);
       await this.pace();
-      this.sent.push(this.o.clock());
+      await this.note(this.o.clock());
       let res: Response;
       try {
         res = await this.o.fetchImpl(url, {
@@ -256,9 +378,11 @@ export class PoliteHttp {
 
   /** Waits for the minimum gap and for every limit window to have room under 80%. */
   private async pace(): Promise<void> {
-    const last = this.sent.at(-1);
+    // The gap counts from the latest request not after now (a stored time may be its bucket's end).
+    const start = this.o.clock();
+    const last = this.sent.findLast((t) => t <= start);
     if (last !== undefined) {
-      const gap = this.o.minDelayMs - (this.o.clock() - last);
+      const gap = this.o.minDelayMs - (start - last);
       if (gap > 0) await this.o.sleep(gap);
     }
     for (const w of WINDOWS) {

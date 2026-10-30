@@ -3,6 +3,11 @@
 // (403, 429) or would pass its quota stops for the run; any other failure is recorded for that
 // ticker and the run goes on. Issuer sources (layer D) are best effort: what they did is reported
 // like the others, but the caller does not count it against the run (`countsForRun`).
+//
+// Quota guard (requirements 04): every source's client counts its provider's requests across runs
+// (the database's `provider_usage`, unless the context already has a store), on the run's clock
+// when one is injected. A bar, meta or issuer fetch names its symbol first, so a provider's
+// symbols-per-month limit holds; a fetch it refuses stops the source for the run like a block.
 import type { TradingDate } from '@saku/core';
 import {
   type Db,
@@ -16,8 +21,8 @@ import {
   storeSeries,
 } from '@saku/db';
 import type { Sessions } from '@saku/data';
-import { BlockedError, QuotaError } from '../http';
-import type { LoadedPlugins } from '../registry';
+import { BlockedError, type PoliteHttp, QuotaError, type UsageStore } from '../http';
+import { type LoadedPlugins, providerUsageStore } from '../registry';
 import type { IssuerSource, Logger, PluginContext, PluginInfo } from '../types';
 import type { IssuerAvailability } from './verify';
 
@@ -58,6 +63,8 @@ export interface IngestOptions {
   /** Builds a source's context; throws when its key is missing. */
   context: (info: PluginInfo) => PluginContext;
   now?: () => Date;
+  /** Where the quota guard keeps requests across runs. Default: the database (`provider_usage`). */
+  usage?: UsageStore;
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -121,9 +128,23 @@ async function perItem(
   }
 }
 
-function contextOrSkip(r: SourceReport, info: PluginInfo, o: IngestOptions) {
+/** A context's HTTP client; null only for a test context without one (nothing can be sent). */
+const clientOf = (ctx: PluginContext): PoliteHttp | null =>
+  (ctx.http as PoliteHttp | null | undefined) ?? null;
+
+/** The source's context with the quota guard attached, or null (skipped, with the reason). */
+function contextOrSkip(db: Db, r: SourceReport, info: PluginInfo, o: IngestOptions) {
   try {
-    return o.context(info);
+    const ctx = o.context(info);
+    const http = clientOf(ctx);
+    if (http && !http.guarded) {
+      const now = o.now;
+      http.guard(
+        { provider: info.key, store: o.usage ?? providerUsageStore(db) },
+        now && (() => now().getTime()),
+      );
+    }
+    return ctx;
   } catch (e) {
     r.stopped = message(e);
     o.log.warn(`${info.key} skipped`, { reason: r.stopped });
@@ -153,7 +174,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
   for (const source of plugins.bars) {
     const r = report(source.info.key, 'bar');
     reports.push(r);
-    const ctx = contextOrSkip(r, source.info, o);
+    const ctx = contextOrSkip(db, r, source.info, o);
     if (!ctx) continue;
     await perItem(
       r,
@@ -161,6 +182,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
       o.log,
       async (ticker) => {
         const symbol = symbols.find((s) => s.ticker === ticker)!;
+        await clientOf(ctx)?.forSymbol(ticker);
         if (o.mode === 'bootstrap' && source.fetchMeta && !symbol.inceptionDate) {
           const meta = await source.fetchMeta(ticker, ctx);
           await fillSymbolMeta(db, symbol.id, meta);
@@ -186,7 +208,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
   for (const source of plugins.series) {
     const r = report(source.info.key, 'series');
     reports.push(r);
-    const ctx = contextOrSkip(r, source.info, o);
+    const ctx = contextOrSkip(db, r, source.info, o);
     if (!ctx) continue;
     await perItem(r, source.info.provides.series ?? [], o.log, async (id) => {
       const from = windowStart(source.info, wanted(), o.to);
@@ -211,7 +233,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
     reports.push(r);
     const supported = pairs.filter((p) => source.supports(p));
     if (supported.length === 0) continue;
-    const ctx = contextOrSkip(r, source.info, o);
+    const ctx = contextOrSkip(db, r, source.info, o);
     if (!ctx) continue;
     await perItem(r, supported, o.log, async (pair) => {
       const from = windowStart(source.info, wanted(), o.to);
@@ -244,7 +266,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
     }
     const supported = symbols.filter((s) => support.supported.includes(s.ticker));
     if (supported.length === 0) continue;
-    const ctx = contextOrSkip(r, source.info, o);
+    const ctx = contextOrSkip(db, r, source.info, o);
     if (!ctx) continue;
     await perItem(
       r,
@@ -252,6 +274,7 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
       o.log,
       async (ticker) => {
         const symbol = supported.find((s) => s.ticker === ticker)!;
+        await clientOf(ctx)?.forSymbol(ticker);
         const from = windowStart(source.info, wanted(symbol.inceptionDate), o.to);
         const records = await source.fetchRecords(ticker, from, o.to, ctx);
         r.inserted += await storeIssuerRecords(db, {

@@ -1,3 +1,4 @@
+import { USAGE_REQUEST_WINDOW_MS, USAGE_SYMBOL_WINDOW_MS } from '@saku/db';
 import { describe, expect, it } from 'vitest';
 import {
   BlockedError,
@@ -5,6 +6,9 @@ import {
   PoliteHttp,
   type PoliteHttpOptions,
   QuotaError,
+  SYMBOL_WINDOW_MS,
+  type UsageStore,
+  WINDOWS,
   redactUrl,
 } from './http';
 
@@ -219,5 +223,162 @@ describe('secrets in errors', () => {
     await expect(http.text('https://hooks.example.test/1/hook-secret')).rejects.toThrow(
       'HTTP 404 for https://hooks.example.test/1/***',
     );
+  });
+});
+
+/** An exact in-memory store (the database one is tested in @saku/db and through ingest). */
+function memoryStore() {
+  const rows: { provider: string; at: number; symbol: string | null }[] = [];
+  const store: UsageStore = {
+    async load(provider, now) {
+      const mine = rows.filter((r) => r.provider === provider);
+      const symbols = new Map<string, number>();
+      for (const r of mine) if (r.symbol !== null) symbols.set(r.symbol, r.at);
+      return {
+        requests: mine.filter((r) => r.at > now - 86_400_000).map((r) => r.at),
+        symbols,
+      };
+    },
+    async record(provider, at, symbol) {
+      rows.push({ provider, at, symbol });
+    },
+  };
+  return { store, rows };
+}
+
+describe('PoliteHttp quota guard', () => {
+  const guarded = (store: UsageStore, at: { now: number }, options: PoliteHttpOptions = {}) => {
+    const calls: string[] = [];
+    const http = new PoliteHttp({
+      clock: () => at.now,
+      sleep: async (ms) => {
+        at.now += ms;
+      },
+      fetchImpl: (async (url: string) => {
+        calls.push(url);
+        return ok();
+      }) as typeof fetch,
+      maxWaitMs: 1000,
+      usage: { provider: 'p', store },
+      ...options,
+    });
+    return { http, calls };
+  };
+
+  it('a second run in the same hour sees the first run’s requests', async () => {
+    const { store } = memoryStore();
+    const at = { now: 1_000_000 };
+    const first = guarded(store, at, { limits: { perHour: 50 } });
+    for (let k = 0; k < 40; k++) await first.http.json('https://example.test/a');
+    const second = guarded(store, at, { limits: { perHour: 50 } });
+    await expect(second.http.json('https://example.test/a')).rejects.toBeInstanceOf(QuotaError);
+    expect(second.calls).toHaveLength(0);
+    // An hour after the first run's requests, there is room again.
+    at.now += 3_600_000;
+    const third = guarded(store, at, { limits: { perHour: 50 } });
+    await third.http.json('https://example.test/a');
+    expect(third.calls).toHaveLength(1);
+  });
+
+  it('records each request before it is sent, so a crash keeps it (retries count too)', async () => {
+    const { store, rows } = memoryStore();
+    const at = { now: 1_000_000 };
+    let seen = 0;
+    const http = new PoliteHttp({
+      clock: () => at.now,
+      sleep: async (ms) => {
+        at.now += ms;
+      },
+      usage: { provider: 'p', store },
+      fetchImpl: (async () => {
+        // Recorded before the request left: what was stored already includes this one.
+        seen = rows.length;
+        throw new Error('the process dies here');
+      }) as typeof fetch,
+      retries: 2,
+    });
+    await expect(http.json('https://example.test/a')).rejects.toThrow(/after 3 tries/);
+    expect(seen).toBe(3);
+    expect(rows).toHaveLength(3);
+  });
+
+  it('sends nothing when earlier requests are unknown or a request cannot be recorded', async () => {
+    const at = { now: 1_000_000 };
+    const failing = (what: 'load' | 'record'): UsageStore => ({
+      load: async () => {
+        if (what === 'load') throw new Error('database locked');
+        return { requests: [], symbols: new Map() };
+      },
+      record: async () => {
+        throw new Error('database locked');
+      },
+    });
+    for (const what of ['load', 'record'] as const) {
+      const { http, calls } = guarded(failing(what), at);
+      await expect(http.json('https://example.test/a')).rejects.toBeInstanceOf(QuotaError);
+      expect(calls).toHaveLength(0);
+    }
+    const { http } = guarded(failing('load'), at, { limits: { symbolsPerMonth: 10 } });
+    await expect(http.forSymbol('AAA')).rejects.toBeInstanceOf(QuotaError);
+  });
+
+  it('symbolsPerMonth: 400 of 500 used refuses a new symbol, allows a used one, frees after 31 days', async () => {
+    const { store } = memoryStore();
+    const at = { now: 1_000_000_000 };
+    const limits = { symbolsPerMonth: 500 };
+    const first = guarded(store, at, { limits, minDelayMs: 0 });
+    for (let k = 0; k < 400; k++) {
+      await first.http.forSymbol(`S${k}`);
+      await first.http.json(`https://example.test/${k}`);
+    }
+    // The run itself stops at 80%.
+    await expect(first.http.forSymbol('NEW')).rejects.toThrow(/400 of 500 symbols/);
+    at.now += 60_000;
+    const second = guarded(store, at, { limits });
+    await expect(second.http.forSymbol('NEW')).rejects.toBeInstanceOf(QuotaError);
+    await second.http.forSymbol('S7');
+    await second.http.json('https://example.test/again');
+    expect(second.calls).toHaveLength(1);
+    // 31 days after the last request for S0..S399 (S7 was asked again a minute later).
+    at.now += SYMBOL_WINDOW_MS;
+    const later = guarded(store, at, { limits });
+    await later.http.forSymbol('NEW');
+    await later.http.json('https://example.test/new');
+    expect(later.calls).toHaveLength(1);
+  });
+
+  it('a request after a refused symbol is recorded without it', async () => {
+    const { store, rows } = memoryStore();
+    const at = { now: 1_000_000 };
+    const { http } = guarded(store, at, { limits: { symbolsPerMonth: 1 } });
+    await http.forSymbol('AAA');
+    await http.json('https://example.test/a');
+    await expect(http.forSymbol('BBB')).rejects.toBeInstanceOf(QuotaError);
+    await http.json('https://example.test/series');
+    expect(rows.map((r) => r.symbol)).toEqual(['AAA', null]);
+  });
+
+  it('the store gets only the provider, the time and the symbol', async () => {
+    const { store, rows } = memoryStore();
+    const { http } = guarded(store, { now: 1_000_000 });
+    await http.forSymbol('AAA');
+    await http.json('https://example.test/a?token=SECRET', { Authorization: 'Token SECRET' });
+    expect(JSON.stringify(rows)).not.toMatch(/SECRET|example|http/);
+  });
+
+  it('attaches once, and never after requests were sent', async () => {
+    const { store } = memoryStore();
+    const { http } = fakeClient([ok]);
+    await http.json('https://example.test/a');
+    expect(() => http.guard({ provider: 'p', store })).toThrow(/after requests/);
+    const fresh = new PoliteHttp();
+    fresh.guard({ provider: 'p', store });
+    expect(fresh.guarded).toBe(true);
+    expect(() => fresh.guard({ provider: 'p', store })).toThrow(/already attached/);
+  });
+
+  it('the database store keeps the windows the guard needs', () => {
+    expect(USAGE_SYMBOL_WINDOW_MS).toBe(SYMBOL_WINDOW_MS);
+    expect(USAGE_REQUEST_WINDOW_MS).toBeGreaterThanOrEqual(Math.max(...WINDOWS.map((w) => w.ms)));
   });
 });

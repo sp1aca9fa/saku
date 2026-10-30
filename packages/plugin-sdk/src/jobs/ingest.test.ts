@@ -3,7 +3,7 @@ import { issuerRecordsOf, schema, setSetting, symbolId, upsertSymbols } from '@s
 import { testDb } from '@saku/db/testing';
 import { Sessions } from '@saku/data';
 import { describe, expect, it } from 'vitest';
-import { BlockedError } from '../http';
+import { BlockedError, PoliteHttp } from '../http';
 import { emptyPlugins } from '../registry';
 import type { BarSource, FxSource, IssuerSource, PluginInfo } from '../types';
 import { ingest, issuerAvailability, windowStart } from './ingest';
@@ -201,6 +201,119 @@ describe('ingest', () => {
       { source: 'iss', supported: ['AAA', 'BBB'], unavailable: ['AAA', 'BBB'] },
       { source: 'iss', supported: ['AAA', 'BBB'], unavailable: ['AAA', 'BBB'] },
     ]);
+  });
+});
+
+describe('ingest: quota guard across runs', () => {
+  /** A bar source that asks a fake provider once per ticker (the URL carries a key). */
+  function httpSource(limits: PluginInfo['limits']) {
+    const calls: string[] = [];
+    const src: BarSource = {
+      info: { ...info('q'), limits },
+      async fetchBars(ticker, _from, to, ctx) {
+        await ctx.http.json(`https://example.test/${ticker}?token=SECRETKEY`);
+        return [bar(to, 1)];
+      },
+    };
+    const context = () => ({
+      http: new PoliteHttp({
+        minDelayMs: 0,
+        sleep: async () => {},
+        limits,
+        fetchImpl: (async (url: string) => {
+          calls.push(url);
+          return new Response('{}');
+        }) as typeof fetch,
+      }),
+      now: new Date(),
+      log,
+    });
+    return { src, calls, context };
+  }
+  const at = (iso: string) => () => new Date(iso);
+
+  it('a second run in the same hour counts the first run’s requests (run clock)', async () => {
+    const db = await setup();
+    // perHour 2: 80% allows 1 request per hour; two tickers per run.
+    const { src, calls, context } = httpSource({ perHour: 2 });
+    const plugins = { ...emptyPlugins(), bars: [src] };
+    const first = await ingest(db, plugins, {
+      ...options('daily'),
+      context,
+      now: at('2026-01-17T01:00:00Z'),
+    });
+    expect(first[0]).toMatchObject({ ok: ['AAA'] });
+    expect(first[0]!.stopped).toMatch(/1 of 2 requests per hour/);
+    const second = await ingest(db, plugins, {
+      ...options('daily'),
+      context,
+      now: at('2026-01-17T01:30:00Z'),
+    });
+    expect(second[0]).toMatchObject({ ok: [] });
+    expect(second[0]!.stopped).toMatch(/per hour/);
+    expect(calls).toHaveLength(1);
+    // Past the hour (counted from the end of the first request's minute), room again.
+    const third = await ingest(db, plugins, {
+      ...options('daily'),
+      context,
+      now: at('2026-01-17T02:01:00Z'),
+    });
+    expect(third[0]).toMatchObject({ ok: ['AAA'] });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('a new symbol over 80% of symbolsPerMonth stops the source; a counted one is fetched', async () => {
+    const db = await setup();
+    // 80% of 2 is 1 symbol in 31 days.
+    const { src, calls, context } = httpSource({ symbolsPerMonth: 2 });
+    const plugins = { ...emptyPlugins(), bars: [src] };
+    const r = await ingest(db, plugins, {
+      ...options('daily'),
+      context,
+      now: at('2026-01-17T01:00:00Z'),
+    });
+    expect(r[0]).toMatchObject({ ok: ['AAA'] });
+    expect(r[0]!.stopped).toMatch(/1 of 2 symbols per 31 days/);
+    const next = await ingest(db, plugins, {
+      ...options('daily'),
+      context,
+      now: at('2026-01-18T01:00:00Z'),
+    });
+    expect(next[0]).toMatchObject({ ok: ['AAA'] });
+    expect(calls.map((u) => new URL(u).pathname)).toEqual(['/AAA', '/AAA']);
+  });
+
+  it('stores only provider buckets, counts and tickers (no URL or key)', async () => {
+    const db = await setup();
+    const { src, context } = httpSource({});
+    await ingest(db, { ...emptyPlugins(), bars: [src] }, { ...options('daily'), context });
+    const rows = await db.select().from(schema.providerUsage);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((x) => x.provider === 'q')).toBe(true);
+    expect(JSON.stringify(rows)).not.toMatch(/SECRETKEY|example|http/);
+    const day = rows.find((x) => x.windowType === 'day')!;
+    expect(day).toMatchObject({ requestCount: 2, symbols: ['AAA', 'BBB'] });
+  });
+
+  it('a store that cannot be read stops the source before any request', async () => {
+    const db = await setup();
+    const { src, calls, context } = httpSource({});
+    const r = await ingest(
+      db,
+      { ...emptyPlugins(), bars: [src] },
+      {
+        ...options('daily'),
+        context,
+        usage: {
+          load: async () => {
+            throw new Error('database locked');
+          },
+          record: async () => {},
+        },
+      },
+    );
+    expect(r[0]!.stopped).toMatch(/unknown: database locked/);
+    expect(calls).toHaveLength(0);
   });
 });
 

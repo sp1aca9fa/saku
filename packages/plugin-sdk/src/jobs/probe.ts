@@ -1,6 +1,8 @@
 // A1 measurement: when is each bar source's daily data final? Every hourly check fetches the last
 // few sessions of one ticker from every bar source and appends what came back to a JSON-lines
 // file. The first time a date appears, and the last time its values change, give the times.
+// The CLI gives each source a client with the quota guard's store, so probe requests count
+// toward the provider's limits across runs like any other.
 import { stateDir } from '@saku/db/env';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -35,7 +37,11 @@ export async function probe(
   for (const source of plugins.bars) {
     const base = { source: source.info.key, ticker: o.ticker };
     try {
-      const bars = await source.fetchBars(o.ticker, o.from, o.to, o.context(source.info));
+      const ctx = o.context(source.info);
+      // The quota guard counts the ticker against the provider's symbols-per-month limit; a
+      // context without a client (tests) can send nothing.
+      await (ctx.http as PluginContext['http'] | undefined)?.forSymbol(o.ticker);
+      const bars = await source.fetchBars(o.ticker, o.from, o.to, ctx);
       const at = now().toISOString();
       for (const b of bars) {
         lines.push({
