@@ -30,8 +30,23 @@ import {
 /** Rows per insert statement (SQLite caps bound variables per statement). */
 const CHUNK = 500;
 
-/** Two provider adjustment ratios this close are one re-adjustment (float noise aside). */
-const SAME_FACTOR = 1e-9;
+/**
+ * Relative size below which a change in a provider's adjusted close is rounding, not a
+ * re-adjustment (requirements 04: provider adjusted values keep the latest snapshot plus one
+ * re-adjustment event per factor; they are for verification only). Rule: the coarsest provider
+ * we store sends single-precision floats (Yahoo's chart values, e.g. 453.1600036621094 for 453.16:
+ * 24 significant bits, about 7.2 significant decimals, relative rounding at most 2^-24 = 6e-8 per
+ * value). A ratio of two such values is off by up to 2^-23 = 1.2e-7 and two ratios differ by up to
+ * 2.4e-7; the provider recomputing its factors in that precision adds a few more units. 1e-6
+ * leaves about 4x that margin and stays far below a real re-adjustment, whose size is a dividend
+ * relative to the price (a 0.01 distribution on a 500 share is 2e-5) or a split. Used both for
+ * "this date did not change" (|ratio - 1|) and for "these dates share one factor". A smaller real
+ * change is still stored (latest snapshot); it only records no event. Raw fields are compared
+ * exactly (revision log), never with this tolerance.
+ */
+export const ADJ_CLOSE_ROUNDING = 1e-6;
+
+const sameFactor = (a: number, b: number) => Math.abs(a - b) <= ADJ_CLOSE_ROUNDING * Math.abs(b);
 
 export interface SymbolInput {
   ticker: string;
@@ -135,7 +150,8 @@ function asRawBar(row: StoredBar): RawBar {
 /**
  * Stores one source's bars for one symbol: new dates are inserted; for stored dates, every
  * changed raw field is logged in `bar_revisions` before the row is updated. Changed provider
- * adjusted closes are grouped into one `readjustments` event per factor.
+ * adjusted closes are stored (latest snapshot) and grouped into one `readjustments` event per
+ * factor; a change within ADJ_CLOSE_ROUNDING of the stored value is rounding and makes no event.
  */
 export async function storeRawBars(
   db: Db,
@@ -211,7 +227,9 @@ export async function storeRawBars(
       const newAdj = row.providerAdjClose;
       const adjChanged = oldAdj !== newAdj;
       if (adjChanged && oldAdj !== null && newAdj !== null && oldAdj !== 0) {
-        ratios.push({ date: bar.date, factor: newAdj / oldAdj });
+        const factor = newAdj / oldAdj;
+        // Rounding noise: the new value is stored below, but it is no re-adjustment.
+        if (!sameFactor(factor, 1)) ratios.push({ date: bar.date, factor });
       }
       if (changed.length > 0 || adjChanged) {
         await tx
@@ -245,18 +263,25 @@ export async function storeRawBars(
   return result;
 }
 
-/** Consecutive changed dates sharing one factor form one re-adjustment event. */
+/**
+ * Consecutive changed dates sharing one factor form one re-adjustment event. Each date is compared
+ * with the previous one (within ADJ_CLOSE_ROUNDING), so rounding that drifts slowly across a long
+ * history stays one event, while a real step (another dividend or split between the two dates)
+ * starts a new one. The event's factor is its first date's.
+ */
 export function groupFactors(
   ratios: { date: string; factor: number }[],
 ): { from: string; to: string; factor: number }[] {
   const groups: { from: string; to: string; factor: number }[] = [];
+  let previous: number | undefined;
   for (const r of ratios) {
     const last = groups.at(-1);
-    if (last && Math.abs(r.factor - last.factor) <= SAME_FACTOR * Math.abs(last.factor)) {
+    if (last && previous !== undefined && sameFactor(r.factor, previous)) {
       last.to = r.date;
     } else {
       groups.push({ from: r.date, to: r.date, factor: r.factor });
     }
+    previous = r.factor;
   }
   return groups;
 }
