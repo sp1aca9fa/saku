@@ -259,10 +259,14 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
           },
         );
         for (const t of f.today) log.info(`${t.version}: ${t.allocation} (${t.dataStatus})`, t);
-        // A stored version that no longer parses was skipped: the run is not complete.
+        // A stored version that no longer parses was skipped: the run is not complete, and the
+        // admins' job-failure alert names each version and why (its days are caught up once the
+        // definition parses again).
         if (f.errors.length > 0) {
           log.warn('Forward: versions that do not parse were skipped', { errors: f.errors });
           markIncomplete('forward');
+          for (const e of f.errors)
+            failures.push(`${e.version}: definition does not parse: ${e.error}`);
         }
         // Undelivered alerts are retried at the next check (sent ones are not repeated).
         const sent = await sendStrategyAlerts(db, { ...alerting, sessions });

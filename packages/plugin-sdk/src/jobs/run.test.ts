@@ -212,6 +212,51 @@ describe('a daily run', () => {
     expect(again.sent.map((m) => m.target)).toEqual(['me']);
   });
 
+  it('a version that no longer parses fails the run, named to the admins; the others still run', async () => {
+    const { db, version } = await setup();
+    // Stored directly with a rule added after registration (a ticker twice), as an old version.
+    const broken = await registerVersion(db, {
+      ownerId: version.ownerId,
+      name: 'Old',
+      at: new Date('2026-01-13T22:00:00Z'),
+      strategy: {
+        name: 'Old',
+        account: 'taxable',
+        safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [],
+        allocations: [
+          {
+            name: 'Calm',
+            holdings: [
+              { ticker: 'AAA', weight: 50 },
+              { ticker: 'AAA', weight: 50 },
+            ],
+          },
+        ],
+      },
+    });
+    const { notifier, sent } = fakeNotifier();
+    const o = options(notifier);
+    const r = await runJob(db, plugins([barSource('p'), barSource('s')]), o);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('incomplete: forward');
+    expect(r.error).toContain(`Old (${broken.id}): definition does not parse:`);
+    expect(r.error).toContain('"AAA" is listed twice');
+    expect(o.hooks).toEqual(['backup']);
+    const failure = sent.find((m) => m.target === 'ops' && m.text.includes('did not finish'));
+    expect(failure?.text).toContain(`Old (${broken.id}): definition does not parse`);
+    // Nothing is guessed for it; the good version is still recorded.
+    expect(await forwardRecord(db, broken.id)).toEqual([]);
+    expect((await forwardRecord(db, version.id)).map((e) => e.date)).toEqual([
+      '2026-01-15',
+      '2026-01-16',
+    ]);
+    const [run] = await db.select().from(schema.jobRuns);
+    expect(run).toMatchObject({ status: 'failed', heartbeatSent: false });
+    expect(run!.error).toContain(`Old (${broken.id})`);
+  });
+
   it('without the cash calendar it fails before any request', async () => {
     const { db } = await setup();
     const { notifier } = fakeNotifier();

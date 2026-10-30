@@ -53,7 +53,8 @@ export interface ForwardSummary {
   /**
    * Versions whose stored definition no longer parses (e.g. a rule added after registration):
    * nothing is appended for them (no guessed decision); the others still run. The run is then
-   * incomplete; the days are caught up once the definition parses again.
+   * incomplete and the admins' job-failure alert names each one and why; the days are caught up
+   * once the definition parses again.
    */
   errors: { version: string; error: string }[];
 }
@@ -294,7 +295,7 @@ export async function recompute(
     // record yet (the forward step skipped it too), so the run is incomplete.
     const parsed = parseVersion(version);
     if ('error' in parsed) {
-      summary.errors.push({ version: version.name, error: parsed.error });
+      summary.errors.push({ version: `${version.name} (${version.id})`, error: parsed.error });
       continue;
     }
     const { strategy } = parsed;
@@ -308,7 +309,7 @@ export async function recompute(
     } catch (e) {
       // Not an engine difference to annotate day by day: a failure to report.
       summary.errors.push({
-        version: version.name,
+        version: `${version.name} (${version.id})`,
         error: e instanceof Error ? e.message : String(e),
       });
       continue;

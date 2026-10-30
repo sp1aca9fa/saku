@@ -158,7 +158,8 @@ export async function sendStrategyAlerts(
     if (!entry || entry.date !== o.date) continue;
     const parsed = parseVersion(version);
     if ('error' in parsed) {
-      // Its timing is unknown: no alert is guessed; the run is incomplete and the admins told.
+      // Its timing is unknown: no alert is guessed; the run is incomplete. The admins are told
+      // which version and why by the forward step, which parses every version before this.
       summary.failed.push(
         `${version.name} (${version.id}): definition does not parse: ${parsed.error}`,
       );
