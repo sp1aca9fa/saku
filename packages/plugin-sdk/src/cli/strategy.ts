@@ -1,6 +1,7 @@
 // Strategies and the journal from the server (A2; the web UI comes with D1).
 //
-//   pnpm strategy check <file.json> [--registration]      validate a definition (no record); with
+//   pnpm strategy check <file.json> [--registration [--user <username> | --library]]
+//                                                          validate a definition (no record); with
 //                                                          --registration also every reason register
 //                                                          would refuse (writes nothing)
 //   pnpm strategy register <file.json> --user <username>   register: an immutable version whose
@@ -54,6 +55,7 @@ import {
   registerStrategy,
 } from '../jobs/strategy-commands';
 import { dailyAfterOf, dailyTarget } from '../jobs/target';
+import { parseCheckArgs } from './check-args';
 import { codeVersion } from '../code-version';
 import { loadPlugins, notifierContexts, providerUsageStore } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -114,10 +116,19 @@ async function registrationInput() {
 }
 
 if (tool === 'strategy' && command === 'check') {
-  const s = load(rest[0]);
+  const args = parseCheckArgs(rest);
+  if ('error' in args) fail(args.error);
+  const a = args as Exclude<typeof args, { error: string }>;
+  const s = load(a.file);
   console.log(`${s.name}: valid; depends on ${dependencies(s).join(', ')}.`);
-  if (rest.includes('--registration')) {
-    finish(await previewRegistration(db, { strategy: s, ...(await registrationInput()) }));
+  if (a.registration) {
+    // The same account lookup as register; without either flag the account is not checked.
+    if (a.user !== undefined) await userId();
+    const out = await previewRegistration(db, { strategy: s, ...(await registrationInput()) });
+    if (a.user === undefined && !a.library) {
+      out.stdout.push('Account not checked (give --user or --library).');
+    }
+    finish(out);
   }
 } else if (tool === 'strategy' && command === 'register') {
   const s = load(rest[0]);
