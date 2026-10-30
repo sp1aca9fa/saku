@@ -138,7 +138,8 @@ export interface AlertOptions {
   /**
    * A drill (`pnpm drill`, on a throwaway copy of the database): every message is marked as one
    * in its first line, followed by a line saying nothing was recorded, and is sent whatever was
-   * sent before; nothing is read from or written to `alerts_sent`.
+   * sent before; nothing is read from or written to `alerts_sent`. The mark and its line take
+   * their room in the channel's longest message first, so the alert keeps its end as it would.
    */
   drill?: boolean;
   /** Told of each delivered message: the channel, the alert type and the message's first line. */
@@ -255,7 +256,8 @@ export async function sendAdminAlert(
   await eachAdminChannel(db, o, o.health, async (t, channel, healthLine) => {
     // No notifier for the channel: deliver reports it; the room is then irrelevant.
     const max = o.notifiers.find((n) => n.info.key === channel.type)?.info.maxLength ?? Infinity;
-    const text = [...o.lines(t, max - healthLine.length - 1), healthLine].join('\n');
+    const room = max - healthLine.length - 1 - (o.drill ? drillOverhead(t) : 0);
+    const text = [...o.lines(t, room), healthLine].join('\n');
     await deliver(db, o, channel, { key, text }, summary, t);
   });
   return summary;
@@ -554,9 +556,15 @@ async function deliver(
     return;
   }
   const max = notifier.info.maxLength;
-  // A drill's mark is in the first two lines, so a cut at the end never removes it.
-  const full = o.drill ? drillText(t, alert.text) : alert.text;
-  const text = full.length > max ? `${full.slice(0, max - 1)}…` : full;
+  // A drill: the alert is cut to the room its mark and line leave, then marked, so the message
+  // fits and keeps the alert's end as the real one would. A channel too small even for those:
+  // the marked text is cut at the end (the mark leads, so it stays).
+  const room = max - drillOverhead(t);
+  const text = !o.drill
+    ? cut(alert.text, max)
+    : room > 1
+      ? drillText(t, cut(alert.text, room))
+      : cut(drillText(t, alert.text), max);
   try {
     await notifier.send(channel.target, text, o.context(notifier, channel.id));
     if (!o.drill) {
@@ -571,6 +579,17 @@ async function deliver(
     o.log.warn(`Alert not delivered (${label})`, { key: alert.key, reason });
     summary.failed.push(`${label}: ${reason}`);
   }
+}
+
+/** At most `max` characters, "…" at the end when cut (not between a surrogate pair's halves). */
+function cut(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, '')}…`;
+}
+
+/** The characters `drillText` adds: the mark and a space, the drill line and its newline. */
+export function drillOverhead(t: Translate): number {
+  return t('alerts.drill.mark').length + 1 + t('alerts.drill.body').length + 1;
 }
 
 /**

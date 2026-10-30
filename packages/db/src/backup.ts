@@ -6,6 +6,7 @@ import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rename, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createGzip } from 'node:zlib';
 import { dataDir } from './env';
@@ -36,10 +37,16 @@ async function checkCopy(file: string): Promise<number> {
 /**
  * A consistent copy of the database at `url` in the new file `file` (VACUUM INTO, which only
  * reads the source), checked by SQLite's integrity check; returns its table count. Used by the
- * backups and by `pnpm drill`, which runs on such a copy.
+ * backups and by `pnpm drill`, which runs on such a copy. The source must be an existing file:
+ * opening a missing one would create an empty database there (and copy nothing).
  */
 export async function snapshotDatabase(url: string, file: string): Promise<number> {
   if (existsSync(file)) throw new Error(`${file} exists; a snapshot only writes a new file.`);
+  const path = filePathOf(url);
+  if (path === undefined) throw new Error(`${url} is not a database file (a file: URL).`);
+  if (!existsSync(path)) {
+    throw new Error(`No database at ${path}; nothing was copied (and no file was created).`);
+  }
   const source = createClient({ url });
   try {
     await source.execute({ sql: 'VACUUM INTO ?', args: [file] });
@@ -47,6 +54,15 @@ export async function snapshotDatabase(url: string, file: string): Promise<numbe
     source.close();
   }
   return checkCopy(file);
+}
+
+/** The file a `file:` URL names (`file:/a/b`, `file:///a/b`, `file:rel`), or undefined. */
+function filePathOf(url: string): string | undefined {
+  if (!url.startsWith('file:')) return undefined;
+  // libsql reads what follows `?` as options, not as part of the path.
+  const bare = url.split('?')[0]!;
+  const path = bare.startsWith('file://') ? fileURLToPath(bare) : bare.slice('file:'.length);
+  return path === '' || path === ':memory:' ? undefined : path;
 }
 
 /**

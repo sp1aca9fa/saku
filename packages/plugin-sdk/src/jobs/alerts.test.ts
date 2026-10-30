@@ -4,6 +4,7 @@ import {
   appendForward,
   channelsOf,
   createUser,
+  recordAlertSent,
   registerVersion,
   schema,
   setChannelEnabled,
@@ -19,14 +20,17 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   JOB_FAILURE_LINE_LENGTH,
+  type DayEntry,
   describeReason,
   jobFailureLines,
   sendDataHealthAdmin,
+  sendDayAlert,
   sendJobFailure,
   sendRevisions,
   sendStrategyAlerts,
   sendUpdateFailed,
 } from './alerts';
+import { parseVersion } from './forward';
 
 // Every check id in packages/data, read from its source so a new check needs a text.
 const dataSrc = join(dirname(fileURLToPath(import.meta.url)), '../../../data/src');
@@ -588,5 +592,98 @@ describe('reason codes in words', () => {
     expect(describeReason(translator('ja'), 'SPY:D.distribution_match@iss')).toBe(
       'SPY: 分配金が発行体の記録と異なります(iss)',
     );
+  });
+});
+
+describe('drill messages (pnpm drill)', () => {
+  const DATE = '2026-01-05';
+  const red: DayEntry = {
+    date: DATE,
+    allocation: 'Safe state',
+    holdings: [{ ticker: 'CASH_USD', weight: 100 }],
+    dataStatus: 'red',
+    safeStateApplied: true,
+    reasons: ['AAA:A.large_move@p'],
+  };
+  const sentRows = async (db: Awaited<ReturnType<typeof setup>>['db']) =>
+    (await db.select().from(schema.alertsSent)).length;
+
+  it('delivers although the day was already told, and records nothing', async () => {
+    const { db, owner, version } = await setup();
+    await setSetting(db, 'forward_records_from', DATE);
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const channels = await channelsOf(db, owner);
+    // The day's alerts were already sent and recorded on both channels.
+    for (const channel of channels) {
+      await recordAlertSent(db, channel, { subject: version.id, date: DATE, type: 'data_red' });
+    }
+    const ops = channels.find((c) => c.admin)!;
+    await recordAlertSent(db, ops, { subject: 'data', date: DATE, type: 'data_health' });
+    expect(await sentRows(db)).toBe(3);
+    const parsed = parseVersion(version);
+    if ('error' in parsed) throw new Error(parsed.error);
+    const d = { version, strategy: parsed.strategy, day: red };
+
+    // Without the drill flag the rows hold: nothing is sent again.
+    const real = fakeNotifier();
+    const o = options(real.notifier, DATE);
+    expect(await sendDayAlert(db, o, d)).toEqual({ sent: 0, failed: [] });
+    expect(await sendDataHealthAdmin(db, { ...o, health: 'red', reasons: ['AAA'] })).toEqual({
+      sent: 0,
+      failed: [],
+    });
+
+    // The drill sends to both channels anyway, marked, and the rows are as they were.
+    const { notifier, sent } = fakeNotifier();
+    const drill = { ...options(notifier, DATE), drill: true };
+    expect(await sendDayAlert(db, drill, d)).toEqual({ sent: 2, failed: [] });
+    expect(await sendDataHealthAdmin(db, { ...drill, health: 'red', reasons: ['AAA'] })).toEqual({
+      sent: 1,
+      failed: [],
+    });
+    expect(sent.map((m) => m.target).sort()).toEqual(['chat-1', 'ops', 'ops']);
+    expect(sent.every((m) => m.text.startsWith('[DRILL] '))).toBe(true);
+    expect(await sentRows(db)).toBe(3);
+  });
+
+  it('fits the channel with the mark, keeping the count line and the health line', async () => {
+    const t = translator('en');
+    const { db, owner } = await setup();
+    await setSetting(db, 'forward_records_from', DATE);
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const failures = Array.from({ length: 9 }, () => 'x'.repeat(5000));
+    const { notifier, sent } = fakeNotifier(false, 1000);
+    const o = { ...options(notifier, DATE), drill: true, job: 'daily', failures };
+    expect((await sendJobFailure(db, o)).sent).toBe(1);
+    const text = sent[0]!.text;
+    const lines = text.split('\n');
+    expect(text.length).toBeLessThanOrEqual(1000);
+    expect(lines[0]).toBe(`[DRILL] Saku: the daily run for ${DATE} did not finish`);
+    expect(lines[1]).toBe(t('alerts.drill.body'));
+    expect(text.endsWith('Data health: unknown (the run did not finish).')).toBe(true);
+    const shown = lines.filter((l) => l.startsWith('- ')).length;
+    expect(shown).toBeGreaterThan(0);
+    expect(text).toContain(`...and ${9 - shown} more.`);
+  });
+
+  it('cuts the alert, not the mark, on a small channel', async () => {
+    const t = translator('en');
+    const { db, version } = await setup();
+    const parsed = parseVersion(version);
+    if ('error' in parsed) throw new Error(parsed.error);
+    const day = { ...red, reasons: Array.from({ length: 40 }, (_, i) => `T${i}:A.large_move@p`) };
+    for (const max of [300, 40]) {
+      const { notifier, sent } = fakeNotifier(false, max);
+      const drill = { ...options(notifier, DATE), drill: true };
+      expect(
+        (await sendDayAlert(db, drill, { version, strategy: parsed.strategy, day })).sent,
+      ).toBe(1);
+      const text = sent[0]!.text;
+      expect(text.length).toBeLessThanOrEqual(max);
+      expect(text.startsWith('[DRILL] ')).toBe(true);
+      expect(text.endsWith('…')).toBe(true);
+      // Room for the mark and its line: both whole, the alert cut after them.
+      if (max === 300) expect(text.split('\n')[1]).toBe(t('alerts.drill.body'));
+    }
   });
 });

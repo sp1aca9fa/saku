@@ -1,9 +1,16 @@
 import { createClient } from '@libsql/client';
-import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { backupDatabase, backupName, pruneBackups, restoreBackup, toKeep } from './backup';
+import {
+  backupDatabase,
+  backupName,
+  pruneBackups,
+  restoreBackup,
+  snapshotDatabase,
+  toKeep,
+} from './backup';
 import { createDb } from './client';
 import { migrateDb } from './migrate';
 import { symbols } from './schema';
@@ -29,6 +36,21 @@ describe('backups', () => {
     const c = createClient({ url: `file:${target}` });
     expect((await c.execute('SELECT ticker FROM symbols')).rows[0]?.[0]).toBe('AAA');
     c.close();
+  });
+
+  it('a snapshot never creates a missing source database', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'saku-snapshot-missing-'));
+    const live = join(dir, 'live.db');
+    const copy = join(dir, 'copy.db');
+    for (const url of [`file:${live}`, `file://${live}`]) {
+      await expect(snapshotDatabase(url, copy)).rejects.toThrow(/No database at/);
+    }
+    await expect(snapshotDatabase('file::memory:', copy)).rejects.toThrow(/not a database file/);
+    await expect(snapshotDatabase('libsql://example.invalid', copy)).rejects.toThrow(
+      /not a database file/,
+    );
+    expect(existsSync(live)).toBe(false);
+    expect(readdirSync(dir)).toEqual([]);
   });
 
   it('refuses a corrupt backup', async () => {

@@ -70,8 +70,18 @@ The date is the latest completed session, or `--date <YYYY-MM-DD>` (a completed 
 run fetched). The output lists the fault, the day's grade, each strategy's action (it must be the
 safe state) and the alerts sent; the command exits 0 only when the day was red, every strategy
 applied its safe state and its alert reached at least one channel. It refuses without a
-registered strategy (register one first), on CI or Vercel, and while another job runs (try again
-when it has finished).
+registered strategy (register one first), before forward records start (`forward_records_from`)
+or for a date before they start, on CI or Vercel, and while another job runs (try again when it
+has finished).
+
+It follows the daily run's rules for which strategies record the day: a strategy registered at
+or after that day's close (16:00 New York) has no record that day, so it is not drilled; the
+output lists it under "Not drilled" and the drill fails. Choose a later date.
+
+The drill's messages are real sends but are counted only in the copy, which is deleted: the live
+database's quota guard does not see them. A drill sends a few messages per channel (each
+strategy's alert and the admins' data alert); mind a channel whose provider has a small daily or
+monthly cap, and do not run drills back to back on it.
 
 ## A failed run and catch-up
 

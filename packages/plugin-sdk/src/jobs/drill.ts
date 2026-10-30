@@ -8,9 +8,12 @@
 //    "decimal shift", packages/plugin-sdk/src/jobs/faults.test.ts), stored the way ingest stores
 //    a response (the copy's revision log). No source is asked for anything.
 // 3. Layers A-C run on the copy for the day as the daily run's checks do (requirements 04).
-// 4. Each registered version decides the day as the forward step does (the canonical bars and
-//    their grades; red: the strategy's declared safe state), but nothing is appended: no forward
-//    record, chain entry, annotation, timestamp, stamp or heartbeat, here or in the live database.
+// 4. Each registered version the forward step would record for the day (its rules: after
+//    `forward_records_from`, a close after registration; `recordsDay`) decides the day as that
+//    step does (the canonical bars and their grades; red: the strategy's declared safe state), but
+//    nothing is appended: no forward record, chain entry, annotation, timestamp, stamp or
+//    heartbeat, here or in the live database. A version that would not record the day is not
+//    drilled, and the drill does not pass while one is left out.
 // 5. The day's alerts (the owner's safe-state alert, the admins' data alert) go to the real
 //    channels, each marked as a drill in its title with a line saying nothing was recorded.
 // The copy is deleted at the end, also on failure. The drill holds the jobs lock, so no job writes
@@ -29,6 +32,7 @@ import {
   activeSymbols,
   allVersions,
   createDb,
+  getSetting,
   schema,
   sourceRolesOf,
   startRun,
@@ -46,7 +50,7 @@ import { DATA_KIND, assignedOnly } from '../roles';
 import { assertServerOnly } from '../server-only';
 import type { Logger, Notifier, PluginContext } from '../types';
 import { type AlertOptions, type DayEntry, sendDataHealthAdmin, sendDayAlert } from './alerts';
-import { healthOf, parseVersion, reader } from './forward';
+import { healthOf, parseVersion, reader, recordsDay } from './forward';
 import { DAILY_OVERLAP, supportedBy } from './ingest';
 import { lock } from './lock';
 import { declaredCalendars } from './run';
@@ -88,6 +92,13 @@ export interface DrillVersion {
   delivered: number;
 }
 
+/** A registered version the forward step would not record on the target date: not drilled. */
+export interface NotDrilled {
+  name: string;
+  id: string;
+  reason: string;
+}
+
 export interface DrillReport {
   target: TradingDate;
   /** The day's overall grade on the copy, after the fault. */
@@ -96,10 +107,15 @@ export interface DrillReport {
   /** Where the fault went: the primary's bar of each signal ticker on the target date. */
   faults: { ticker: string; source: string; close: number; faulted: number }[];
   versions: DrillVersion[];
+  /** Registered versions that do not record the target date (each makes the drill fail). */
+  notDrilled: NotDrilled[];
   alerts: { channel: string; type: string; title: string }[];
   /** Deliveries that failed, versions that do not parse: each makes the drill fail. */
   problems: string[];
-  /** Red, every version on its safe state with its alert on at least one channel, no problem. */
+  /**
+   * Red, every registered version drilled, on its safe state with its alert on at least one
+   * channel, no problem.
+   */
   ok: boolean;
 }
 
@@ -143,6 +159,22 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
       refused: `The database is missing migration(s): ${pending.join(', ')}. Run pnpm db:migrate first.`,
     };
   }
+  // The forward step's gate (requirements 05, A1): nothing is recorded or alerted before it.
+  const from = await getSetting(db, 'forward_records_from');
+  if (!from) {
+    return {
+      refused:
+        'Forward records have not started (forward_records_from is not set; the A1 gate), so ' +
+        'the daily run records and alerts nothing yet and there is nothing to drill.',
+    };
+  }
+  if (from > o.target) {
+    return {
+      refused:
+        `Forward records start on ${from}, after ${o.target}, so the daily run records nothing ` +
+        `for that day. Choose a later date: pnpm drill red --date <YYYY-MM-DD>.`,
+    };
+  }
   // The versions that alert someone (library versions have no recipient).
   const registered = (await allVersions(db)).filter((v) => v.ownerId);
   if (registered.length === 0) {
@@ -155,13 +187,32 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
   }
   const problems: string[] = [];
   const versions: { version: (typeof registered)[number]; strategy: Strategy }[] = [];
+  const notDrilled: NotDrilled[] = [];
   for (const version of registered) {
     const parsed = parseVersion(version);
     if ('error' in parsed) {
       problems.push(`${version.name} (${version.id}): definition does not parse: ${parsed.error}`);
+    } else if (!recordsDay(o.target, from, version.registeredAt)) {
+      // The forward step records no entry and sends no alert for it on this day.
+      notDrilled.push({
+        name: version.name,
+        id: version.id,
+        reason:
+          `registered ${version.registeredAt}, not before the ${o.target} close (16:00 New ` +
+          'York); its record starts with the first close after registration',
+      });
     } else versions.push({ version, strategy: parsed.strategy });
   }
-  if (versions.length === 0) return { failed: problems.join('\n') };
+  if (versions.length === 0) {
+    if (problems.length > 0) {
+      return { failed: [...problems, ...notDrilled.map(notDrilledLine)].join('\n') };
+    }
+    return {
+      refused:
+        `No registered version records ${o.target}: ${notDrilled.map(notDrilledLine).join('; ')}. ` +
+        'Choose a later date: pnpm drill red --date <YYYY-MM-DD>.',
+    };
+  }
   const seriesSessions =
     o.seriesSessions ??
     fail('No us-fed calendar plug-in is loaded (the cash series is checked on it).');
@@ -254,11 +305,14 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
   // Each version decides the day as the forward step does, without appending.
   const { symbolIds, loadRows, barsOf } = await reader(db);
   const alerts: DrillReport['alerts'] = [];
+  // One context for the whole drill, as the daily run has one per run: a notifier's channels
+  // share its pacing and counts across versions.
+  const context = o.alerting.context(db);
   const alerting = (onDelivered: AlertOptions['onDelivered']): AlertOptions => ({
     date: o.target,
     notifiers: o.alerting.notifiers,
     authSecret: o.alerting.authSecret,
-    context: o.alerting.context(db),
+    context,
     log: o.log,
     drill: true,
     onDelivered: (d) => {
@@ -313,6 +367,7 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
   const ok =
     checked.health === 'red' &&
     problems.length === 0 &&
+    notDrilled.length === 0 &&
     decided.every((v) => v.safeStateApplied && v.delivered > 0);
   return {
     target: o.target,
@@ -320,6 +375,7 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
     reasons: checked.reasons,
     faults,
     versions: decided,
+    notDrilled,
     alerts,
     problems,
     ok,
@@ -341,6 +397,7 @@ export function drillSummary(r: DrillResult): string {
       (v) =>
         `${v.name} (${v.id}): ${v.allocation}${v.safeStateApplied ? ' (safe state applied)' : ' (NOT the safe state)'}, data ${v.dataStatus}${v.reasons.length ? ` (${v.reasons.join('; ')})` : ''}, alert on ${v.delivered} channel(s)`,
     ),
+    ...r.notDrilled.map((v) => `Not drilled: ${notDrilledLine(v)}`),
     ...(r.alerts.length
       ? r.alerts.map((a) => `Sent (${a.type}) to ${a.channel}: ${a.title}`)
       : ['No alert was delivered.']),
@@ -354,6 +411,7 @@ export function drillSummary(r: DrillResult): string {
       ...r.versions
         .filter((v) => !v.safeStateApplied)
         .map((v) => `${v.name} did not apply its safe state`),
+      ...r.notDrilled.map((v) => `${v.name} does not record ${r.target}`),
       ...r.versions
         .filter((v) => v.delivered === 0)
         .map((v) => `no channel got ${v.name}'s alert (pnpm channel list --user <name>)`),
@@ -362,6 +420,10 @@ export function drillSummary(r: DrillResult): string {
     lines.push(`Drill FAILED: ${why.join('; ')}.`);
   }
   return lines.join('\n');
+}
+
+function notDrilledLine(v: NotDrilled): string {
+  return `${v.name} (${v.id}): ${v.reason}`;
 }
 
 function fail(message: string): never {

@@ -1,16 +1,20 @@
 // `pnpm drill red` (spec 2026-10-31 red-drill): a simulated red day on a copy of a synthetic
 // database (no network): the safe-state alert is sent, marked as a drill; the live database file
-// is unchanged; the temporary copy is removed; it refuses without a registered strategy, on CI
-// and while another job holds the lock.
+// is unchanged; the temporary copy is removed; it refuses without a registered strategy, before
+// forward records start, on CI and while another job holds the lock; it applies the forward step's
+// rules (a version registered after the day's close is not drilled, and the drill fails).
 import { type RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   type Db,
   addChannel,
+  channelsOf,
   createDb,
   createUser,
   forwardRecord,
+  recordAlertSent,
   registerVersion,
+  schema,
   setSetting,
   upsertSymbols,
 } from '@saku/db';
@@ -21,9 +25,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { drillDate, parseDrillArgs } from '../cli/drill-args';
-import { emptyPlugins } from '../registry';
-import type { BarSource } from '../types';
+import { emptyPlugins, notifierContexts } from '../registry';
+import type { BarSource, Notifier, PluginContext } from '../types';
 import { type DrillOptions, type DrillReport, drillSummary, redDrill } from './drill';
+import { recordsDay } from './forward';
 import { lock } from './lock';
 import { runJob } from './run';
 import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
@@ -88,9 +93,16 @@ const strategy = {
 /**
  * A live database file as the server holds it after the daily run for the target day (green, the
  * day recorded), the owner with a channel and an admin channel; `registered`: whether a strategy
- * is registered. Closed afterwards, as the drill finds it.
+ * is registered; `from`: forward_records_from (null: not set); `after`: more set-up once the daily
+ * run is done. Closed afterwards, as the drill finds it.
  */
-async function live(o: { registered?: boolean } = {}) {
+async function live(
+  o: {
+    registered?: boolean;
+    from?: string | null;
+    after?: (db: Db, owner: string) => Promise<void>;
+  } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), 'saku-drill-test-'));
   const url = `file:${join(dir, 'live.db')}`;
   const db: Db = createDb({ url });
@@ -104,7 +116,8 @@ async function live(o: { registered?: boolean } = {}) {
     backupCodeHashes: ['a'],
     isAdmin: true,
   });
-  await setSetting(db, 'forward_records_from', '2026-01-02');
+  const from = o.from === undefined ? '2026-01-02' : o.from;
+  if (from !== null) await setSetting(db, 'forward_records_from', from);
   const version =
     o.registered === false
       ? undefined
@@ -139,7 +152,7 @@ async function live(o: { registered?: boolean } = {}) {
     });
   expect((await job('bootstrap', sessions.before(TARGET), '2026-01-16T01:30:00Z')).ok).toBe(true);
   expect((await job('daily', TARGET, '2026-01-17T01:30:00Z')).ok).toBe(true);
-  if (version) {
+  if (version && from !== null && from <= TARGET) {
     // The real record for the day: green, the normal allocation.
     expect((await forwardRecord(db, version.id)).at(-1)).toMatchObject({
       date: TARGET,
@@ -147,6 +160,7 @@ async function live(o: { registered?: boolean } = {}) {
       safeStateApplied: false,
     });
   }
+  await o.after?.(db, owner);
   db.$client.close();
   return { dir, url, file: join(dir, 'live.db') };
 }
@@ -297,6 +311,185 @@ describe('pnpm drill red', () => {
     expect(r.versions[0]).toMatchObject({ safeStateApplied: true, delivered: 0 });
     expect(r.problems.length).toBeGreaterThan(0);
     expect(drillSummary(r)).toMatch(/Drill FAILED: .*no channel got Trend's alert/);
+  });
+});
+
+describe("pnpm drill red: the forward step's rules", () => {
+  it('refuses before forward records start, or when they start after the date', async () => {
+    for (const from of [null, '2026-01-20']) {
+      const { dir, url, file } = await live({ from });
+      const before = digest(file);
+      const { run, sent, work } = drill(url, dir);
+      const r = await run;
+      expect(r).toEqual({
+        refused: expect.stringMatching(
+          from === null
+            ? /Forward records have not started/
+            : /Forward records start on 2026-01-20/,
+        ),
+      });
+      expect(sent).toEqual([]);
+      expect(readdirSync(work)).toEqual([]);
+      expect(digest(file)).toBe(before);
+    }
+  });
+
+  it('does not drill a version registered at or after the close; the drill fails on it', async () => {
+    const { dir, url } = await live({
+      after: async (db, owner) => {
+        // 16:00 New York on the target date (EST): not after the close, so no record that day.
+        await registerVersion(db, {
+          ownerId: owner,
+          name: 'Late',
+          at: new Date(`${TARGET}T21:00:00Z`),
+          strategy,
+        });
+      },
+    });
+    const { run, sent } = drill(url, dir);
+    const r = (await run) as DrillReport;
+    expect(r.ok).toBe(false);
+    expect(r.grade).toBe('red');
+    expect(r.versions.map((v) => v.name)).toEqual(['Trend']);
+    expect(r.notDrilled).toEqual([
+      expect.objectContaining({ name: 'Late', reason: expect.stringMatching(/not before the/) }),
+    ]);
+    // Only the drilled version's alert (owner and admin channel) and the admins' data alert.
+    expect(sent.filter((m) => m.text.includes('Late'))).toEqual([]);
+    expect(sent).toHaveLength(3);
+    expect(drillSummary(r)).toMatch(/Not drilled: Late/);
+    expect(drillSummary(r)).toMatch(/Drill FAILED: Late does not record 2026-01-16/);
+  });
+
+  it('refuses when no registered version records the date', async () => {
+    const late = await live({
+      registered: false,
+      after: async (db, owner) => {
+        await registerVersion(db, {
+          ownerId: owner,
+          name: 'Late',
+          at: new Date('2026-01-17T00:00:00Z'),
+          strategy,
+        });
+      },
+    });
+    const { run, sent, work } = drill(late.url, late.dir);
+    expect(await run).toEqual({ refused: expect.stringMatching(/No registered version records/) });
+    expect(sent).toEqual([]);
+    expect(readdirSync(work)).toEqual([]);
+  });
+
+  it('the rule: on or after forward_records_from, a close after registration', () => {
+    // 2026-01-16 closes at 21:00Z (EST); 2026-07-16 at 20:00Z (EDT).
+    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T20:59:59.999Z')).toBe(true);
+    expect(recordsDay('2026-01-16', '2026-01-02', '2026-01-16T21:00:00.000Z')).toBe(false);
+    expect(recordsDay('2026-07-16', '2026-01-02', '2026-07-16T19:59:59.999Z')).toBe(true);
+    expect(recordsDay('2026-07-16', '2026-01-02', '2026-07-16T20:00:00.000Z')).toBe(false);
+    expect(recordsDay('2026-01-16', '2026-01-16', '2026-01-01T00:00:00.000Z')).toBe(true);
+    expect(recordsDay('2026-01-16', '2026-01-17', '2026-01-01T00:00:00.000Z')).toBe(false);
+  });
+
+  it('one notifier context for the drill: two versions on one channel share it', async () => {
+    const { dir, url } = await live({
+      after: async (db, owner) => {
+        await registerVersion(db, {
+          ownerId: owner,
+          name: 'Trend 2',
+          at: new Date('2026-01-14T22:00:00Z'),
+          strategy,
+        });
+      },
+    });
+    const sends: { target: string; ctx: PluginContext }[] = [];
+    const notifier: Notifier = {
+      info: { key: 'fake', kind: 'notifier', name: 'Fake', termsUrl: 'x', maxLength: 4000 },
+      validTarget: () => true,
+      send: async (target, _text, ctx) => {
+        sends.push({ target, ctx });
+      },
+    };
+    let made = 0;
+    const { run } = drill(url, dir, {
+      alerting: {
+        notifiers: [notifier],
+        authSecret: SECRET,
+        context: () => {
+          made++;
+          return notifierContexts(quiet);
+        },
+      },
+    });
+    const r = (await run) as DrillReport;
+    expect(r.ok).toBe(true);
+    expect(r.versions.map((v) => [v.name, v.delivered])).toEqual([
+      ['Trend', 2],
+      ['Trend 2', 2],
+    ]);
+    expect(made).toBe(1);
+    const me = sends.filter((s) => s.target === 'me');
+    expect(me).toHaveLength(2);
+    expect(me[0]!.ctx).toBe(me[1]!.ctx);
+    // The admin channel: both versions' alerts and the data alert, on one context.
+    const ops = sends.filter((s) => s.target === 'ops');
+    expect(ops).toHaveLength(3);
+    expect(new Set(ops.map((s) => s.ctx)).size).toBe(1);
+  });
+
+  it('sends although the day was already told, and the copy records no alert', async () => {
+    let told = 0;
+    const { dir, url } = await live({
+      after: async (db, owner) => {
+        const [version] = (await db.select().from(schema.strategyVersions)).filter(
+          (v) => v.ownerId === owner,
+        );
+        const channels = await channelsOf(db, owner);
+        for (const channel of channels) {
+          await recordAlertSent(db, channel, {
+            subject: version!.id,
+            date: TARGET,
+            type: 'data_red',
+          });
+        }
+        await recordAlertSent(
+          db,
+          channels.find((c) => c.admin)!,
+          {
+            subject: 'data',
+            date: TARGET,
+            type: 'data_health',
+          },
+        );
+        told = (await db.select().from(schema.alertsSent)).length;
+      },
+    });
+    // The copy's alerts_sent rows, read as each message goes out (each earlier delivery would
+    // have been recorded by then).
+    let copy: Db | undefined;
+    const counts: number[] = [];
+    const sentTo: string[] = [];
+    const notifier: Notifier = {
+      info: { key: 'fake', kind: 'notifier', name: 'Fake', termsUrl: 'x', maxLength: 4000 },
+      validTarget: () => true,
+      send: async (target) => {
+        counts.push((await copy!.select().from(schema.alertsSent)).length);
+        sentTo.push(target);
+      },
+    };
+    const { run } = drill(url, dir, {
+      alerting: {
+        notifiers: [notifier],
+        authSecret: SECRET,
+        context: (db) => {
+          copy = db;
+          return () => ({ http: null as never, now: new Date(), log: quiet });
+        },
+      },
+    });
+    const r = (await run) as DrillReport;
+    expect(r.ok).toBe(true);
+    expect(sentTo.sort()).toEqual(['me', 'ops', 'ops']);
+    expect(told).toBeGreaterThanOrEqual(3);
+    expect(counts).toEqual([told, told, told]);
   });
 });
 
