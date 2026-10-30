@@ -25,7 +25,7 @@ import {
   REVISION_ITEMS,
   describeReason,
   fitMessage,
-  jobFailureLines,
+  jobFailureParts,
   sendDataHealthAdmin,
   sendDayAlert,
   sendIntegrityFailed,
@@ -37,6 +37,7 @@ import {
   sendStrategyAlerts,
   sendUpdateFailed,
   standInDetail,
+  strategyAlert,
 } from './alerts';
 import { parseVersion } from './forward';
 
@@ -123,6 +124,13 @@ async function setup(language: string | null = null) {
     );
   return { db, owner, version, day };
 }
+
+/** The job-failure lines fitted to `room` (no health line). */
+const jobLines = (
+  t: ReturnType<typeof translator>,
+  o: Parameters<typeof jobFailureParts>[1],
+  room: number,
+) => fitMessage(jobFailureParts(t, o), room).text.split('\n');
 
 const options = (notifier: Notifier, date: string) => ({
   date,
@@ -424,7 +432,7 @@ describe('admin alerts', () => {
   it('cuts a very long reason on its own line with a mark, keeping the next one', () => {
     const t = translator('en');
     const long = `AAA: ${'x'.repeat(500)}\n    at stack line`;
-    const lines = jobFailureLines(
+    const lines = jobLines(
       t,
       { job: 'daily', date: '2026-01-05', failures: [long, 'incomplete: s'] },
       Infinity,
@@ -433,16 +441,14 @@ describe('admin alerts', () => {
     expect(lines[2]).toMatch(/^- AAA: x+…$/);
     expect(lines[3]).toBe('- incomplete: s');
     // A newline inside a reason never starts a line of its own; an empty reason is not blank.
-    const flat = jobFailureLines(
+    const flat = jobLines(
       t,
       { job: 'daily', date: '2026-01-05', failures: ['a\n  b', '  '] },
       Infinity,
     );
     expect(flat.slice(2, 4)).toEqual(['- a b', '- unknown']);
     // No stated reason: still a failure, never an empty list.
-    expect(
-      jobFailureLines(t, { job: 'daily', date: '2026-01-05', failures: [] }, Infinity),
-    ).toEqual([
+    expect(jobLines(t, { job: 'daily', date: '2026-01-05', failures: [] }, Infinity)).toEqual([
       t('alerts.jobFailure.title', { job: 'daily', date: '2026-01-05' }),
       t('alerts.jobFailure.failed', { count: 1 }),
       '- unknown',
@@ -461,7 +467,7 @@ describe('admin alerts', () => {
             `${t(`alerts.health.${s}`)} ${t('alerts.healthDate', { date: '2026-01-05' })}`.length,
         ),
       );
-      const lines = jobFailureLines(t, { job: 'weekly', date: '2026-01-05', failures }, Infinity);
+      const lines = jobLines(t, { job: 'weekly', date: '2026-01-05', failures }, Infinity);
       expect(lines.filter((l) => l.startsWith('- '))).toHaveLength(5);
       expect(lines.join('\n').length + 1 + health).toBeLessThanOrEqual(2000);
     }
@@ -674,25 +680,28 @@ describe('drill messages (pnpm drill)', () => {
     expect(text).toContain(`...and ${9 - shown} more.`);
   });
 
-  it('cuts the alert, not the mark, on a small channel', async () => {
+  it('counts the mark and its line: the alert whole with them, or not sent and reported', async () => {
     const t = translator('en');
-    const { db, version } = await setup();
+    const { db, owner, version } = await setup();
     const parsed = parseVersion(version);
     if ('error' in parsed) throw new Error(parsed.error);
-    const day = { ...red, reasons: Array.from({ length: 40 }, (_, i) => `T${i}:A.large_move@p`) };
-    for (const max of [300, 40]) {
+    // Without reasons: every line is one never cut.
+    const d = { version, strategy: parsed.strategy, day: { ...red, reasons: [] } };
+    const send = async (max: number) => {
       const { notifier, sent } = fakeNotifier(false, max);
-      const drill = { ...options(notifier, DATE), drill: true };
-      expect(
-        (await sendDayAlert(db, drill, { version, strategy: parsed.strategy, day })).sent,
-      ).toBe(1);
-      const text = sent[0]!.text;
-      expect(text.length).toBeLessThanOrEqual(max);
-      expect(text.startsWith('[DRILL] ')).toBe(true);
-      expect(text.endsWith('…')).toBe(true);
-      // Room for the mark and its line: both whole, the alert cut after them.
-      if (max === 300) expect(text.split('\n')[1]).toBe(t('alerts.drill.body'));
-    }
+      const summary = await sendDayAlert(db, { ...options(notifier, DATE), drill: true }, d);
+      return { summary, sent };
+    };
+    const { sent: whole } = await send(100_000);
+    const size = whole[0]!.text.length;
+    const fits = await send(size);
+    expect(fits.sent[0]!.text).toBe(whole[0]!.text);
+    expect(fits.sent[0]!.text.split('\n')[1]).toBe(t('alerts.drill.body'));
+    const small = await send(size - 1);
+    expect(small.sent).toEqual([]);
+    expect(small.summary.failed).toEqual([
+      `fake channel ${(await channelsOf(db, owner))[0]!.id}: channel too small for the alert (${size} characters needed)`,
+    ]);
   });
 });
 
@@ -908,21 +917,22 @@ describe('stand-in correction alerts (requirements 04, the stand-in rule 4)', ()
     expect((await sendStandInCorrections(db, options(notifier, DAY))).sent).toBe(0);
   });
 
-  it('fits the channel: the first lines kept, the health line whole at the end', async () => {
+  it('a correction too long for the channel is not sent, not recorded, and reported', async () => {
     const { db, version, day } = await setup();
     await day(DAY, 'Calm');
     await note(db, version.id, { correctedAllocation: 'R'.repeat(3000) });
-    for (const max of [2000, 200]) {
-      const { notifier, sent } = fakeNotifier(false, max);
-      await db.delete(schema.alertsSent);
-      expect((await sendStandInCorrections(db, options(notifier, DAY))).sent).toBe(1);
-      const text = sent[0]!.text;
-      const lines = text.split('\n');
-      expect(text.length).toBeLessThanOrEqual(max);
-      expect(lines[0]).toBe('Trend: correction to the signal of 2026-01-05');
-      expect(lines.at(-1)).toBe('Data health: green. (Latest recorded day, 2026-01-05.)');
-      expect(lines.at(-2)!.endsWith('…')).toBe(true);
-    }
+    const small = fakeNotifier(false, 2000);
+    const r = await sendStandInCorrections(db, options(small.notifier, DAY));
+    expect(r.sent).toBe(0);
+    expect(r.failed).toHaveLength(1);
+    expect(r.failed[0]).toMatch(/: channel too small for the alert \(\d+ characters needed\)$/);
+    expect(small.sent).toEqual([]);
+    expect(await db.select().from(schema.alertsSent)).toEqual([]);
+    // A channel with room: told whole, then recorded.
+    const big = fakeNotifier(false, 10_000);
+    expect((await sendStandInCorrections(db, options(big.notifier, DAY))).sent).toBe(1);
+    expect(big.sent[0]!.text).toContain('R'.repeat(3000));
+    expect(await db.select().from(schema.alertsSent)).toHaveLength(1);
   });
 
   it('an unreadable detail is told to the admins once, never with a guessed value', async () => {
@@ -1020,37 +1030,98 @@ describe('fitting the channel (one way for every alert)', () => {
 
   it('shortens the list with the most items first (on a tie the later one), counting exactly', () => {
     const parts = ['T', list(5), inline, { keep: 'H' }];
-    expect(fitMessage(parts, Infinity)).toEqual({
+    expect(fitMessage(parts, Infinity)).toMatchObject({
       text: 'T\na1\na2\na3\na4\na5\nB: b1,b2\nH',
       shown: [1, 5, 2, 1],
+      fits: true,
     });
-    expect(fitMessage(parts, 21)).toEqual({
+    expect(fitMessage(parts, 21)).toMatchObject({
       text: 'T\na1\na2\n+3\nB: b1,b2\nH',
       shown: [1, 2, 2, 1],
     });
     // 2 and 2: the later list first, then the other.
-    expect(fitMessage(parts, 20)).toEqual({ text: 'T\na1\n+4\nB: b1,+1\nH', shown: [1, 1, 1, 1] });
+    expect(fitMessage(parts, 20)).toMatchObject({
+      text: 'T\na1\n+4\nB: b1,+1\nH',
+      shown: [1, 1, 1, 1],
+    });
     // A limit lists no more whatever the room; an empty list is no line.
     expect(fitMessage(['T', { ...list(5), limit: 2 }, list(0)], Infinity).text).toBe(
       'T\na1\na2\n+3',
     );
   });
 
-  it('then cuts the other lines run by run from the end, never the kept line', () => {
-    const parts = ['title-long', { keep: 'HEALTH' }, 'reasons-long'];
-    expect(fitMessage(parts, 19)).toEqual({ text: 'title-long\nHEALTH\n…', shown: [1, 1, 0] });
-    expect(fitMessage(parts, 15)).toEqual({ text: 'title…\nHEALTH\n…', shown: [0, 1, 0] });
-    // No room even for the kept line and one mark per run: cut at the end, never longer.
-    expect(fitMessage(parts, 8)).toEqual({ text: 'title-l…', shown: [0, 0, 0] });
-    // No room at all: left to `deliver`.
-    expect(fitMessage(parts, 0).text).toBe('title-long\nHEALTH\nreasons-long');
+  it('a long list is shortened from the item lengths, the count exact', () => {
+    const items = Array.from({ length: 100_000 }, (_, i) => `item ${i}`);
+    const start = performance.now();
+    const fit = fitMessage(
+      [
+        { keep: 'T' },
+        { items, more: (c) => `and ${c} more`, inline: { join: '; ', line: (s) => `L: ${s}.` } },
+        { keep: 'H' },
+      ],
+      1000,
+    );
+    expect(performance.now() - start).toBeLessThan(2000);
+    expect(fit.text.length).toBeLessThanOrEqual(1000);
+    const shown = fit.text.match(/item \d+/g)!.length;
+    expect(fit.shown[1]).toBe(shown);
+    expect(fit.text).toContain(`and ${100_000 - shown} more.`);
+    // The next item would not have fit.
+    expect(fit.text.length + `item ${shown}; `.length).toBeGreaterThan(1000);
+  });
+
+  it('then drops whole lines from the end of each run, cutting a first line only when it alone does not fit', () => {
+    const parts = ['title', 'second line', { keep: 'HEALTH' }, 'reasons-long', 'more'];
+    const fit = (max: number) => fitMessage(parts, max);
+    expect(fit(42).text).toBe('title\nsecond line\nHEALTH\nreasons-long\nmore');
+    expect(fit(39)).toEqual({
+      text: 'title\nsecond line\nHEALTH\nreasons-long\n…',
+      shown: [1, 1, 1, 1, 0],
+      fits: true,
+      needed: 10,
+    });
+    expect(fit(38).text).toBe('title\nsecond line\nHEALTH\nreasons-lon…');
+    expect(fit(30)).toMatchObject({
+      text: 'title\nsecond line\nHEALTH\nreas…',
+      shown: [1, 1, 1, 0, 0],
+    });
+    expect(fit(26).text).toBe('title\nsecond line\nHEALTH\n…');
+    expect(fit(20)).toMatchObject({ text: 'title\n…\nHEALTH\n…', shown: [1, 0, 1, 0, 0] });
+    expect(fit(10)).toMatchObject({ text: '…\nHEALTH\n…', fits: true });
+    // No room for the kept line and one "…" per run: nothing to send.
+    expect(fit(9)).toMatchObject({ fits: false, needed: 10, shown: [0, 0, 0, 0, 0] });
+    expect(fit(0)).toMatchObject({ fits: false });
+  });
+
+  it('never cuts a count in its text, and never cuts a kept list', () => {
+    expect(fitMessage(['T', { keep: 'H' }, { count: 'Other: 12 more' }], 10)).toMatchObject({
+      text: 'T\nH\n…',
+      shown: [1, 1, 0],
+    });
+    const counted = {
+      items: ['aaaa', 'bbbb'],
+      more: (n: number) => `and ${n} more`,
+      inline: { join: ', ', line: (s: string) => `L: ${s}` },
+    };
+    expect(fitMessage(['T', { keep: 'H' }, counted], 10).text).toBe('T\nH\n…');
+    const kept = { items: ['a', 'b', 'c'], more: (n: number) => `+${n}`, keep: true };
+    expect(fitMessage([{ keep: 'T' }, kept, { keep: 'H' }], 6)).toMatchObject({
+      text: 'T\n+3\nH',
+      fits: true,
+    });
+    expect(fitMessage([{ keep: 'T' }, kept, { keep: 'H' }], 5)).toMatchObject({
+      fits: false,
+      needed: 6,
+    });
   });
 });
 
-describe('every admin alert fits a small channel: title and health line whole, the count exact', () => {
+describe('every alert fits a small channel: title and health line whole, the count exact', () => {
   const DATE = '2026-01-05';
   const moreOf = (text: string) =>
     Number(/(?:\.\.\.and (\d+) more|ほか (\d+) 件)/.exec(text)?.slice(1).find(Boolean) ?? 0);
+  const tooSmall = (needed: number) =>
+    new RegExp(`: channel too small for the alert \\(${needed} characters needed\\)$`);
   const admin = async (language: string, max: number) => {
     const s = await setup(language);
     await setSetting(s.db, 'forward_records_from', DATE);
@@ -1070,6 +1141,8 @@ describe('every admin alert fits a small channel: title and health line whole, t
     expect(lines.at(-1)).toBe(health);
     return lines;
   };
+  const sentRows = async (db: Awaited<ReturnType<typeof setup>>['db']) =>
+    db.select().from(schema.alertsSent);
 
   it.each(['en', 'ja'])(
     'data health: the reasons shortened with an exact count (%s)',
@@ -1088,7 +1161,7 @@ describe('every admin alert fits a small channel: title and health line whole, t
   );
 
   it.each(['en', 'ja'])('revisions: each kind listed and counted exactly (%s)', async (lang) => {
-    const max = 600;
+    const max = 900;
     const { db, o, sent, t } = await admin(lang, max);
     const rows = (kind: 'changed' | 'withdrawn') =>
       Array.from({ length: 20 }, (_, i) => ({
@@ -1125,24 +1198,59 @@ describe('every admin alert fits a small channel: title and health line whole, t
     expect(withdrawn).toContain(`W7 value@fred 1 (${DATE}), ${t('alerts.more', { count: 12 })}`);
   });
 
-  it.each(['en', 'ja'])('recompute: the differing signals counted exactly (%s)', async (lang) => {
-    const max = 400;
-    const { db, o, sent, t, version } = await admin(lang, max);
-    const signalsDiffer = Array.from({ length: 50 }, (_, i) => `signal${i}`);
-    await annotate(db, {
-      versionId: version.id,
-      date: DATE,
-      kind: 'recomputed',
-      detail: { recordedAllocation: 'Calm', recomputedAllocation: 'Risk on', signalsDiffer },
-      runId: null,
-    });
-    expect((await sendRecomputeDiffers(db, o)).sent).toBe(1);
-    const text = sent[0]!.text;
-    fits(text, max, t('alerts.recompute.title', { count: 1 }), t('alerts.health.unknown'));
-    const shown = text.match(/signal\d+/g)?.length ?? 0;
-    expect(shown + moreOf(text)).toBe(50);
-    expect(moreOf(text)).toBeGreaterThan(0);
-  });
+  it.each(['en', 'ja'])(
+    'recompute: the signals and the other days counted exactly; only the days shown recorded (%s)',
+    async (lang) => {
+      const max = lang === 'en' ? 480 : 260;
+      const { db, o, sent, t, version } = await admin(lang, max);
+      const signalsDiffer = Array.from({ length: 50 }, (_, i) => `signal${i}`);
+      const dates = ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08', '2026-01-09'];
+      for (const [i, date] of ['2026-01-02', ...dates].entries()) {
+        await annotate(db, {
+          versionId: version.id,
+          date,
+          kind: 'recomputed',
+          detail: {
+            recordedAllocation: 'Calm',
+            recomputedAllocation: 'Risk on',
+            signalsDiffer: i === 0 ? signalsDiffer : ['s'],
+          },
+          runId: null,
+        });
+      }
+      expect((await sendRecomputeDiffers(db, o)).sent).toBe(1);
+      const text = sent[0]!.text;
+      const lines = fits(
+        text,
+        max,
+        t('alerts.recompute.title', { count: 6 }),
+        t('alerts.health.unknown'),
+      );
+      const signals = text.match(/signal\d+/g)?.length ?? 0;
+      expect(signals + moreOf(lines[1]!)).toBe(50);
+      expect(moreOf(lines[1]!)).toBeGreaterThan(0);
+      const day = (date: string) =>
+        t('alerts.recompute.otherDay', {
+          version: 'Trend',
+          date,
+          recorded: 'Calm',
+          now: 'Risk on',
+        });
+      const shown = dates.filter((d) => lines.includes(day(d))).length;
+      expect(shown).toBeGreaterThan(0);
+      expect(shown).toBeLessThan(5);
+      expect(lines).toContain(t('alerts.more', { count: 5 - shown }));
+      expect(await sentRows(db)).toHaveLength(1 + shown);
+      // The days not shown follow at the next runs, each told once, until all are recorded.
+      for (let run = 0; run < 6 && (await sentRows(db)).length < 6; run++) {
+        await sendRecomputeDiffers(db, o);
+      }
+      expect(await sentRows(db)).toHaveLength(6);
+      const told = sent.length;
+      expect((await sendRecomputeDiffers(db, o)).sent).toBe(0);
+      expect(sent).toHaveLength(told);
+    },
+  );
 
   it.each(['en', 'ja'])(
     'job failure, integrity, parity: a long detail cut before the health line (%s)',
@@ -1175,48 +1283,154 @@ describe('every admin alert fits a small channel: title and health line whole, t
   );
 
   it.each(['en', 'ja'])(
-    'strategy alert: the health line whole, the reasons after it counted (%s)',
+    'update failed: whole at its size; one character less refused, reported, not recorded (%s)',
     async (lang) => {
-      const { db, version } = await setup(lang);
-      const t = translator(lang);
+      const { db, o, t } = await admin(lang, 100_000);
+      const update = { from: 'abc1234', to: 'def5678', step: 'check', stuck: true };
+      const text = [
+        t('alerts.update.title', { to: 'def5678', step: 'check' }),
+        t('alerts.update.stuck', { from: 'abc1234' }),
+        t('alerts.health.unknown'),
+      ].join('\n');
+      const small = fakeNotifier(false, text.length - 1);
+      const r = await sendUpdateFailed(db, { ...o, ...update, notifiers: [small.notifier] });
+      expect(r).toEqual({ sent: 0, failed: [expect.stringMatching(tooSmall(text.length))] });
+      expect(small.sent).toEqual([]);
+      expect(await sentRows(db)).toEqual([]);
+      const exact = fakeNotifier(false, text.length);
+      expect(
+        (await sendUpdateFailed(db, { ...o, ...update, notifiers: [exact.notifier] })).sent,
+      ).toBe(1);
+      expect(exact.sent[0]!.text).toBe(text);
+    },
+  );
+
+  it.each(['en', 'ja'])(
+    'an unreadable annotation: whole at its size; one character less refused and still an error (%s)',
+    async (lang) => {
+      const { db, o, t, version, day } = await admin(lang, 100_000);
+      await day(DATE, 'Calm');
+      await annotate(db, {
+        versionId: version.id,
+        date: DATE,
+        kind: 'stand_in_corrected',
+        detail: { ticker: 'AAA', deviation: null } as never,
+        runId: null,
+      });
+      const id = (await db.select().from(schema.forwardAnnotations))[0]!.id;
+      const text = [
+        t('alerts.standInUnreadable.title'),
+        t('alerts.standInUnreadable.body', {
+          version: `Trend (${version.id})`,
+          date: DATE,
+          id: String(id),
+        }),
+        t('alerts.health.unknown'),
+      ].join('\n');
+      const small = fakeNotifier(false, text.length - 1);
+      const r = await sendStandInCorrections(db, { ...o, notifiers: [small.notifier] });
+      expect(r.sent).toBe(0);
+      expect(r.failed).toEqual([expect.stringMatching(tooSmall(text.length))]);
+      expect(r.errors).toHaveLength(1);
+      expect(await sentRows(db)).toEqual([]);
+      const exact = fakeNotifier(false, text.length);
+      const ok = await sendStandInCorrections(db, { ...o, notifiers: [exact.notifier] });
+      expect(ok).toEqual({ sent: 1, failed: [], errors: [] });
+      expect(exact.sent[0]!.text).toBe(text);
+    },
+  );
+
+  describe.each(['en', 'ja'])('owner alerts (%s)', (lang) => {
+    const t = translator(lang);
+    const strategyOf = (version: Parameters<typeof parseVersion>[0]) => {
       const parsed = parseVersion(version);
       if ('error' in parsed) throw new Error(parsed.error);
-      const day: DayEntry = {
-        date: DATE,
+      return parsed.strategy;
+    };
+    const entry = (o: Partial<DayEntry> = {}): DayEntry => ({
+      date: DATE,
+      allocation: 'Calm',
+      holdings: [{ ticker: 'CASH_USD', weight: 100 }],
+      dataStatus: 'green',
+      safeStateApplied: false,
+      reasons: [],
+      ...o,
+    });
+    /** The alert's whole text, as `strategyAlert` makes it for the channel. */
+    const whole = (version: { id: string; name: string }, day: DayEntry, lastTold?: string) =>
+      strategyAlert(t, lang, {
+        versionId: version.id,
+        name: version.name,
+        execution: 'next_open',
+        entry: day,
+        nextSession: sessions.after(day.date),
+        ...(lastTold !== undefined && { lastTold }),
+      })!.text;
+
+    it.each([
+      ['state_change', entry(), undefined],
+      ['data_yellow', entry({ dataStatus: 'yellow' }), 'Calm'],
+    ] as const)(
+      '%s: every line whole at its size; one character less refused, reported, not recorded',
+      async (type, day, lastTold) => {
+        const { db, owner, version } = await setup(lang);
+        const [channel] = await channelsOf(db, owner);
+        if (lastTold) {
+          await recordAlertSent(
+            db,
+            channel!,
+            { subject: version.id, date: '2026-01-02', type: 'state_change' },
+            lastTold,
+          );
+        }
+        const rows = (await sentRows(db)).length;
+        const text = whole(version, day, lastTold);
+        expect(text.split('\n')).toContain(t(`alerts.health.${day.dataStatus}`));
+        const d = { version, strategy: strategyOf(version), day };
+        const small = fakeNotifier(false, text.length - 1);
+        const r = await sendDayAlert(db, options(small.notifier, DATE), d);
+        expect(r).toEqual({ sent: 0, failed: [expect.stringMatching(tooSmall(text.length))] });
+        expect(small.sent).toEqual([]);
+        expect(await sentRows(db)).toHaveLength(rows);
+        const exact = fakeNotifier(false, text.length);
+        expect((await sendDayAlert(db, options(exact.notifier, DATE), d)).sent).toBe(1);
+        expect(exact.sent[0]!.text).toBe(text);
+        expect((await sentRows(db)).map((row) => row.type)).toContain(type);
+      },
+    );
+
+    it('data_red: the reasons after the health line counted; too small refused', async () => {
+      const { db, version } = await setup(lang);
+      const day = entry({
         allocation: 'Safe state',
         holdings: [{ ticker: 'AAA', weight: 100 }],
         dataStatus: 'red',
         safeStateApplied: true,
         reasons: Array.from({ length: 40 }, (_, i) => `T${i}:A.large_move@p`),
-      };
-      for (const max of [500, 160]) {
-        await db.delete(schema.alertsSent);
-        const { notifier, sent } = fakeNotifier(false, max);
-        const o = options(notifier, DATE);
-        expect((await sendDayAlert(db, o, { version, strategy: parsed.strategy, day })).sent).toBe(
-          1,
-        );
-        const text = sent[0]!.text;
-        const lines = text.split('\n');
-        expect(text.length).toBeLessThanOrEqual(max);
-        expect(lines).toContain(t('alerts.health.red'));
-        if (max === 500) {
-          expect(lines[0]).toBe(t('alerts.dataRed.title', { strategy: 'Trend', date: DATE }));
-          const shown = text.match(/T\d+: /g)!.length;
-          expect(shown).toBeGreaterThan(0);
-          expect(shown + moreOf(text)).toBe(40);
-          expect(moreOf(text)).toBeGreaterThan(0);
-        }
-      }
-    },
-  );
+      });
+      const d = { version, strategy: strategyOf(version), day };
+      const big = fakeNotifier(false, 500);
+      expect((await sendDayAlert(db, options(big.notifier, DATE), d)).sent).toBe(1);
+      const text = big.sent[0]!.text;
+      const lines = text.split('\n');
+      expect(text.length).toBeLessThanOrEqual(500);
+      expect(lines[0]).toBe(t('alerts.dataRed.title', { strategy: 'Trend', date: DATE }));
+      expect(lines.at(-2)).toBe(t('alerts.health.red'));
+      const shown = text.match(/T\d+: /g)!.length;
+      expect(shown).toBeGreaterThan(0);
+      expect(shown + moreOf(text)).toBe(40);
+      expect(moreOf(text)).toBeGreaterThan(0);
+      await db.delete(schema.alertsSent);
+      const small = fakeNotifier(false, 100);
+      const r = await sendDayAlert(db, options(small.notifier, DATE), d);
+      expect(r.sent).toBe(0);
+      expect(r.failed[0]).toMatch(/: channel too small for the alert \(\d+ characters needed\)$/);
+      expect(await sentRows(db)).toEqual([]);
+    });
 
-  it.each(['en', 'ja'])(
-    'stand-in corrections: only the corrections shown are recorded; the rest follow (%s)',
-    async (lang) => {
+    it('stand-in corrections: only the corrections shown are recorded; the rest follow', async () => {
       const { db, version, day } = await setup(lang);
-      const t = translator(lang);
-      // 14 weekdays from 2026-01-05, each with a correction that changes the signal; two that do not.
+      // 14 weekdays from 2026-01-05, each with a correction that changes the signal; two not.
       const dates: string[] = [];
       for (
         let d = new Date('2026-01-05T00:00:00Z');
@@ -1245,42 +1459,42 @@ describe('every admin alert fits a small channel: title and health line whole, t
       for (const date of dates) await note(date);
       await note(dates[0]!, { ticker: 'BBB', correctedAllocation: 'Calm', differs: false });
       await note(dates[1]!, { ticker: 'BBB', correctedAllocation: 'Calm', differs: false });
+      const last = dates.at(-1)!;
       const max = 700;
-      const health = `${t('alerts.health.green')} ${t('alerts.standInCorrected.healthDate', { date: dates.at(-1)! })}`;
+      const health = `${t('alerts.health.green')} ${t('alerts.standInCorrected.healthDate', { date: last })}`;
+      const title = (date: string) =>
+        t('alerts.standInCorrected.title', { strategy: 'Trend', date });
       const { notifier, sent } = fakeNotifier(false, max);
-      expect((await sendStandInCorrections(db, options(notifier, dates.at(-1)!))).sent).toBe(1);
+      expect((await sendStandInCorrections(db, options(notifier, last))).sent).toBe(1);
       const text = sent[0]!.text;
       const lines = text.split('\n');
       expect(text.length).toBeLessThanOrEqual(max);
-      expect(lines[0]).toBe(
-        t('alerts.standInCorrected.title', { strategy: 'Trend', date: dates.at(-1)! }),
-      );
+      expect(lines[0]).toBe(title(last));
       expect(lines.at(-1)).toBe(health);
+      expect(lines.at(-2)).toBe(t('alerts.standInCorrected.pastDay'));
       const listed = lines.filter((l) => / AAA: Calm → Risk on$/.test(l)).length;
       expect(listed).toBeGreaterThan(0);
       expect(moreOf(text)).toBeGreaterThan(0);
       expect(listed + moreOf(text)).toBe(13);
       const counted = lines.includes(t('alerts.standInCorrected.more', { count: 2 }));
-      const recorded = async () => (await db.select().from(schema.alertsSent)).length;
-      expect(await recorded()).toBe(1 + listed + (counted ? 2 : 0));
+      expect((await sentRows(db)).length).toBe(1 + listed + (counted ? 2 : 0));
       // The next runs tell the ones not shown, each once, until every correction is recorded.
-      for (let run = 0; run < 16 && (await recorded()) < 16; run++) {
-        await sendStandInCorrections(db, options(notifier, dates.at(-1)!));
+      for (let run = 0; run < 16 && (await sentRows(db)).length < 16; run++) {
+        await sendStandInCorrections(db, options(notifier, last));
       }
-      expect(await recorded()).toBe(16);
+      expect(await sentRows(db)).toHaveLength(16);
       const told = sent.length;
-      expect((await sendStandInCorrections(db, options(notifier, dates.at(-1)!))).sent).toBe(0);
+      expect((await sendStandInCorrections(db, options(notifier, last))).sent).toBe(0);
       expect(sent).toHaveLength(told);
       // Every day that changes the signal was told whole, in full or on a line, exactly once.
       for (const date of dates) {
         const once = sent.filter(
           (m) =>
-            m.text.split('\n')[0] ===
-              t('alerts.standInCorrected.title', { strategy: 'Trend', date }) ||
+            m.text.split('\n')[0] === title(date) ||
             m.text.split('\n').includes(`${date} AAA: Calm → Risk on`),
         );
         expect(once).toHaveLength(1);
       }
-    },
-  );
+    });
+  });
 });

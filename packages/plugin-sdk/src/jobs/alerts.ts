@@ -45,6 +45,16 @@ export interface Alert {
   /** Every key the message covers (default: `key`), all recorded once it is delivered. */
   keys?: (AlertKey & { type: AlertType })[];
   text: string;
+  /**
+   * Set when the text does not fit the channel with every part never cut whole (`fitMessage`):
+   * the characters it needs there. Nothing is sent or recorded; the channel is reported.
+   */
+  needed?: number;
+}
+
+/** The fitted message as an alert's text, with what it needs when it does not fit. */
+function fitted(f: Fitted): Pick<Alert, 'text' | 'needed'> {
+  return f.fits ? { text: f.text } : { text: f.text, needed: f.needed };
 }
 
 export interface DayEntry {
@@ -58,8 +68,9 @@ export interface DayEntry {
 
 /**
  * The day's alert for one strategy and one recipient, or null when there is nothing to say,
- * within `max` characters (`fitMessage`): the health line whole, the reasons after it shortened
- * with an exact count, then the other lines cut at the end.
+ * within `max` characters (`fitMessage`): the title, body, holdings, timing and health line
+ * whole, the reasons after them shortened with an exact count. A channel too small for those
+ * lines gets nothing (`needed`; `deliver` reports it), never a signal without its instructions.
  */
 export function strategyAlert(
   t: Translate,
@@ -101,39 +112,42 @@ export function strategyAlert(
   const alert = (type: AlertType, parts: Part[]): Alert => ({
     key: { subject: o.versionId, date: e.date, type },
     allocation: e.safeStateApplied ? SAFE_STATE : e.allocation,
-    text: fitMessage(parts, max).text,
+    ...fitted(fitMessage(parts, max)),
   });
+  const keep = (line: string) => ({ keep: line });
 
   if (e.safeStateApplied) {
     return alert('data_red', [
-      t('alerts.dataRed.title', values),
-      t('alerts.dataRed.body'),
-      t('alerts.holdings', { holdings }),
-      timing,
+      keep(t('alerts.dataRed.title', values)),
+      keep(t('alerts.dataRed.body')),
+      keep(t('alerts.holdings', { holdings })),
+      keep(timing),
       health,
       ...reasons,
     ]);
   }
   if (o.lastTold !== e.allocation) {
     return alert('state_change', [
-      t('alerts.stateChange.title', values),
-      o.lastTold === undefined
-        ? t('alerts.stateChange.first', { to: name(e.allocation), date: e.date })
-        : t('alerts.stateChange.body', {
-            from: name(o.lastTold),
-            to: name(e.allocation),
-            date: e.date,
-          }),
-      t('alerts.holdings', { holdings }),
-      timing,
+      keep(t('alerts.stateChange.title', values)),
+      keep(
+        o.lastTold === undefined
+          ? t('alerts.stateChange.first', { to: name(e.allocation), date: e.date })
+          : t('alerts.stateChange.body', {
+              from: name(o.lastTold),
+              to: name(e.allocation),
+              date: e.date,
+            }),
+      ),
+      keep(t('alerts.holdings', { holdings })),
+      keep(timing),
       health,
       ...reasons,
     ]);
   }
   if (e.dataStatus === 'yellow') {
     return alert('data_yellow', [
-      t('alerts.dataYellow.title', values),
-      t('alerts.dataYellow.body', { allocation: name(e.allocation) }),
+      keep(t('alerts.dataYellow.title', values)),
+      keep(t('alerts.dataYellow.body', { allocation: name(e.allocation) })),
       health,
       ...reasons,
     ]);
@@ -251,7 +265,10 @@ export async function sendAdminAlert(
   o: AlertOptions & {
     subject: string;
     type: AlertType;
-    /** The message before the health line, fitted to each channel with it (`fitMessage`). */
+    /**
+     * The message before the health line, fitted to each channel with it (`fitMessage`). A
+     * channel too small for the parts never cut gets nothing and is reported.
+     */
     lines: (t: Translate) => Part[];
     /** The data health it states; default: the latest overall grade on record. */
     health?: string;
@@ -261,8 +278,8 @@ export async function sendAdminAlert(
   const key = { subject: o.subject, date: o.date, type: o.type };
   await eachAdminChannel(db, o, o.health, async (t, channel, healthLine) => {
     const parts = [...o.lines(t), { keep: healthLine }];
-    const { text } = fitMessage(parts, roomOn(o, channel, t));
-    await deliver(db, o, channel, { key, text }, summary, t);
+    const alert = { key, ...fitted(fitMessage(parts, roomOn(o, channel, t))) };
+    await deliver(db, o, channel, alert, summary, t);
   });
   return summary;
 }
@@ -326,24 +343,16 @@ export function jobFailureParts(
   // A run that failed without a stated reason still failed: it is never shown as nothing.
   const failures = o.failures.length > 0 ? o.failures : ['unknown'];
   return [
-    t('alerts.jobFailure.title', { job: o.job, date: o.date }),
-    t('alerts.jobFailure.failed', { count: failures.length }),
+    { keep: t('alerts.jobFailure.title', { job: o.job, date: o.date }) },
+    { keep: t('alerts.jobFailure.failed', { count: failures.length }) },
     {
       items: failures.map((f) => `- ${oneLine(f, JOB_FAILURE_LINE_LENGTH - 2)}`),
       limit: JOB_FAILURE_LINES,
       more: (count) => t('alerts.jobFailure.more', { count }),
+      keep: true,
     },
     t('alerts.jobFailure.body'),
   ];
-}
-
-/** The job-failure lines within `room` characters (`jobFailureParts` fitted, without health). */
-export function jobFailureLines(
-  t: Translate,
-  o: { job: string; date: TradingDate; failures: string[] },
-  room: number,
-): string[] {
-  return fitMessage(jobFailureParts(t, o), room).text.split('\n');
 }
 
 /** One line of at most `max` characters: whitespace runs (newlines too) as one space, "…" if cut. */
@@ -364,11 +373,12 @@ export function sendDataHealthAdmin(
     subject: 'data',
     type: 'data_health',
     lines: (t) => [
-      t('alerts.dataAdmin.title', { date: o.date }),
+      { keep: t('alerts.dataAdmin.title', { date: o.date }) },
       {
         items: o.reasons.map((code) => describeReason(t, code)),
         more: (count) => t('alerts.more', { count }),
         inline: { join: REASONS_JOIN, line: (reasons) => t('alerts.dataAdmin.body', { reasons }) },
+        keep: true,
       },
     ],
   });
@@ -384,8 +394,8 @@ export function sendUpdateFailed(
     subject: `update:${o.to}`,
     type: 'update_failed',
     lines: (t) => [
-      t('alerts.update.title', { to: o.to, step: o.step }),
-      t(o.stuck ? 'alerts.update.stuck' : 'alerts.update.back', { from: o.from }),
+      { keep: t('alerts.update.title', { to: o.to, step: o.step }) },
+      { keep: t(o.stuck ? 'alerts.update.stuck' : 'alerts.update.back', { from: o.from }) },
     ],
   });
 }
@@ -428,6 +438,7 @@ export function sendRevisions(
             limit: REVISION_ITEMS,
             more: (n) => t('alerts.more', { count: n }),
             inline: { join: ', ', line: (items) => t(key, { items }) },
+            keep: true,
           },
         ];
   const changed = o.revisions.filter((r) => r.kind !== 'withdrawn');
@@ -437,7 +448,7 @@ export function sendRevisions(
     subject: `revisions:${o.runId}`,
     type: 'revisions',
     lines: (t) => [
-      t('alerts.revisions.title', { count }),
+      { keep: t('alerts.revisions.title', { count }) },
       ...listed(t, changed, 'alerts.revisions.body'),
       ...listed(t, withdrawn, 'alerts.revisions.withdrawn'),
     ],
@@ -454,7 +465,7 @@ export function sendIntegrityFailed(
     subject: `integrity:${o.check}:${o.versionId}`,
     type: 'integrity',
     lines: (t) => [
-      t('alerts.integrity.title', { check: o.check }),
+      { keep: t('alerts.integrity.title', { check: o.check }) },
       t('alerts.integrity.body', { detail: o.detail.slice(0, 500) }),
     ],
   });
@@ -470,7 +481,7 @@ export function sendParityFailed(
     subject: `parity:${o.caseName}`,
     type: 'integrity',
     lines: (t) => [
-      t('alerts.parity.title', { name: o.caseName }),
+      { keep: t('alerts.parity.title', { name: o.caseName }) },
       t('alerts.parity.body', { detail: o.detail.slice(0, 500) }),
     ],
   });
@@ -478,7 +489,9 @@ export function sendParityFailed(
 
 /**
  * Recompute differences not yet told, one message per admin channel. Driven by the annotations
- * (one alert key each), so an undelivered alert is tried again at the next run.
+ * (one alert key each), so an undelivered alert is tried again at the next run. The first in
+ * full, the others one per line while the channel has room (the rest counted); only the keys of
+ * what arrives whole are recorded, the others are told at the next run.
  */
 export async function sendRecomputeDiffers(db: Db, o: AlertOptions): Promise<AlertSummary> {
   const summary: AlertSummary = { sent: 0, failed: [] };
@@ -507,26 +520,35 @@ export async function sendRecomputeDiffers(db: Db, o: AlertOptions): Promise<Ale
         now: first.detail.recomputedAllocation,
         signals: signals || '-',
       });
-    const { text } = fitMessage(
-      [
-        t('alerts.recompute.title', { count: pending.length }),
-        {
-          items: first.detail.signalsDiffer,
-          more: (count) => t('alerts.more', { count }),
-          inline: { join: ', ', line: body },
-        },
-        { keep: healthLine },
-      ],
-      roomOn(o, channel, t),
+    const others = pending.slice(1);
+    const parts: Part[] = [
+      { keep: t('alerts.recompute.title', { count: pending.length }) },
+      {
+        items: first.detail.signalsDiffer,
+        more: (count) => t('alerts.more', { count }),
+        inline: { join: ', ', line: body },
+        keep: true,
+      },
+      ...(others.length > 0 ? [t('alerts.recompute.others')] : []),
+    ];
+    const list = parts.length;
+    parts.push(
+      {
+        items: others.map((n) =>
+          t('alerts.recompute.otherDay', {
+            version: n.version,
+            date: n.date,
+            recorded: n.detail.recordedAllocation,
+            now: n.detail.recomputedAllocation,
+          }),
+        ),
+        more: (count) => t('alerts.more', { count }),
+      },
+      { keep: healthLine },
     );
-    await deliver(
-      db,
-      o,
-      channel,
-      { key: first.key, keys: pending.map((n) => n.key), text },
-      summary,
-      t,
-    );
+    const fit = fitMessage(parts, roomOn(o, channel, t));
+    const keys = [first.key, ...others.slice(0, fit.shown[list]).map((n) => n.key)];
+    await deliver(db, o, channel, { key: first.key, keys, ...fitted(fit) }, summary, t);
   });
   return summary;
 }
@@ -587,7 +609,8 @@ export function standInDetail(detail: unknown, date: TradingDate): StandInCorrec
  * a signal or an instruction, and the record is said to be annotated, not changed. `others`: the
  * version's other corrections in the same message (see there). Fitted to `max` (`fitMessage`):
  * the other days that change the signal are listed while there is room, the rest counted ("and
- * N more"); the health line (the version's latest recorded day) always ends it whole.
+ * N more"); the correction in full, the past-day line and the health line (the version's latest
+ * recorded day) are never cut: a channel too small for them gets nothing (`needed`).
  * `told`: what arrives whole besides the correction in full (the number of changing days listed,
  * and whether the unchanged ones' count line arrives), so only those keys are recorded and the
  * others are told at the next run.
@@ -610,7 +633,7 @@ export function standInCorrectedText(
   },
   /** The channel's longest message (less a drill's mark and line). */
   max: number,
-): { text: string; told: { changed: number; unchanged: boolean } } {
+): Pick<Alert, 'text' | 'needed'> & { told: { changed: number; unchanged: boolean } } {
   const d = o.detail;
   const name = (allocation: string) =>
     allocation === SAFE_STATE ? t('alerts.safeStateName') : allocation;
@@ -629,18 +652,25 @@ export function standInCorrectedText(
     standInDate: d.standInDate,
     deviation,
   };
+  // The correction in full is never cut: it is told whole or not at all.
   const parts: Part[] = [
-    t('alerts.standInCorrected.title', values),
-    t(
-      d.standInDate === o.date ? 'alerts.standInCorrected.body' : 'alerts.standInCorrected.earlier',
-      values,
-    ),
-    d.differs
-      ? t('alerts.standInCorrected.differs', {
-          recorded: name(d.recordedAllocation),
-          corrected: name(d.correctedAllocation),
-        })
-      : t('alerts.standInCorrected.same', { recorded: name(d.recordedAllocation) }),
+    { keep: t('alerts.standInCorrected.title', values) },
+    {
+      keep: t(
+        d.standInDate === o.date
+          ? 'alerts.standInCorrected.body'
+          : 'alerts.standInCorrected.earlier',
+        values,
+      ),
+    },
+    {
+      keep: d.differs
+        ? t('alerts.standInCorrected.differs', {
+            recorded: name(d.recordedAllocation),
+            corrected: name(d.correctedAllocation),
+          })
+        : t('alerts.standInCorrected.same', { recorded: name(d.recordedAllocation) }),
+    },
     ...(changed.length > 0 ? [t('alerts.standInCorrected.otherChanged')] : []),
   ];
   const list = parts.length;
@@ -655,18 +685,19 @@ export function standInCorrectedText(
     ),
     more: (count) => t('alerts.more', { count }),
   });
-  if (unchanged > 0) parts.push(t('alerts.standInCorrected.more', { count: unchanged }));
-  parts.push(t('alerts.standInCorrected.pastDay'));
+  if (unchanged > 0) parts.push({ count: t('alerts.standInCorrected.more', { count: unchanged }) });
+  // Never cut either: without it the correction could read as a new signal.
+  parts.push({ keep: t('alerts.standInCorrected.pastDay') });
   // Unknown stays unknown: without a recorded day the status is `unknown`, never green.
   const healthLine = o.health
     ? `${t(`alerts.health.${o.health.status}`)} ${t('alerts.standInCorrected.healthDate', { date: o.health.date })}`
     : t('alerts.health.unknown');
-  const fitted = fitMessage([...parts, { keep: healthLine }], max);
+  const fit = fitMessage([...parts, { keep: healthLine }], max);
   return {
-    text: fitted.text,
+    ...fitted(fit),
     told: {
-      changed: fitted.shown[list]!,
-      unchanged: unchanged > 0 && fitted.shown[list + 1] === 1,
+      changed: fit.shown[list]!,
+      unchanged: unchanged > 0 && fit.shown[list + 1] === 1,
     },
   };
 }
@@ -743,7 +774,7 @@ export async function sendStandInCorrections(
       const lead = pending.find((n) => n.detail.differs) ?? pending[0];
       if (!lead) return;
       const others = pending.filter((n) => n !== lead);
-      const { text, told } = standInCorrectedText(
+      const { told, ...message } = standInCorrectedText(
         t,
         language,
         {
@@ -766,7 +797,7 @@ export async function sendStandInCorrections(
           .map((n) => n.key),
         ...(told.unchanged ? others.filter((n) => !n.detail.differs).map((n) => n.key) : []),
       ];
-      await deliver(db, o, channel, { key: lead.key, keys, text }, summary, t);
+      await deliver(db, o, channel, { key: lead.key, keys, ...message }, summary, t);
     };
     if (!version.ownerId) {
       // The status passed only spares the overall-health read: the message states the
@@ -800,12 +831,14 @@ async function reportUnreadable(
     subject,
     type: 'stand_in_corrected',
     lines: (t) => [
-      t('alerts.standInUnreadable.title'),
-      t('alerts.standInUnreadable.body', {
-        version: `${a.version.name} (${a.version.id})`,
-        date: a.date,
-        id: String(a.id),
-      }),
+      { keep: t('alerts.standInUnreadable.title') },
+      {
+        keep: t('alerts.standInUnreadable.body', {
+          version: `${a.version.name} (${a.version.id})`,
+          date: a.date,
+          id: String(a.id),
+        }),
+      },
     ],
   });
   summary.sent += sent.sent;
@@ -881,16 +914,17 @@ async function deliver(
     summary.failed.push(`${label}: no ${channel.type} plug-in`);
     return;
   }
-  const max = notifier.info.maxLength;
-  // A drill: the alert is cut to the room its mark and line leave, then marked, so the message
-  // fits and keeps the alert's end as the real one would. A channel too small even for those:
-  // the marked text is cut at the end (the mark leads, so it stays).
-  const room = max - drillOverhead(t);
-  const text = !o.drill
-    ? cut(alert.text, max)
-    : room > 1
-      ? drillText(t, cut(alert.text, room))
-      : cut(drillText(t, alert.text), max);
+  if (alert.needed !== undefined) {
+    // Its parts never cut do not fit (with a drill's mark and line): nothing is sent or
+    // recorded, and the run is incomplete, so the admins hear of it.
+    const needed = alert.needed + (o.drill ? drillOverhead(t) : 0);
+    o.log.warn(`Alert not delivered (${label}): channel too small`, { key: alert.key, needed });
+    summary.failed.push(`${label}: channel too small for the alert (${needed} characters needed)`);
+    return;
+  }
+  // The alert was fitted to the room a drill's mark and line leave (`roomOn`); the cut is only a
+  // guard against a channel's limit being passed.
+  const text = cut(o.drill ? drillText(t, alert.text) : alert.text, notifier.info.maxLength);
   try {
     await notifier.send(channel.target, text, o.context(notifier, channel.id));
     if (!o.drill) {
@@ -909,21 +943,19 @@ async function deliver(
 
 /** At most `max` characters, "…" at the end when cut (not between a surrogate pair's halves). */
 function cut(text: string, max: number): string {
-  return cutKept(text, max).text;
+  return text.length <= max ? text : cutAlways(text, max);
 }
 
-/** `cut`, with how many of the text's first characters it kept whole. */
-function cutKept(text: string, max: number): { text: string; kept: number } {
-  if (text.length <= max) return { text, kept: text.length };
-  const kept = text.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, '');
-  return { text: `${kept}…`, kept: kept.length };
+/** `max` characters of `text` at most, always ending in "…" (the line is not whole). */
+function cutAlways(text: string, max: number): string {
+  return `${text.slice(0, Math.max(0, max - 1)).replace(/[\uD800-\uDBFF]$/, '')}…`;
 }
 
 /**
  * A list in a message, shortened item by item to fit the channel. The items not listed are
  * counted exactly by `more` (never dropped silently). `inline`: the listed items and the count
  * joined by `join` into one line by `line`; otherwise each item is a line, the count a line after
- * them.
+ * them. `keep`: its lines are never cut or dropped (it is only shortened item by item).
  */
 export interface ListPart {
   items: string[];
@@ -931,110 +963,165 @@ export interface ListPart {
   limit?: number;
   more: (count: number) => string;
   inline?: { join: string; line: (items: string) => string };
+  keep?: boolean;
 }
 
-/** A part of a message: a line (cut when nothing else fits), a line never cut, or a list. */
-export type Part = string | { keep: string } | ListPart;
+/**
+ * A part of a message: a line (cut or dropped when nothing else fits), a line never cut
+ * (`keep`), a count line (`count`: dropped whole, never cut in its text), or a list.
+ */
+export type Part = string | { keep: string } | { count: string } | ListPart;
 
 export interface Fitted {
+  /** The message; not to be sent when it does not fit (`fits` false). */
   text: string;
   /**
    * Per part, what arrives whole: a line 1 or 0; a list the number of its items listed (an inline
    * list's only when its whole line arrives).
    */
   shown: number[];
+  /** Every part never cut arrives whole within `max`. When false nothing may be sent. */
+  fits: boolean;
+  /**
+   * The characters the message needs at least: the parts never cut whole, the lists at their
+   * count, one "…" for each run of other lines.
+   */
+  needed: number;
 }
 
 const isList = (p: Part): p is ListPart => typeof p === 'object' && 'items' in p;
-const isKept = (p: Part): p is { keep: string } => typeof p === 'object' && 'keep' in p;
+// A list may carry `keep` too: a kept line is the part whose `keep` is its text.
+const isKept = (p: Part): p is { keep: string } =>
+  typeof p === 'object' && 'keep' in p && typeof p.keep === 'string';
+const isCount = (p: Part): p is { count: string } => typeof p === 'object' && 'count' in p;
 
 /**
  * The one way an alert fits its channel (requirements 11: every alert states the data health).
  * `max`: the channel's longest message, less a drill's mark and line (`roomOn`).
  * 1. The lists are shortened one item at a time, the list with the most items listed first (on a
  *    tie the later one), each counted exactly ("and N more"), until the message fits or no list
- *    lists anything.
- * 2. Still too long: the lines that may be cut are, from the end, run by run (the runs between
- *    the lines never cut), each at its end with "…"; a run cut down to "…" alone gives its room to
- *    the run before it. The lines never cut (the health line) arrive whole.
- * 3. A channel too small even for the lines never cut and one "…" per run: the message is cut at
- *    its end (`deliver` would do the same), so nothing beyond the channel's limit is sent.
+ *    lists anything. Lengths come from the items' lengths, not from a render per item.
+ * 2. Still too long: the lines that may be cut go, run by run from the end (a run: the lines
+ *    between those never cut). A run loses whole lines from its end, one "…" line in their
+ *    place; only when its first line alone (with that "…") does not fit is that line cut in its
+ *    text, and a count line never is (the run is then "…" alone). A run down to "…" gives its
+ *    room to the run before it.
+ * 3. A channel too small for the parts never cut whole and one "…" per run: `fits` is false and
+ *    the caller sends nothing (`deliver` reports the channel as too small).
  */
 export function fitMessage(parts: Part[], max: number): Fitted {
   const shown = parts.map((p) => (isList(p) ? Math.min(p.items.length, p.limit ?? Infinity) : 1));
-  const render = () =>
-    parts.map((p, i): string[] => {
-      if (typeof p === 'string') return [p];
-      if (isKept(p)) return [p.keep];
+  const render = (i: number): string[] => {
+    const p = parts[i]!;
+    if (typeof p === 'string') return [p];
+    if (isKept(p)) return [p.keep];
+    if (isCount(p)) return [p.count];
+    const n = shown[i]!;
+    const hidden = p.items.length - n;
+    const listed = [...p.items.slice(0, n), ...(hidden > 0 ? [p.more(hidden)] : [])];
+    return p.inline ? [p.inline.line(listed.join(p.inline.join))] : listed;
+  };
+  // Step 1 by arithmetic: each part's characters and lines for `shown` items, from prefix sums of
+  // the item lengths. An inline line is its template's length plus `k` times the listed text's
+  // (the translator puts the text in `k` times); the render after the loop checks it.
+  const size = parts.map((p, i) => {
+    if (!isList(p)) return () => ({ chars: render(i)[0]!.length, lines: 1 });
+    const prefix = [0];
+    for (const item of p.items) prefix.push(prefix.at(-1)! + item.length);
+    // Measured on one and two characters, so a line that stands in for empty text still counts.
+    const k = p.inline ? p.inline.line('xx').length - p.inline.line('x').length : 0;
+    const base = p.inline ? p.inline.line('x').length - k : 0;
+    return () => {
       const n = shown[i]!;
       const hidden = p.items.length - n;
-      const listed = [...p.items.slice(0, n), ...(hidden > 0 ? [p.more(hidden)] : [])];
-      return p.inline ? [p.inline.line(listed.join(p.inline.join))] : listed;
-    });
-  const textOf = (r: string[][]) => r.flat().join('\n');
-  let rendered = render();
-  for (;;) {
-    if (textOf(rendered).length <= max) return { text: textOf(rendered), shown };
+      const more = hidden > 0 ? p.more(hidden).length : 0;
+      const count = n + (hidden > 0 ? 1 : 0);
+      if (!p.inline) return { chars: prefix[n]! + more, lines: count };
+      const listed = prefix[n]! + more + p.inline.join.length * Math.max(0, count - 1);
+      return { chars: base + k * listed, lines: 1 };
+    };
+  });
+  const sizes = size.map((s) => s());
+  const total = () => {
+    const lines = sizes.reduce((n, s) => n + s.lines, 0);
+    return sizes.reduce((n, s) => n + s.chars, 0) + Math.max(0, lines - 1);
+  };
+  const pickList = () => {
     let pick = -1;
     parts.forEach((p, i) => {
       if (isList(p) && shown[i]! > 0 && (pick < 0 || shown[i]! >= shown[pick]!)) pick = i;
     });
-    if (pick < 0) break;
+    return pick;
+  };
+  for (let pick = pickList(); total() > max && pick >= 0; pick = pickList()) {
     shown[pick]!--;
-    rendered = render();
+    sizes[pick] = size[pick]!();
+  }
+  let rendered = parts.map((_, i) => render(i));
+  const textOf = () => rendered.flat().join('\n');
+  // The arithmetic is exact for the alerts' templates; a line that is not is shortened by render.
+  for (let pick = pickList(); textOf().length > max && pick >= 0; pick = pickList()) {
+    shown[pick]!--;
+    rendered = parts.map((_, i) => render(i));
   }
 
   // Each line with its part; runs of lines that may be cut, between those never cut.
-  const lines = rendered.flatMap((ls, part) =>
-    ls.map((text) => ({ text, part, keep: isKept(parts[part]!) })),
-  );
-  type Run = { keep: boolean; lines: typeof lines };
-  const runs: Run[] = [];
+  const lines = rendered.flatMap((ls, part) => {
+    const p = parts[part]!;
+    const keep = isKept(p) || (isList(p) && p.keep === true);
+    return ls.map((text, j) => {
+      const hidden = isList(p) && p.items.length > shown[part]!;
+      // A line with a count: a count line, an inline list's line, a list's last line ("and N more").
+      const count = isCount(p) || (hidden && (p.inline !== undefined || j === ls.length - 1));
+      return { text, part, keep, count };
+    });
+  });
+  type Line = (typeof lines)[number];
+  const runs: { keep: boolean; lines: Line[] }[] = [];
   for (const line of lines) {
     const last = runs.at(-1);
     if (last && !last.keep && !line.keep) last.lines.push(line);
     else runs.push({ keep: line.keep, lines: [line] });
   }
-  const runText = (r: Run) => r.lines.map((l) => l.text).join('\n');
-  const smallest = runs.reduce((n, r) => n + (r.keep ? runText(r).length : 1), 0) + runs.length - 1;
-  // Per run, the characters of its text kept whole (all, unless it is cut).
-  let cuts: { text: string; kept: number }[];
-  if (max >= 1 && smallest <= max) {
-    let excess = textOf(rendered).length - max;
-    cuts = runs.map((r) => ({ text: runText(r), kept: runText(r).length }));
+  const length = (ls: Line[]) => ls.reduce((n, l) => n + l.text.length, 0) + ls.length - 1;
+  const needed =
+    runs.reduce((n, r) => n + (r.keep ? length(r.lines) : 1), 0) + Math.max(0, runs.length - 1);
+  const whole = new Set<Line>(lines);
+  let text = textOf();
+  if (text.length > max) {
+    if (needed > max) return { text, shown: parts.map(() => 0), fits: false, needed };
+    let excess = text.length - max;
+    const out = runs.map((r) => r.lines.map((l) => l.text));
     for (let i = runs.length - 1; i >= 0 && excess > 0; i--) {
-      if (runs[i]!.keep) continue;
-      const whole = cuts[i]!.text;
-      cuts[i] = cutKept(whole, Math.max(1, whole.length - excess));
-      excess -= whole.length - cuts[i]!.text.length;
+      const r = runs[i]!;
+      if (r.keep) continue;
+      const all = length(r.lines);
+      // The most whole lines that fit with one "…" line after them.
+      let j = r.lines.length - 1;
+      while (j >= 1 && all - (length(r.lines.slice(0, j)) + 2) < excess) j--;
+      const dropped = j >= 1 ? r.lines.slice(j) : r.lines;
+      for (const l of dropped) whole.delete(l);
+      if (j >= 1) {
+        out[i] = [...r.lines.slice(0, j).map((l) => l.text), '…'];
+      } else {
+        const first = r.lines[0]!;
+        const room = Math.min(all - excess, first.text.length);
+        out[i] = [!first.count && room >= 2 ? cutAlways(first.text, room) : '…'];
+      }
+      excess -= all - out[i]!.join('\n').length;
     }
-  } else {
-    const all = textOf(rendered);
-    const c = max >= 1 ? cutKept(all, max) : { text: all, kept: all.length };
-    cuts = [c];
-    runs.splice(0, runs.length, { keep: false, lines });
+    text = out.flat().join('\n');
   }
-  // What arrives whole: a line whose text and newline are both kept (or that ends an uncut run).
-  const whole = new Set<(typeof lines)[number]>();
-  runs.forEach((r, i) => {
-    const { kept, text } = cuts[i]!;
-    const uncut = kept === runText(r).length && text.length === kept;
-    let end = 0;
-    for (const l of r.lines) {
-      end += l.text.length;
-      if (uncut || end < kept) whole.add(l);
-      end += 1;
-    }
-  });
   const shownWhole = parts.map((p, i) => {
     const own = lines.filter((l) => l.part === i);
-    if (!isList(p) || p.inline)
+    if (!isList(p) || p.inline) {
       return own.length > 0 && own.every((l) => whole.has(l)) ? shown[i]! : 0;
-    // One line per item, the count after them: the items before the first line cut.
+    }
+    // One line per item, the count after them: the items before the first line not whole.
     const first = own.findIndex((l) => !whole.has(l));
     return Math.min(shown[i]!, first < 0 ? own.length : first);
   });
-  return { text: cuts.map((c) => c.text).join('\n'), shown: shownWhole };
+  return { text, shown: shownWhole, fits: true, needed };
 }
 
 /**

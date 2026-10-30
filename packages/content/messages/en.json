@@ -88,7 +88,9 @@
     },
     "recompute": {
       "title": "Saku: the engine now decides {count} recorded days differently",
-      "body": "First: {version} on {date}, recorded {recorded}, now {now}; signals that differ: {signals}. Recorded entries stay as they are; each difference is annotated. Find the cause before trusting new signals."
+      "body": "First: {version} on {date}, recorded {recorded}, now {now}; signals that differ: {signals}. Recorded entries stay as they are; each difference is annotated. Find the cause before trusting new signals.",
+      "others": "Other recorded days now decided differently:",
+      "otherDay": "{version} on {date}: recorded {recorded}, now {now}"
     },
     "standInCorrected": {
       "title": "{strategy}: correction to the signal of {date}",
