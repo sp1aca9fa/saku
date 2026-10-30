@@ -633,6 +633,18 @@ describe('ECB', () => {
       if (start > '2004-12-31') return noResults();
       return `${header}\nEXR.D.QQQ.EUR.SP00.A,D,QQQ,EUR,SP00,A,${start},2.5000`;
     };
+    const isFirst = (url: URL) => url.searchParams.has('firstNObservations');
+    /** Answers the first-observation request with these series starts, other requests by `route`. */
+    const withFirst =
+      (starts: Record<string, string>, route: (url: URL) => unknown) => (url: URL) =>
+        isFirst(url)
+          ? [
+              header,
+              ...Object.entries(starts).map(
+                ([cur, date]) => `EXR.D.${cur}.EUR.SP00.A,D,${cur},EUR,SP00,A,${date},1.0000`,
+              ),
+            ].join('\n')
+          : route(url);
 
     it('counts a part answering 404 or nothing as zero rows', async () => {
       const ctx = fixtureContext(ended);
@@ -640,12 +652,17 @@ describe('ECB', () => {
       expect(ctx.requested.length).toBeGreaterThan(2);
       expect(rates.map((r) => r.date)).toEqual(['1999-01-01', expect.any(String)]);
       expect(rates.every((r) => r.rate === 2.5 && r.date <= '2004-12-31')).toBe(true);
-      const blank = fixtureContext((url) =>
-        url.searchParams.get('startPeriod') === '1999-01-01' ? '' : ended(url),
+      // The first part has rates: no first-observation request.
+      expect(ctx.requested.some((u) => isFirst(new URL(u)))).toBe(false);
+      const second = ecbChunks('1999-01-01', '2026-10-28')[1]!.from;
+      const blank = fixtureContext(
+        withFirst({ QQQ: second }, (url) =>
+          url.searchParams.get('startPeriod') === '1999-01-01' ? '' : ended(url),
+        ),
       );
       expect(
         (await ecb.fetchRates('EURQQQ', '1999-01-01', '2026-10-28', blank)).map((r) => r.date),
-      ).toHaveLength(1);
+      ).toEqual([second]);
     });
 
     it('accepts empty parts at the start or end, and refuses a hole between parts with rates', async () => {
@@ -657,14 +674,25 @@ describe('ECB', () => {
         if (empty.includes(i)) return i % 2 === 0 ? noResults() : header;
         return `${header}\nEXR.D.QQQ.EUR.SP00.A,D,QQQ,EUR,SP00,A,${start},2.5000`;
       };
-      // Leading and trailing empty parts (a series that started late and ended early).
-      const edges = await ecb.fetchRates(
-        'EURQQQ',
-        '1999-01-01',
-        '2026-10-28',
-        fixtureContext(emptyAt([0, 1, parts.length - 1])),
+      // Leading and trailing empty parts (a series that started late and ended early): the
+      // leading ones are accepted because the ECB says the series starts after them.
+      const edgesCtx = fixtureContext(
+        withFirst({ QQQ: parts[2]!.from }, emptyAt([0, 1, parts.length - 1])),
       );
+      const edges = await ecb.fetchRates('EURQQQ', '1999-01-01', '2026-10-28', edgesCtx);
       expect(edges.map((r) => r.date)).toEqual(parts.slice(2, -1).map((p) => p.from));
+      const asked = edgesCtx.requested.map((u) => new URL(u)).filter(isFirst);
+      expect(asked).toHaveLength(1);
+      expect(asked[0]!.pathname).toMatch(/\/EXR\/D\.QQQ\.EUR\.SP00\.A$/);
+      expect(asked[0]!.searchParams.get('firstNObservations')).toBe('1');
+      expect(asked[0]!.searchParams.get('detail')).toBe('dataonly');
+      expect(asked[0]!.searchParams.get('format')).toBe('csvdata');
+      expect(asked[0]!.searchParams.has('startPeriod')).toBe(false);
+      // Only trailing empty parts: accepted as before, without asking (FX freshness catches a
+      // recent gap).
+      const tailCtx = fixtureContext(emptyAt([parts.length - 1]));
+      await ecb.fetchRates('EURQQQ', '1999-01-01', '2026-10-28', tailCtx);
+      expect(tailCtx.requested.some((u) => isFirst(new URL(u)))).toBe(false);
       // A 404 or header-only part between parts with rates is refused, naming its range.
       for (const hole of [2, 3]) {
         const p = parts[hole]!;
@@ -674,6 +702,142 @@ describe('ECB', () => {
           `ECB: no rates for EURQQQ from ${p.from} to ${p.to}, between parts with rates`,
         );
       }
+    });
+
+    it('refuses a leading empty part when the series starts on or before its end', async () => {
+      const parts = ecbChunks('1999-01-01', '2026-10-28');
+      const span = `from ${parts[0]!.from} to ${parts[0]!.to}`;
+      // A leading 404 or a leading header-only answer, for a series the ECB says starts in 1999.
+      for (const empty of [noResults, () => header]) {
+        const route = (url: URL) =>
+          url.searchParams.get('startPeriod') === '1999-01-01' ? empty() : ended(url);
+        await expect(
+          ecb.fetchRates(
+            'EURQQQ',
+            '1999-01-01',
+            '2026-10-28',
+            fixtureContext(withFirst({ QQQ: '1999-01-04' }, route)),
+          ),
+        ).rejects.toThrow(
+          `ECB: no rates for EURQQQ ${span}, but the QQQ series starts on 1999-01-04`,
+        );
+        // A first observation on the empty part's last day is refused too.
+        await expect(
+          ecb.fetchRates(
+            'EURQQQ',
+            '1999-01-01',
+            '2026-10-28',
+            fixtureContext(withFirst({ QQQ: parts[0]!.to }, route)),
+          ),
+        ).rejects.toThrow(/but the QQQ series starts on/);
+      }
+      // A range starting later: an empty first part of a series that started in 1999 is refused.
+      const late = ecbChunks('2010-01-01', '2026-10-28');
+      const lateRoute = (url: URL) => {
+        const start = url.searchParams.get('startPeriod')!;
+        if (start === '2010-01-01') return noResults();
+        return `${header}\nEXR.D.QQQ.EUR.SP00.A,D,QQQ,EUR,SP00,A,${start},2.5000`;
+      };
+      await expect(
+        ecb.fetchRates(
+          'EURQQQ',
+          '2010-01-01',
+          '2026-10-28',
+          fixtureContext(withFirst({ QQQ: '1999-01-04' }, lateRoute)),
+        ),
+      ).rejects.toThrow(`from 2010-01-01 to ${late[0]!.to}, but the QQQ series starts on`);
+    });
+
+    it('asks once for both currencies of a cross and refuses when either starts too early', async () => {
+      const parts = ecbChunks('1999-01-01', '2026-10-28');
+      const route = (url: URL) => {
+        const start = url.searchParams.get('startPeriod')!;
+        if (start === '1999-01-01') return noResults();
+        return [
+          header,
+          `EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,${start},1.2500`,
+          `EXR.D.JPY.EUR.SP00.A,D,JPY,EUR,SP00,A,${start},160.00`,
+        ].join('\n');
+      };
+      const later = parts[1]!.from;
+      const ctx = fixtureContext(withFirst({ USD: later, JPY: later }, route));
+      const rates = await ecb.fetchRates('USDJPY', '1999-01-01', '2026-10-28', ctx);
+      expect(rates.map((r) => r.date)).toEqual(parts.slice(1).map((p) => p.from));
+      const asked = ctx.requested.map((u) => new URL(u)).filter(isFirst);
+      expect(asked).toHaveLength(1);
+      expect(asked[0]!.pathname).toMatch(/\/EXR\/D\.USD\+JPY\.EUR\.SP00\.A$/);
+      await expect(
+        ecb.fetchRates(
+          'USDJPY',
+          '1999-01-01',
+          '2026-10-28',
+          fixtureContext(withFirst({ USD: later, JPY: '1999-01-04' }, route)),
+        ),
+      ).rejects.toThrow(/but the JPY series starts on 1999-01-04/);
+      // A currency missing from the answer is unknown, never taken as starting later.
+      await expect(
+        ecb.fetchRates(
+          'USDJPY',
+          '1999-01-01',
+          '2026-10-28',
+          fixtureContext(withFirst({ USD: later }, route)),
+        ),
+      ).rejects.toThrow(/no first observation for JPY/);
+    });
+
+    it('refuses the range when the first observation cannot be read or contradicts the rates', async () => {
+      const parts = ecbChunks('1999-01-01', '2026-10-28');
+      const route = (url: URL) =>
+        url.searchParams.get('startPeriod') === '1999-01-01' ? noResults() : ended(url);
+      const failing = (answer: () => unknown) =>
+        fixtureContext((url) => (isFirst(url) ? answer() : route(url)));
+      // A failed request (an error, or a 404 for a series that just gave rates) fails the range.
+      await expect(
+        ecb.fetchRates(
+          'EURQQQ',
+          '1999-01-01',
+          '2026-10-28',
+          failing(() => new Response('', { status: 500 })),
+        ),
+      ).rejects.toThrow(/HTTP 500/);
+      await expect(
+        ecb.fetchRates('EURQQQ', '1999-01-01', '2026-10-28', failing(noResults)),
+      ).rejects.toThrow(/HTTP 404/);
+      // An empty or header-only answer: unknown start, refused.
+      for (const answer of ['', header]) {
+        await expect(
+          ecb.fetchRates(
+            'EURQQQ',
+            '1999-01-01',
+            '2026-10-28',
+            failing(() => answer),
+          ),
+        ).rejects.toThrow(/no first observation for QQQ/);
+      }
+      // Unreadable rows or columns are refused.
+      for (const answer of [
+        `${header}\nEXR.D.QQQ.EUR.SP00.A,D,QQQ,EUR,SP00,A,soon,1.0`,
+        'KEY,VALUE\nx,1',
+      ]) {
+        await expect(
+          ecb.fetchRates(
+            'EURQQQ',
+            '1999-01-01',
+            '2026-10-28',
+            failing(() => answer),
+          ),
+        ).rejects.toThrow(/unreadable row|unexpected columns/);
+      }
+      // A start after a rate already received: the answer cannot vouch for the empty span.
+      const after = addDays(parts[1]!.from, 1);
+      await expect(
+        ecb.fetchRates(
+          'EURQQQ',
+          '1999-01-01',
+          '2026-10-28',
+          fixtureContext(withFirst({ QQQ: after }, route)),
+        ),
+      ).rejects.toThrow(`said to start on ${after}, but has a rate on ${parts[1]!.from}`);
     });
 
     it('refuses the range when every part is empty', async () => {
