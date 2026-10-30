@@ -17,6 +17,7 @@ import {
   reasonCode,
   runHasCheck,
   runSummary,
+  sourceRefusal,
 } from './health-summary';
 
 let clock = Date.parse('2026-02-01T00:00:00Z');
@@ -274,6 +275,23 @@ describe('the run a --check listing reads', () => {
     expect(await checkSources(db, id, 'nope')).toEqual([]);
   });
 
+  it('refuses an unknown source and never offers "none" for results without one', () => {
+    expect(sourceRefusal('r', 'close_match', 's2', [null, 's2', 's3'])).toBeUndefined();
+    expect(sourceRefusal('r', 'close_match', 'none', [null, 's2'])).toBe(
+      'Run r stored no result of check close_match from source none. Sources with results: s2. ' +
+        'Results without a source: leave out --source.',
+    );
+    expect(sourceRefusal('r', 'index_match', 'zz', [null])).toBe(
+      'Run r stored no result of check index_match from source zz. ' +
+        'Results without a source: leave out --source.',
+    );
+    expect(sourceRefusal('r', 'close_match', 'zz', ['s2'])).toBe(
+      'Run r stored no result of check close_match from source zz. Sources with results: s2.',
+    );
+    // A source really named "none" is a source like any other.
+    expect(sourceRefusal('r', 'close_match', 'none', ['none'])).toBeUndefined();
+  });
+
   it('a symbol outside the run is not graded by it, never "no non-green result"', async () => {
     const { db, ids, health } = await setup();
     const full = await run(db, 'bootstrap', '2026-01-08');
@@ -384,6 +402,26 @@ describe('runSummary health groups', () => {
       'day DTB3:stale(3)@src 2026-01-06': ['yellow', true],
       'day issuer_unavailable@iss 2026-01-06': ['yellow', true],
     });
+  });
+
+  it('a derived status that is green or worse than the row is unknown, never shown', async () => {
+    const { db, ids, result } = await setup();
+    const id = await run(db, 'daily', '2026-01-06');
+    const row = (date: string, symbol: number | null, status: HealthStatus, reasons: string[]) =>
+      db.insert(schema.dataHealth).values({ runId: id, date, symbolId: symbol, status, reasons });
+    // One day behind is green by the freshness rule, yet the row is yellow: unknown.
+    await row('2026-01-06', null, 'yellow', ['X:stale(1)@s']);
+    // A red result on a yellow row (the row keeps its worst reason): unknown.
+    await result(id, { date: '2026-01-05', status: 'red', symbol: ids.AAA, source: 's2' });
+    await row('2026-01-05', ids.AAA, 'yellow', ['B.close_match@s2']);
+    // A red-only code on a yellow row: unknown too.
+    await row('2026-01-05', ids.BBB, 'yellow', ['primary_missing']);
+    const s = await runSummary(db, (await findRun(db, id))!);
+    expect(s.healthGroups.map((g) => [g.reason, g.status, g.known])).toEqual([
+      ['B.close_match@s2', 'yellow', false],
+      ['X:stale(1)@s', 'yellow', false],
+      ['primary_missing', 'yellow', false],
+    ]);
   });
 
   it('has no health groups when every row is green', async () => {

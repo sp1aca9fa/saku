@@ -52,6 +52,7 @@ import {
   recentRuns,
   runHasCheck,
   runSummary,
+  sourceRefusal,
 } from '../jobs/health-summary';
 import { loadPlugins } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -203,14 +204,13 @@ async function summary(
     }
     if (a.source !== undefined) {
       // A full run stores only non-green results: a source with none of this check is unknown.
-      const sources = await checkSources(db, run.id, a.check);
-      if (!sources.includes(a.source)) {
-        const named = sources.map((x) => x ?? 'none');
-        fail(
-          `Run ${run.id} stored no result of check ${a.check} from source ${a.source}.` +
-            (named.length ? ` Sources with results: ${named.join(', ')}.` : ''),
-        );
-      }
+      const refusal = sourceRefusal(
+        run.id,
+        a.check,
+        a.source,
+        await checkSources(db, run.id, a.check),
+      );
+      if (refusal) fail(refusal);
     }
   }
   const error = run.error?.split('\n')[0]?.trim();

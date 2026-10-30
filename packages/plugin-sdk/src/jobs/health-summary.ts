@@ -14,9 +14,12 @@
 //   well). Only the reasons stored on this run's rows are used. A row stores its worst status, not
 //   each reason's, so each reason's own status is derived (`reasonStatus`); one that cannot be
 //   known is shown as "in a red/yellow row", never under a status it may not have.
-// - Complete: a run is judged only when it succeeded and stored the overall row of its target
-//   (verify stores the overall rows last, so that row means every row was stored). Otherwise its
-//   green count is unknown and it is never "all green".
+// - Complete: a run is judged only when it succeeded and stored the overall row of its target.
+//   Success is what guarantees every row was stored (jobs/run.ts marks a run successful only
+//   after verify returned, every store awaited). The target's overall row alone does not: verify
+//   writes the overall rows in the order its map got them, not the target last. That row is
+//   required on top, as the sign the run graded its own date. Otherwise its green count is
+//   unknown and it is never "all green".
 // - Results are shown as stored: nothing missing is turned into green. A full-history run stores
 //   only its non-green results and the per-check counts (`check_summaries`), so its green count
 //   comes from those counts and is unknown without them. Health rows (`data_health`) can be
@@ -103,8 +106,8 @@ export interface RunSummary {
   /** False when the per-check counts and the stored non-green results disagree. */
   countsAgree: boolean;
   /**
-   * The run succeeded and stored the overall row of its target (so every row was stored); what
-   * makes an incomplete run is in `incomplete`.
+   * The run succeeded (which is what guarantees every row was stored) and stored the overall row
+   * of its target (it graded its own date); what makes an incomplete run is in `incomplete`.
    */
   complete: boolean;
   incomplete?: 'not_success' | 'no_target' | 'no_target_row';
@@ -225,7 +228,7 @@ export async function runSummary(db: Db, run: SummaryRun): Promise<RunSummary> {
   const nonGreen = { red: 0, yellow: 0 };
   for (const g of groups) nonGreen[g.status as 'red' | 'yellow'] += g.count;
 
-  // Complete: succeeded and stored the overall row of its target (stored last by verify).
+  // Complete: succeeded (every row stored) and graded its target (the target's overall row).
   let incomplete: RunSummary['incomplete'];
   if (run.status !== 'success' || run.finishedAt === null) incomplete = 'not_success';
   else if (!run.target) incomplete = 'no_target';
@@ -285,7 +288,13 @@ export async function runSummary(db: Db, run: SummaryRun): Promise<RunSummary> {
     // A non-green row without a reason is shown as such, never dropped.
     const reasons = row.reasons.length > 0 ? new Set(row.reasons) : new Set([NO_REASON]);
     for (const reason of reasons) {
-      const own = reason === NO_REASON ? undefined : statusOf(row, reason);
+      // A derived status that is green, or worse than the row's own (the row keeps the worst of
+      // its reasons), contradicts what was stored: unknown, shown "in a <row status> row".
+      const derived = reason === NO_REASON ? undefined : statusOf(row, reason);
+      const own =
+        derived === undefined || derived === 'green' || worst(derived, row.status) !== row.status
+          ? undefined
+          : derived;
       const status = own ?? row.status;
       const known = own !== undefined;
       const key = JSON.stringify([status, known, reason, symbol]);
@@ -418,6 +427,26 @@ export async function gradedRange(
       and(eq(h.runId, run.id), symbolId === null ? isNull(h.symbolId) : eq(h.symbolId, symbolId)),
     );
   return range?.from && range.to ? { from: range.from, to: range.to } : undefined;
+}
+
+/**
+ * Why `--source <source>` is refused for a check, given the check's stored sources in the run
+ * (`checkSources`), or undefined when it is one of them. Results without a source are reached by
+ * leaving `--source` out; "none" is never offered as a name (a source could be called that).
+ */
+export function sourceRefusal(
+  runId: string,
+  check: string,
+  source: string,
+  sources: (string | null)[],
+): string | undefined {
+  if (sources.includes(source)) return undefined;
+  const named = sources.filter((x): x is string => x !== null);
+  return (
+    `Run ${runId} stored no result of check ${check} from source ${source}.` +
+    (named.length ? ` Sources with results: ${named.join(', ')}.` : '') +
+    (sources.includes(null) ? ' Results without a source: leave out --source.' : '')
+  );
 }
 
 /** The sources of a check's stored results in the run (any status), sorted; none as `null`. */
