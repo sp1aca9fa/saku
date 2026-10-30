@@ -69,10 +69,12 @@ the descriptions to the database. The fields:
   `since` (the 31-day symbol window plus the day a symbol is stored under), whatever it holds.
   A saved description that cannot be read is left as saved: the run reports it (incomplete,
   with the row's kind and key) and that plug-in's provider sends nothing, since its history is
-  unknown; other providers go on. To recover, restore the database from the last backup made
-  before the row went bad (`docs/backups.md`), or delete that `plugin_info` row (its key and
-  kind) when its provider id has not changed in the last 32 days; the next run saves it
-  afresh. Notifier keys share this namespace: a notifier whose key equals
+  unknown; other providers go on. To recover, never restore the whole database (that loses
+  usage counts and forward records since the backup): restore the last backup made before the
+  row went bad to a separate file (`pnpm restore <backup> /path/to/copy.db`, `docs/backups.md`)
+  and copy only that row's `description` (by key and kind) into the live database; or delete
+  that `plugin_info` row when its provider id has not changed in the last 32 days, and the next
+  run saves it afresh. Notifier keys share this namespace: a notifier whose key equals
   a data provider id counts with it, so it must not equal one unless their limits match.
 - `keyEnv`: the environment variable(s) holding the key, read from `.env`.
 - `termsUrl`: the provider's terms.
