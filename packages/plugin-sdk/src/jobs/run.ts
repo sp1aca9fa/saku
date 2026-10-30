@@ -27,6 +27,7 @@ import {
   sendParityFailed,
   sendRecomputeDiffers,
   sendRevisions,
+  sendStandInCorrections,
   sendStrategyAlerts,
 } from './alerts';
 import { anchor } from './anchor';
@@ -157,6 +158,19 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         log.warn('Stand-in corrections not checked', { errors: c.errors });
         markIncomplete('stand-in corrections');
         failures.push(...c.errors);
+      }
+      // Each correction told to the people who got that day's signal (the version's owner, the
+      // admins for a library version), every one not yet delivered, also from earlier runs.
+      const s = await sendStandInCorrections(db, alerting);
+      if (s.sent > 0) log.info(`Stand-in correction alerts: ${s.sent} sent`);
+      if (s.failed.length > 0) {
+        log.warn('Stand-in correction alerts not delivered', { failed: s.failed });
+        markIncomplete('alerts');
+      }
+      if (s.errors.length > 0) {
+        log.warn('Stand-in correction annotations not told', { errors: s.errors });
+        markIncomplete('stand-in alerts');
+        failures.push(...s.errors);
       }
       const r = await recompute(db, { runId, code: o.code });
       log.info(`Recomputed ${r.checked} recorded days: ${r.differences.length} new differences`);

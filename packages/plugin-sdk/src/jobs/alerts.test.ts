@@ -1,6 +1,7 @@
 import { Sessions } from '@saku/data';
 import {
   addChannel,
+  annotate,
   appendForward,
   channelsOf,
   createUser,
@@ -27,8 +28,10 @@ import {
   sendDayAlert,
   sendJobFailure,
   sendRevisions,
+  sendStandInCorrections,
   sendStrategyAlerts,
   sendUpdateFailed,
+  standInDetail,
 } from './alerts';
 import { parseVersion } from './forward';
 
@@ -685,5 +688,202 @@ describe('drill messages (pnpm drill)', () => {
       // Room for the mark and its line: both whole, the alert cut after them.
       if (max === 300) expect(text.split('\n')[1]).toBe(t('alerts.drill.body'));
     }
+  });
+});
+
+describe('stand-in correction alerts (requirements 04, the stand-in rule 4)', () => {
+  const DAY = '2026-01-05';
+  type TestDb = Awaited<ReturnType<typeof setup>>['db'];
+  const note = (db: TestDb, versionId: string, detail: Record<string, unknown> = {}, date = DAY) =>
+    annotate(db, {
+      versionId,
+      date,
+      kind: 'stand_in_corrected',
+      detail: {
+        ticker: 'AAA',
+        deviation: 1 / 0.99 - 1,
+        recordedAllocation: 'Calm',
+        correctedAllocation: 'Risk on',
+        differs: true,
+        ...detail,
+      } as never,
+      runId: null,
+    });
+
+  it("tells the version's owner once, in English, with the latest day's data health", async () => {
+    const { db, version, day } = await setup();
+    await day(DAY, 'Calm', { status: 'yellow', reasons: ['AAA:stand_in@s'] });
+    await day('2026-01-06', 'Risk on');
+    await note(db, version.id);
+    const { notifier, sent } = fakeNotifier();
+    expect(await sendStandInCorrections(db, options(notifier, '2026-01-06'))).toEqual({
+      sent: 1,
+      failed: [],
+      errors: [],
+    });
+    expect(sent).toEqual([
+      {
+        target: 'chat-1',
+        text: [
+          'Trend: correction to the signal of 2026-01-05',
+          "The signal of 2026-01-05 used a secondary price for AAA that was off by 1.01% from the primary's price, which arrived later.",
+          'Recorded allocation: Calm. With the corrected price it would have been Risk on. The record is annotated, not changed.',
+          'This is about a past day, not a new signal: the latest signal gives the current allocation.',
+          'Data health: green. (Latest recorded day, 2026-01-06.)',
+        ].join('\n'),
+      },
+    ]);
+    // Not repeated, also when a later run reads the same annotation.
+    expect((await sendStandInCorrections(db, options(notifier, '2026-01-07'))).sent).toBe(0);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('in Japanese; an unchanged signal is said to be unchanged, the safe state by its name', async () => {
+    const { db, version, day } = await setup('ja');
+    await day(DAY, 'Calm', { status: 'yellow' });
+    await note(db, version.id, {
+      ticker: 'BBB',
+      deviation: 0.0006,
+      correctedAllocation: 'Calm',
+      differs: false,
+    });
+    await note(db, version.id, { recordedAllocation: 'Safe state', correctedAllocation: 'Calm' });
+    const { notifier, sent } = fakeNotifier();
+    expect((await sendStandInCorrections(db, options(notifier, DAY))).sent).toBe(2);
+    expect(sent[0]!.text).toBe(
+      [
+        'Trend: 2026-01-05 のシグナルの訂正',
+        '2026-01-05 のシグナルは BBB の代替価格(副ソース)を使いましたが、後から届いた主ソースの価格と 0.06% ずれていました。',
+        '記録された配分: Calm。訂正後の価格でも同じで、シグナルは変わりませんでした。',
+        '過去の日についてのお知らせで、新しいシグナルではありません。現在の配分は最新のシグナルのとおりです。',
+        'データ状態: 黄(警告付きで計算)。 (最新の記録日 2026-01-05)',
+      ].join('\n'),
+    );
+    // Per ticker: the same version and date for another ticker is its own alert.
+    expect(sent[1]!.text.split('\n')[2]).toBe(
+      '記録された配分: セーフステート。訂正後の価格なら Calm になっていました。記録は変更せず、注記を付けました。',
+    );
+    // The English text for an unchanged signal.
+    const en = await setup();
+    await en.day(DAY, 'Calm');
+    await note(en.db, en.version.id, { correctedAllocation: 'Calm', differs: false });
+    const other = fakeNotifier();
+    await sendStandInCorrections(en.db, options(other.notifier, DAY));
+    expect(other.sent[0]!.text.split('\n')[2]).toBe(
+      'Recorded allocation: Calm. With the corrected price it would have been the same: the signal would not have changed.',
+    );
+  });
+
+  it('a failed delivery is caught up at the next call, then not repeated', async () => {
+    const { db, version, day } = await setup();
+    await day(DAY, 'Calm');
+    await note(db, version.id);
+    const broken = fakeNotifier(true);
+    const r = await sendStandInCorrections(db, options(broken.notifier, DAY));
+    expect(r.sent).toBe(0);
+    expect(r.failed[0]).toMatch(/Fake: HTTP 500$/);
+    expect(await db.select().from(schema.alertsSent)).toEqual([]);
+    const { notifier, sent } = fakeNotifier();
+    expect((await sendStandInCorrections(db, options(notifier, '2026-01-06'))).sent).toBe(1);
+    expect((await sendStandInCorrections(db, options(notifier, '2026-01-06'))).sent).toBe(0);
+    expect(sent).toHaveLength(1);
+    const [row] = await db.select().from(schema.alertsSent);
+    expect(row).toMatchObject({
+      subject: `stand_in:${version.id}:AAA`,
+      date: DAY,
+      type: 'stand_in_corrected',
+    });
+  });
+
+  it("a library version's correction goes to the admins' channels only", async () => {
+    const { db, owner } = await setup('ja');
+    await setSetting(db, 'forward_records_from', DAY);
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const library = await registerVersion(db, { ownerId: null, name: 'Library', strategy });
+    await appendForward(
+      db,
+      library,
+      {
+        date: DAY,
+        allocation: 'Calm',
+        holdings: [{ ticker: 'CASH_USD', weight: 100 }],
+        safeStateApplied: false,
+        dataStatus: 'yellow',
+        equity: 1,
+        detail: { reasons: [] },
+      },
+      null,
+    );
+    await note(db, library.id);
+    const { notifier, sent } = fakeNotifier();
+    expect((await sendStandInCorrections(db, options(notifier, DAY))).sent).toBe(1);
+    expect(sent.map((m) => m.target)).toEqual(['ops']);
+    expect(sent[0]!.text.split('\n')[0]).toBe('Library: 2026-01-05 のシグナルの訂正');
+    expect(sent[0]!.text.split('\n').at(-1)).toBe(
+      'データ状態: 黄(警告付きで計算)。 (最新の記録日 2026-01-05)',
+    );
+    expect((await sendStandInCorrections(db, options(notifier, DAY))).sent).toBe(0);
+  });
+
+  it('fits the channel: the first lines kept, the health line whole at the end', async () => {
+    const { db, version, day } = await setup();
+    await day(DAY, 'Calm');
+    await note(db, version.id, { correctedAllocation: 'R'.repeat(3000) });
+    for (const max of [2000, 200]) {
+      const { notifier, sent } = fakeNotifier(false, max);
+      await db.delete(schema.alertsSent);
+      expect((await sendStandInCorrections(db, options(notifier, DAY))).sent).toBe(1);
+      const text = sent[0]!.text;
+      const lines = text.split('\n');
+      expect(text.length).toBeLessThanOrEqual(max);
+      expect(lines[0]).toBe('Trend: correction to the signal of 2026-01-05');
+      expect(lines.at(-1)).toBe('Data health: green. (Latest recorded day, 2026-01-05.)');
+      expect(lines.at(-2)!.endsWith('…')).toBe(true);
+    }
+  });
+
+  it('a detail that does not read back is reported, never told with a guessed value', async () => {
+    const { db, version, day } = await setup();
+    await day(DAY, 'Calm');
+    await note(db, version.id, { deviation: null });
+    await note(db, version.id, { ticker: 'BBB', differs: false });
+    const { notifier, sent } = fakeNotifier();
+    const r = await sendStandInCorrections(db, options(notifier, DAY));
+    expect(r.sent).toBe(0);
+    expect(r.errors).toHaveLength(2);
+    expect(r.errors[0]).toMatch(
+      /^Trend \(.+\) 2026-01-05: stand-in correction annotation \d+ does not read back; not told$/,
+    );
+    expect(sent).toEqual([]);
+    expect(
+      standInDetail({
+        ticker: 'A',
+        deviation: -0.1,
+        recordedAllocation: 'x',
+        correctedAllocation: 'y',
+        differs: true,
+      }),
+    ).toBeNull();
+    expect(
+      standInDetail({
+        ticker: 'A',
+        deviation: Number.NaN,
+        recordedAllocation: 'x',
+        correctedAllocation: 'y',
+        differs: true,
+      }),
+    ).toBeNull();
+    expect(standInDetail(null)).toBeNull();
+  });
+
+  it('a drill sends none and records nothing', async () => {
+    const { db, version, day } = await setup();
+    await day(DAY, 'Calm');
+    await note(db, version.id);
+    const { notifier, sent } = fakeNotifier();
+    const drill = { ...options(notifier, DAY), drill: true };
+    expect(await sendStandInCorrections(db, drill)).toEqual({ sent: 0, failed: [], errors: [] });
+    expect(sent).toEqual([]);
+    expect(await db.select().from(schema.alertsSent)).toEqual([]);
   });
 });

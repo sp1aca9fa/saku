@@ -34,7 +34,8 @@ export type AlertType =
   | 'update_failed'
   | 'recompute_differs'
   | 'revisions'
-  | 'integrity';
+  | 'integrity'
+  | 'stand_in_corrected';
 const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red'];
 
 export interface Alert {
@@ -208,14 +209,7 @@ export async function sendDayAlert(
 ): Promise<AlertSummary> {
   const { version, strategy, day } = d;
   if (!version.ownerId) return summary;
-  const owners = d.owners ?? new Map();
-  let owner = owners.get(version.ownerId);
-  if (!owner) {
-    const language = await languageOf(db, version.ownerId);
-    const targets = await deliveryTargets(db, version.ownerId, o.authSecret);
-    owner = { language, t: translator(language), targets };
-    owners.set(version.ownerId, owner);
-  }
+  const owner = await ownerOf(db, o, d.owners ?? new Map(), version.ownerId);
   const { language, t } = owner;
   for (const channel of owner.targets) {
     const alert = strategyAlert(t, language, {
@@ -268,19 +262,20 @@ async function eachAdminChannel(
   db: Db,
   o: AlertOptions,
   health: string | undefined,
-  fn: (t: Translate, channel: Target, healthLine: string) => Promise<void>,
+  fn: (t: Translate, channel: Target, healthLine: string, language: string) => Promise<void>,
 ) {
   if (!(await getSetting(db, 'forward_records_from'))) return;
   const latest = health ? undefined : await latestOverallHealth(db);
   const status = health ?? latest?.status ?? 'unknown';
   const admins = await db.select().from(schema.users).where(eq(schema.users.isAdmin, true));
   for (const admin of admins) {
-    const t = translator(await languageOf(db, admin.id));
+    const language = await languageOf(db, admin.id);
+    const t = translator(language);
     const healthLine = latest
       ? `${t(`alerts.health.${status}`)} ${t('alerts.healthDate', { date: latest.date })}`
       : t(`alerts.health.${status}`);
     for (const channel of await deliveryTargets(db, admin.id, o.authSecret)) {
-      if (channel.admin) await fn(t, channel, healthLine);
+      if (channel.admin) await fn(t, channel, healthLine, language);
     }
   }
 }
@@ -508,6 +503,157 @@ interface RecomputeDetail {
   recordedAllocation: string;
   recomputedAllocation: string;
   signalsDiffer: string[];
+}
+
+/** A `stand_in_corrected` annotation's detail, as `annotateStandInCorrections` writes it. */
+export interface StandInCorrectedDetail {
+  ticker: string;
+  /** |primary close / stand-in close - 1|, a fraction (above the layer B close tolerance). */
+  deviation: number;
+  recordedAllocation: string;
+  correctedAllocation: string;
+  differs: boolean;
+}
+
+/**
+ * The detail read back, or null when it is not one `annotateStandInCorrections` writes (a
+ * deviation that is not a finite non-negative number, a missing allocation, or `differs` not
+ * matching the two allocations): such an annotation is reported, never told with a guessed value.
+ */
+export function standInDetail(detail: unknown): StandInCorrectedDetail | null {
+  const d = detail as Partial<Record<keyof StandInCorrectedDetail, unknown>> | null;
+  if (!d || typeof d !== 'object') return null;
+  const { ticker, deviation, recordedAllocation: rec, correctedAllocation: cor, differs } = d;
+  if (typeof ticker !== 'string' || ticker === '') return null;
+  if (typeof deviation !== 'number' || !Number.isFinite(deviation) || deviation < 0) return null;
+  if (typeof rec !== 'string' || typeof cor !== 'string' || rec === '' || cor === '') return null;
+  if (typeof differs !== 'boolean' || differs !== (rec !== cor)) return null;
+  return { ticker, deviation, recordedAllocation: rec, correctedAllocation: cor, differs };
+}
+
+/**
+ * The stand-in correction alert's text (requirements 04, the stand-in rule 4): "D's signal used a
+ * secondary price that was off by X; with the corrected price it would have been Y." It is about
+ * a past day: the corrected allocation is never given as a signal or an instruction, and the
+ * record is said to be annotated, not changed. The lines before the health line are cut to
+ * `room` (the first lines kept); the health line (the version's latest recorded day) always ends
+ * it. A channel too small even for the health line is cut at the end by `deliver`.
+ */
+export function standInCorrectedText(
+  t: Translate,
+  language: string,
+  o: {
+    name: string;
+    date: TradingDate;
+    detail: StandInCorrectedDetail;
+    /** The data health of the version's latest recorded day, or undefined without one. */
+    health?: { status: string; date: TradingDate };
+  },
+  /** The channel's longest message. */
+  max: number,
+): string {
+  const d = o.detail;
+  const name = (allocation: string) =>
+    allocation === SAFE_STATE ? t('alerts.safeStateName') : allocation;
+  // Two decimals, rounded half-expand by Intl (e.g. 0.010101 as "1.01%").
+  const deviation = new Intl.NumberFormat(language, {
+    style: 'percent',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(d.deviation);
+  const values = { strategy: o.name, date: o.date, ticker: d.ticker, deviation };
+  const lines = [
+    t('alerts.standInCorrected.title', values),
+    t('alerts.standInCorrected.body', values),
+    d.differs
+      ? t('alerts.standInCorrected.differs', {
+          recorded: name(d.recordedAllocation),
+          corrected: name(d.correctedAllocation),
+        })
+      : t('alerts.standInCorrected.same', { recorded: name(d.recordedAllocation) }),
+    t('alerts.standInCorrected.pastDay'),
+  ].join('\n');
+  // Unknown stays unknown: without a recorded day the status is `unknown`, never green.
+  const healthLine = o.health
+    ? `${t(`alerts.health.${o.health.status}`)} ${t('alerts.standInCorrected.healthDate', { date: o.health.date })}`
+    : t('alerts.health.unknown');
+  const room = max - healthLine.length - 1;
+  return room > 1 ? `${cut(lines, room)}\n${healthLine}` : `${lines}\n${healthLine}`;
+}
+
+export interface StandInAlertSummary extends AlertSummary {
+  /** Annotations whose detail does not read back (`standInDetail`): not told, reported. */
+  errors: string[];
+}
+
+/**
+ * Every `stand_in_corrected` annotation not yet told (requirements 04, the stand-in rule 4; 11:
+ * every alert states the data health, in the recipient's language, idempotent). Driven by the
+ * annotations and `alerts_sent`, so a failed delivery or a run that stopped is caught up at the
+ * next run. One message per annotation, keyed (version and ticker, date, type): annotations are
+ * once per version, date and ticker. A user's version goes to its owner's channels (as the
+ * strategy alerts do); a library version (no owner) to the admins' channels. Not sent in a drill.
+ */
+export async function sendStandInCorrections(
+  db: Db,
+  o: AlertOptions,
+): Promise<StandInAlertSummary> {
+  const summary: StandInAlertSummary = { sent: 0, failed: [], errors: [] };
+  if (o.drill) return summary;
+  const owners: Owners = new Map();
+  for (const version of await allVersions(db)) {
+    const notes = await annotationsOf(db, version.id, 'stand_in_corrected');
+    if (notes.length === 0) continue;
+    const last = await lastEntry(db, version.id);
+    const health = last && { status: last.dataStatus, date: last.date };
+    for (const a of notes) {
+      const detail = standInDetail(a.detail);
+      if (!detail) {
+        summary.errors.push(
+          `${version.name} (${version.id}) ${a.date}: stand-in correction annotation ${a.id} ` +
+            'does not read back; not told',
+        );
+        continue;
+      }
+      const key = {
+        subject: `stand_in:${version.id}:${detail.ticker}`,
+        date: a.date,
+        type: 'stand_in_corrected' as const,
+      };
+      const text = (t: Translate, language: string, channel: Target) =>
+        standInCorrectedText(
+          t,
+          language,
+          { name: version.name, date: a.date, detail, ...(health && { health }) },
+          o.notifiers.find((n) => n.info.key === channel.type)?.info.maxLength ?? Infinity,
+        );
+      if (!version.ownerId) {
+        // The status passed only spares the overall-health read: the message states the
+        // version's own latest day instead of the admins' health line.
+        await eachAdminChannel(db, o, 'unknown', async (t, channel, _line, language) => {
+          await deliver(db, o, channel, { key, text: text(t, language, channel) }, summary, t);
+        });
+        continue;
+      }
+      const owner = await ownerOf(db, o, owners, version.ownerId);
+      for (const channel of owner.targets) {
+        const alert = { key, text: text(owner.t, owner.language, channel) };
+        await deliver(db, o, channel, alert, summary, owner.t);
+      }
+    }
+  }
+  return summary;
+}
+
+async function ownerOf(db: Db, o: AlertOptions, owners: Owners, ownerId: string) {
+  let owner = owners.get(ownerId);
+  if (!owner) {
+    const language = await languageOf(db, ownerId);
+    const targets = await deliveryTargets(db, ownerId, o.authSecret);
+    owner = { language, t: translator(language), targets };
+    owners.set(ownerId, owner);
+  }
+  return owner;
 }
 
 async function sentSubjects(db: Db, channel: Channel, type: AlertType): Promise<Set<string>> {

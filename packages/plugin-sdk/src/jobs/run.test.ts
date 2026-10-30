@@ -560,10 +560,15 @@ describe('a stand-in the primary later corrects', () => {
     // Explained by the correction, not told as an engine difference.
     expect(await notes(db, 'recomputed')).toEqual([]);
     expect(sent.some((m) => m.text.includes('decides'))).toBe(false);
-    // The record itself is untouched; a third run adds nothing.
+    // The owner is told on each of their channels, in the run that annotated it.
+    const told = () => sent.filter((m) => m.text.startsWith(`Trend: correction to the signal`));
+    expect(told().map((m) => m.target)).toEqual(['me', 'ops']);
+    expect(told()[0]!.text).toContain('it would have been Risk on');
+    // The record itself is untouched; a third run adds nothing and tells nothing again.
     expect((await forwardRecord(db, version.id))[0]).toEqual(stood);
     await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier));
     expect(await notes(db, 'stand_in_corrected')).toHaveLength(1);
+    expect(told()).toHaveLength(2);
   });
 
   it('weekly: the refetch resolves it; the correction is annotated before recompute', async () => {
@@ -583,6 +588,33 @@ describe('a stand-in the primary later corrects', () => {
     // Without the correction first, recompute would annotate 01-15 and alert the admins.
     expect(await notes(db, 'recomputed')).toEqual([]);
     expect(sent.some((m) => m.text.includes('decides'))).toBe(false);
+    expect(
+      sent.filter((m) => m.text.startsWith('Trend: correction to the signal of 2026-01-15')),
+    ).toHaveLength(2);
+  });
+
+  it('an undelivered correction alert leaves the run incomplete; the next run tells it', async () => {
+    const { db } = await setup();
+    await runJob(db, withStandIn(), run1(fakeNotifier().notifier));
+    const down = fakeNotifier(['me']);
+    const warned: string[] = [];
+    const log = { info() {}, warn: (m: string) => void warned.push(m) };
+    const r = await runJob(
+      db,
+      plugins([barSource('p'), barSource('s')]),
+      options(down.notifier, { log }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('incomplete: alerts');
+    expect(warned).toContain('Stand-in correction alerts not delivered');
+    expect(down.sent.filter((m) => m.text.includes('correction to')).map((m) => m.target)).toEqual([
+      'ops',
+    ]);
+    const { notifier, sent } = fakeNotifier();
+    await runJob(db, plugins([barSource('p'), barSource('s')]), options(notifier));
+    expect(
+      sent.filter((m) => m.text.startsWith('Trend: correction to the signal')).map((m) => m.target),
+    ).toEqual(['me']);
   });
 
   it('a stand-in timestamp that is not an instant: the run is incomplete, the admins told which', async () => {
