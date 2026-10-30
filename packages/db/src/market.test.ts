@@ -928,6 +928,126 @@ describe('withdrawn values', () => {
   });
 });
 
+// Spec 2026-10-31 vanished-values: a response complete for its span (current values only, e.g.
+// FRED's SP500) compared with the stored dates on a full fetch.
+describe('vanished values (a response complete for its span)', () => {
+  const [D1, D2, D3, D4, D5] = [
+    '2026-01-05',
+    '2026-01-06',
+    '2026-01-07',
+    '2026-01-08',
+    '2026-01-09',
+  ];
+  const store = (
+    db: Awaited<ReturnType<typeof testDb>>,
+    dates: string[],
+    fetchedAt: string,
+    completeSpan?: boolean,
+    value = (d: string) => Number(d.slice(-2)),
+  ) =>
+    storeSeries(db, {
+      series: 'IDX',
+      source: 'x',
+      points: dates.map((date) => ({ date, value: value(date) })),
+      fetchedAt,
+      ...(completeSpan !== undefined && { completeSpan }),
+    });
+  const withdrawalRows = async (db: Awaited<ReturnType<typeof testDb>>) =>
+    (await db.select().from(seriesWithdrawals)).map((r) => [r.date, r.knownAt, r.publishedAt]);
+
+  it('a stored date inside the span that the source left out is withdrawn from the fetch', async () => {
+    const db = await testDb();
+    await store(db, [D1, D2, D3, D4], T1);
+    const r = await store(db, [D1, D2, D4], T2, true);
+    expect(r).toEqual({
+      inserted: 0,
+      revised: [{ item: 'IDX', date: D3 }],
+      withdrawn: [{ item: 'IDX', date: D3 }],
+      outsideSpan: [],
+    });
+    // Known from the fetch, no publication time claimed; the value kept beside it.
+    expect(await withdrawalRows(db)).toEqual([[D3, T2, null]]);
+    expect(
+      (await db.select().from(series)).filter((x) => x.date === D3).map((x) => x.value),
+    ).toEqual([7]);
+    // asOf: before the fetch the old value, from it on the date is skipped (the day before).
+    const pit = await seriesPointInTime(db, 'IDX', 'x');
+    expect(pit.asOf(D3, '2026-02-02T00:59:59.999Z')).toMatchObject({ date: D3, value: 7 });
+    expect(pit.asOf(D3, T2)).toMatchObject({ date: D2, value: 6 });
+    expect(pit.knownAt(T2).map((x) => x.date)).toEqual([D1, D2, D4]);
+    // The same answer again: nothing new (idempotent).
+    expect(await store(db, [D1, D2, D4], T3, true)).toEqual({
+      inserted: 0,
+      revised: [],
+      withdrawn: [],
+      outsideSpan: [],
+    });
+    expect(await withdrawalRows(db)).toHaveLength(1);
+  });
+
+  it('a vanished value that reappears is a new value from that fetch, the withdrawal kept', async () => {
+    const db = await testDb();
+    await store(db, [D1, D2, D3], T1);
+    await store(db, [D1, D3], T2, true);
+    const r = await store(db, [D1, D2, D3], T3, true, (d) => (d === D2 ? 66 : Number(d.slice(-2))));
+    expect(r).toMatchObject({ revised: [{ item: 'IDX', date: D2 }], withdrawn: [] });
+    expect(await withdrawalRows(db)).toEqual([[D2, T2, null]]);
+    const pit = await seriesPointInTime(db, 'IDX', 'x');
+    expect(pit.asOf(D2, T2)).toMatchObject({ date: D1 });
+    expect(pit.asOf(D2, T3)).toMatchObject({ date: D2, value: 66 });
+  });
+
+  it('a span that starts later (a licence window moving forward) withdraws nothing', async () => {
+    const db = await testDb();
+    await store(db, [D1, D2, D3, D4], T1);
+    const r = await store(db, [D3, D4, D5], T2, true);
+    expect(r).toEqual({ inserted: 1, revised: [], withdrawn: [], outsideSpan: [D1, D2] });
+    expect(await withdrawalRows(db)).toEqual([]);
+    const pit = await seriesPointInTime(db, 'IDX', 'x');
+    expect(pit.asOf(D1, T2)).toMatchObject({ date: D1, value: 5 });
+  });
+
+  it('a stored date after the last one served is listed outside the span, never withdrawn', async () => {
+    const db = await testDb();
+    await store(db, [D1, D2, D3], T1);
+    expect(await store(db, [D1, D2], T2, true)).toMatchObject({
+      withdrawn: [],
+      outsideSpan: [D3],
+    });
+    expect(await withdrawalRows(db)).toEqual([]);
+  });
+
+  it('without completeSpan (a partial or vintage answer) a left-out date keeps its value', async () => {
+    const db = await testDb();
+    await store(db, [D1, D2, D3], T1);
+    for (const flag of [undefined, false]) {
+      const r = await store(db, [D1, D3], T2, flag);
+      expect(r).toEqual({ inserted: 0, revised: [], withdrawn: [] });
+    }
+    expect(await withdrawalRows(db)).toEqual([]);
+  });
+
+  it('an empty answer compares nothing; an already withdrawn date is not listed again', async () => {
+    const db = await testDb();
+    await store(db, [D1, D2, D3], T1);
+    expect(await store(db, [], T2, true)).toEqual({ inserted: 0, revised: [], withdrawn: [] });
+    await storeSeries(db, {
+      series: 'IDX',
+      source: 'x',
+      points: [{ date: D1, withdrawn: true }],
+      fetchedAt: T2,
+    });
+    // D1 has no value at T3: neither withdrawn again nor listed outside the span.
+    expect(await store(db, [D2, D3], T3, true)).toEqual({
+      inserted: 0,
+      revised: [],
+      withdrawn: [],
+      outsideSpan: [],
+    });
+    expect(await withdrawalRows(db)).toHaveLength(1);
+  });
+});
+
 describe('issuer records', () => {
   const usd = (date: string, nav: number, extra: Record<string, unknown> = {}) => ({
     date,

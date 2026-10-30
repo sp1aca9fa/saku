@@ -23,7 +23,7 @@ Types are in `packages/plugin-sdk/src/types.ts`. A package exports `bars`, `seri
 | Export | Interface | Methods |
 |---|---|---|
 | `bars` | `BarSource` | `fetchBars(ticker, from, to, ctx)` returns raw daily bars (`RawBar[]`); optional `fetchMeta(ticker, ctx)` returns `TickerMeta` |
-| `series` | `SeriesSource` | `fetchSeries(id, from, to, ctx)` returns dated points (`SeriesPoint[]`): cash rates, index levels |
+| `series` | `SeriesSource` | `fetchSeries(id, from, to, ctx)` returns dated points (`SeriesPoint[]`, or `SeriesFetch` `{ points, completeSpan }`): cash rates, index levels |
 | `fx` | `FxSource` | `supports(pair)`; `fetchRates(pair, from, to, ctx)` returns `FxRate[]` |
 | `issuers` | `IssuerSource` | `supports(ticker)`; `fetchRecords(ticker, from, to, ctx)` returns NAV, distributions and splits (checks only, never a value used) |
 | `calendars` | `CalendarSource` | a `calendars` array of exchange or series holiday tables |
@@ -44,6 +44,14 @@ number; anything else (a null, missing or NaN value without `withdrawn: true`, o
 with a value) refuses the whole response, nothing stored. So do two different vintages (two
 values, or a value and a withdrawal) for the same date and publication moment (the same instant
 in any spelling, `Z` or an offset); the same vintage twice is stored once.
+
+Series sources without vintages (current values only) cannot send a withdrawal: a value the
+source stops publishing is simply absent. Such a source returns `{ points, completeSpan: true }`
+(`SeriesFetch`) when the answer holds every value it still publishes from the first point's date
+to the last one's (read to the last page, checked against the count the provider announced). On
+a full fetch (bootstrap, weekly), core then stores a withdrawal, known from the fetch, for each
+stored date in that span left out of the answer; stored dates outside the span are kept. Never
+declare it for an answer that may be partial or capped. A plain list is never compared.
 
 ### `PluginInfo`
 

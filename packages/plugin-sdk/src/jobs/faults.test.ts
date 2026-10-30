@@ -30,6 +30,7 @@ import type {
   PluginInfo,
   SeriesSource,
 } from '../types';
+import { seriesFetchOf } from './ingest';
 import { runJob } from './run';
 import { cashRates, fakeHttp, fakeNotifier, quiet, testInfo } from './testkit';
 
@@ -157,7 +158,7 @@ function seriesSource(
       if (id !== 'IDX') {
         const gone = withdrawalsSeen(o.cashWithdrawn, from, to, ctx.now);
         return [
-          ...(await cash.fetchSeries(id, from, to, ctx)),
+          ...seriesFetchOf(await cash.fetchSeries(id, from, to, ctx)).points,
           ...gone.map((g) => ({ ...g, withdrawn: true as const })),
         ];
       }

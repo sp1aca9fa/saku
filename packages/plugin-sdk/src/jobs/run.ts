@@ -257,6 +257,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
           ...(Object.keys(r.withdrawnValues).length > 0 && {
             withdrawnValues: r.withdrawnValues,
           }),
+          ...(Object.keys(r.outsideSpan).length > 0 && { outsideSpan: r.outsideSpan }),
         });
       }
       // Changed values and withdrawn ones (the source no longer has a value for the date) are
@@ -542,6 +543,8 @@ function summary(r: SourceReport): string {
   if (r.failed.length) parts.push(`${r.failed.length} failed`);
   if (r.stopped) parts.push(`stopped (${r.stopped})`);
   parts.push(`${r.inserted} new, ${r.revised} revised, ${r.readjustments} re-adjustments`);
+  const outside = Object.values(r.outsideSpan).reduce((n, c) => n + c, 0);
+  if (outside > 0) parts.push(`${outside} stored dates outside the served span (kept)`);
   return parts.join(', ');
 }
 

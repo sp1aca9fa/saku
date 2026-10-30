@@ -327,6 +327,14 @@ export interface StoredValues {
   revised: { item: string; date: TradingDate }[];
   /** The newly stored withdrawals (each also in `revised`). */
   withdrawn: { item: string; date: TradingDate }[];
+  /**
+   * Only when a response complete for its span was compared (`storeSeries`'s `completeSpan`):
+   * the stored dates with a value as known at the fetch that lie outside that span (before its
+   * first date, or after its last), ascending. Kept as they are, never inferred withdrawn: the
+   * source no longer serves them, which says nothing about their values (a licence window that
+   * moved forward; spec 2026-10-31 vanished-values).
+   */
+  outsideSpan?: TradingDate[];
 }
 
 /** A stored or incoming vintage: a value, or a withdrawal (`value` null). */
@@ -515,10 +523,27 @@ function vintageValue(
  * Stores a series' vintages: values in `series`, withdrawals in `series_withdrawals` (both
  * append-only; see `newVintages` for what counts as new). A point that is neither a finite
  * value nor a withdrawal refuses the whole response (`vintageValue`).
+ *
+ * `completeSpan` (spec 2026-10-31 vanished-values; requirements 04: never silently overwrite,
+ * point-in-time reads with no look-ahead): the caller says the points are everything the source
+ * still publishes from the first point's date to the last one's, and that this fetch may be
+ * compared (a full fetch; the plug-in declared it, core never guesses). Then a stored date in that
+ * span that has a value as read at the fetch (`PointInTime.knownAt`, withdrawals applied) and is
+ * absent from the points is stored as a withdrawal known from the fetch (no publication time):
+ * reads from the fetch on skip it, reads before keep the old value, nothing stored is changed.
+ * A later value for the date is stored as a new value (`newVintages`), the withdrawal kept. Stored
+ * dates outside the span are returned in `outsideSpan`, never withdrawn. No points: nothing is
+ * compared (an empty answer has no span; a source with nothing left is left to the checks).
  */
 export async function storeSeries(
   db: Db,
-  input: { series: string; source: string; points: SeriesPoint[]; fetchedAt: string },
+  input: {
+    series: string;
+    source: string;
+    points: SeriesPoint[];
+    fetchedAt: string;
+    completeSpan?: boolean;
+  },
 ): Promise<StoredValues> {
   if (input.points.length === 0) return { inserted: 0, revised: [], withdrawn: [] };
   // UTC ISO text, so `newVintages` and reads compare it with `known_at` as strings.
@@ -526,42 +551,55 @@ export async function storeSeries(
   const dates = input.points.map((p) => p.date).sort();
   const range = [dates[0]!, dates.at(-1)!] as const;
   const common = { series: input.series, source: input.source };
-  const stored = [
-    ...(await db
-      .select()
-      .from(series)
-      .where(
-        and(
-          eq(series.series, input.series),
-          eq(series.source, input.source),
-          between(series.date, ...range),
-        ),
-      )),
-    ...(
-      await db
-        .select()
-        .from(seriesWithdrawals)
-        .where(
-          and(
-            eq(seriesWithdrawals.series, input.series),
-            eq(seriesWithdrawals.source, input.source),
-            between(seriesWithdrawals.date, ...range),
-          ),
-        )
-    ).map((r) => ({ ...r, value: null })),
-  ];
-  const { values, withdrawals, result } = newVintages(
-    stored,
-    input.points.map((p) => ({
-      ...common,
-      date: p.date,
-      value: vintageValue(p, p.value, `${input.source} ${input.series}`),
-      publishedAt: p.publishedAt ?? null,
-      fetchedAt,
-      knownAt: p.publishedAt ? instant(p.publishedAt) : fetchedAt,
-    })),
-    input.series,
-  );
+  // Comparing needs every stored date (those outside the span are listed); otherwise the span.
+  const inRange = (col: typeof series.date | typeof seriesWithdrawals.date) =>
+    input.completeSpan ? undefined : between(col, ...range);
+  const storedValues = await db
+    .select()
+    .from(series)
+    .where(
+      and(eq(series.series, input.series), eq(series.source, input.source), inRange(series.date)),
+    );
+  const storedWithdrawals = await db
+    .select()
+    .from(seriesWithdrawals)
+    .where(
+      and(
+        eq(seriesWithdrawals.series, input.series),
+        eq(seriesWithdrawals.source, input.source),
+        inRange(seriesWithdrawals.date),
+      ),
+    );
+  const stored = [...storedValues, ...storedWithdrawals.map((r) => ({ ...r, value: null }))];
+  const incoming = input.points.map((p) => ({
+    ...common,
+    date: p.date,
+    value: vintageValue(p, p.value, `${input.source} ${input.series}`),
+    publishedAt: p.publishedAt ?? null,
+    fetchedAt,
+    knownAt: p.publishedAt ? instant(p.publishedAt) : fetchedAt,
+  }));
+  let outsideSpan: TradingDate[] | undefined;
+  if (input.completeSpan) {
+    const fetched = new Set(dates);
+    // The dates a read at the fetch sees with a value (the same rule `asOf` uses).
+    const current = new PointInTime(vintages(storedValues, storedWithdrawals)).knownAt(fetchedAt);
+    outsideSpan = [];
+    for (const { date } of current) {
+      if (date < range[0] || date > range[1]) outsideSpan.push(date);
+      else if (!fetched.has(date)) {
+        incoming.push({
+          ...common,
+          date,
+          value: null,
+          publishedAt: null,
+          fetchedAt,
+          knownAt: fetchedAt,
+        });
+      }
+    }
+  }
+  const { values, withdrawals, result } = newVintages(stored, incoming, input.series);
   const rows = values.map((r) => ({ ...r, value: r.value! }));
   const gone = withdrawals.map(({ value: _, ...r }) => r);
   await db.transaction(async (tx) => {
@@ -572,7 +610,12 @@ export async function storeSeries(
       await tx.insert(seriesWithdrawals).values(gone.slice(i, i + CHUNK));
     }
   });
-  return { inserted: result.new, revised: result.revised, withdrawn: result.withdrawn };
+  return {
+    inserted: result.new,
+    revised: result.revised,
+    withdrawn: result.withdrawn,
+    ...(outsideSpan && { outsideSpan }),
+  };
 }
 
 /**

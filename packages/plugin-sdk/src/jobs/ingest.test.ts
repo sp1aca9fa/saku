@@ -17,7 +17,9 @@ import type {
   BarSource,
   FxSource,
   IssuerSource,
+  Logger,
   PluginInfo,
+  SeriesFetch,
   SeriesPoint,
   SeriesSource,
 } from '../types';
@@ -215,6 +217,143 @@ describe('ingest', () => {
       withdrawnValues: {},
     });
     expect(await db.select().from(schema.seriesWithdrawals)).toHaveLength(1);
+  });
+
+  // Spec 2026-10-31 vanished-values: a response the plug-in declares complete for its span is
+  // compared with the stored dates on full fetches only.
+  describe('a series answer complete for its span (current values only)', () => {
+    const series = (answer: () => SeriesPoint[] | SeriesFetch): SeriesSource => ({
+      info: { ...info('idx', 'series'), provides: { series: ['IDX'] } },
+      fetchSeries: async () => answer(),
+    });
+    const points = (dates: string[]) => dates.map((date) => ({ date, value: 100 }));
+    const logged = () => {
+      const lines: { level: string; message: string; data?: Record<string, unknown> }[] = [];
+      const push = (level: string) => (message: string, data?: Record<string, unknown>) =>
+        lines.push({ level, message, ...(data && { data }) });
+      return { lines, log: { info: push('info'), warn: push('warn') } };
+    };
+    const quietLog: Logger = { info: () => {}, warn: () => {} };
+    const at = (mode: 'bootstrap' | 'daily', iso: string, log: Logger = quietLog) => ({
+      ...options(mode),
+      log,
+      now: () => new Date(iso),
+    });
+    const first = ['2026-01-12', '2026-01-13', '2026-01-14', '2026-01-15'];
+
+    it('a full fetch withdraws a stored date inside the span that is left out, and warns', async () => {
+      const db = await setup();
+      const plugins = { ...emptyPlugins(), series: [series(() => points(first))] };
+      await ingest(db, plugins, at('bootstrap', '2026-01-16T01:00:00Z'));
+      const { lines, log: l } = logged();
+      const answer = {
+        points: points(['2026-01-12', '2026-01-13', '2026-01-15']),
+        completeSpan: true,
+      };
+      const [r] = await ingest(
+        db,
+        { ...emptyPlugins(), series: [series(() => answer)] },
+        at('bootstrap', '2026-01-17T01:00:00Z', l),
+      );
+      expect(r).toMatchObject({
+        ok: ['IDX'],
+        revised: 1,
+        revisedValues: {},
+        withdrawnValues: { IDX: ['2026-01-14'] },
+        outsideSpan: {},
+      });
+      expect(lines.filter((x) => x.level === 'warn' && x.message.startsWith('series'))).toEqual([
+        {
+          level: 'warn',
+          message: 'series idx IDX: the source withdrew stored values',
+          data: { dates: ['2026-01-14'] },
+        },
+      ]);
+      expect(await db.select().from(schema.seriesWithdrawals)).toMatchObject([
+        { series: 'IDX', date: '2026-01-14', knownAt: '2026-01-17T01:00:00.000Z' },
+      ]);
+    });
+
+    it('a daily fetch never compares, whatever it declares', async () => {
+      const db = await setup();
+      await ingest(
+        db,
+        { ...emptyPlugins(), series: [series(() => points(first))] },
+        at('bootstrap', '2026-01-16T01:00:00Z'),
+      );
+      const answer = { points: points(['2026-01-12', '2026-01-15']), completeSpan: true };
+      const [r] = await ingest(
+        db,
+        { ...emptyPlugins(), series: [series(() => answer)] },
+        at('daily', '2026-01-17T01:00:00Z'),
+      );
+      expect(r).toMatchObject({ revised: 0, withdrawnValues: {}, outsideSpan: {} });
+      expect(await db.select().from(schema.seriesWithdrawals)).toEqual([]);
+    });
+
+    it('a plain list (not declared complete) never compares on a full fetch', async () => {
+      const db = await setup();
+      let answer = points(first);
+      const plugins = { ...emptyPlugins(), series: [series(() => answer)] };
+      await ingest(db, plugins, at('bootstrap', '2026-01-16T01:00:00Z'));
+      answer = points(['2026-01-12', '2026-01-15']);
+      const [r] = await ingest(db, plugins, at('bootstrap', '2026-01-17T01:00:00Z'));
+      expect(r).toMatchObject({ revised: 0, withdrawnValues: {} });
+      expect(await db.select().from(schema.seriesWithdrawals)).toEqual([]);
+    });
+
+    it('stored dates before the served span are kept, counted and logged once', async () => {
+      const db = await setup();
+      await ingest(
+        db,
+        { ...emptyPlugins(), series: [series(() => points(first))] },
+        at('bootstrap', '2026-01-16T01:00:00Z'),
+      );
+      const { lines, log: l } = logged();
+      const answer = {
+        points: points(['2026-01-14', '2026-01-15', '2026-01-16']),
+        completeSpan: true,
+      };
+      const [r] = await ingest(
+        db,
+        { ...emptyPlugins(), series: [series(() => answer)] },
+        at('bootstrap', '2026-01-17T01:00:00Z', l),
+      );
+      expect(r).toMatchObject({
+        inserted: 1,
+        revised: 0,
+        withdrawnValues: {},
+        outsideSpan: { IDX: 2 },
+      });
+      expect(lines.filter((x) => x.message.includes('outside the span'))).toEqual([
+        {
+          level: 'info',
+          message:
+            'series idx IDX: 2 stored dates outside the span the source served (kept, not withdrawn)',
+          data: { from: '2026-01-12', to: '2026-01-13', dates: ['2026-01-12', '2026-01-13'] },
+        },
+      ]);
+      expect(lines.filter((x) => x.level === 'warn' && x.message.startsWith('series'))).toEqual([]);
+      expect(await db.select().from(schema.seriesWithdrawals)).toEqual([]);
+    });
+
+    it('refuses an answer that is neither a list nor { points, completeSpan } (the item fails)', async () => {
+      const db = await setup();
+      const bad = { points: points(first), completeSpan: 'yes' } as unknown as SeriesFetch;
+      const [r] = await ingest(
+        db,
+        { ...emptyPlugins(), series: [series(() => bad)] },
+        at('bootstrap', '2026-01-17T01:00:00Z'),
+      );
+      expect(r!.ok).toEqual([]);
+      expect(r!.failed).toEqual([
+        {
+          item: 'IDX',
+          error: 'series response is neither a list of points nor { points, completeSpan }',
+        },
+      ]);
+      expect(await db.select().from(schema.series)).toEqual([]);
+    });
   });
 
   it('fetches issuer records for the symbols a source supports, in the daily window', async () => {

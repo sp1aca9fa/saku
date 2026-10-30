@@ -140,19 +140,38 @@ export interface BarSource {
   fetchMeta?(ticker: string, ctx: PluginContext): Promise<TickerMeta>;
 }
 
+/**
+ * A series response that says whether it is complete for its span (spec 2026-10-31
+ * vanished-values). A plain `SeriesPoint[]` is the same as `completeSpan: false`.
+ */
+export interface SeriesFetch {
+  points: SeriesPoint[];
+  /**
+   * True only when `points` hold every value the source still publishes for every date from the
+   * first point's date to the last one's, inclusive (e.g. a series served as current values only,
+   * without vintages, read to the last page). A stored date between them that is left out no
+   * longer has a value at the source: on a full fetch (bootstrap, weekly) core records a
+   * withdrawal for it, known from the fetch. A stored date outside that span is never inferred
+   * withdrawn (it is kept and noted). Never true for a response that may be partial (capped,
+   * truncated) or that leaves out a date it still has a value for.
+   */
+  completeSpan: boolean;
+}
+
 export interface SeriesSource {
   info: PluginInfo;
   /**
    * Values per date and vintage. A source that revises a value to "no value" sends a withdrawal
    * (`{ date, withdrawn: true, publishedAt }`, `SeriesWithdrawal`), never a 0 and never nothing:
-   * a date simply left out keeps its stored value as current.
+   * a date simply left out keeps its stored value as current, unless the response declares
+   * itself complete for its span (`SeriesFetch.completeSpan`).
    */
   fetchSeries(
     id: string,
     from: TradingDate,
     to: TradingDate,
     ctx: PluginContext,
-  ): Promise<SeriesPoint[]>;
+  ): Promise<SeriesPoint[] | SeriesFetch>;
 }
 
 export interface FxSource {

@@ -13,6 +13,7 @@ import {
   forwardRecord,
   registerVersion,
   schema,
+  seriesPointInTime,
   setSetting,
   upsertSymbols,
 } from '@saku/db';
@@ -1048,5 +1049,95 @@ describe('an index without publication times (known from the fetch)', () => {
     // A new row known from the refetch; the old value kept.
     const rows = await db.select().from(schema.series).where(eq(schema.series.date, '2026-01-05'));
     expect(rows.filter((x) => x.series === 'IDX')).toHaveLength(2);
+  });
+
+  // Fault cases (spec 2026-10-31 vanished-values): the index served as current values only and
+  // declared complete for its span (like FRED's SP500); `drop`: dates it no longer has a value
+  // for; `from`: the first date it still serves (a licence window moved forward).
+  const currentIndex = (o: { drop?: string[]; from?: string } = {}): SeriesSource => ({
+    info: withIndex().info,
+    async fetchSeries(id, from, to, ctx) {
+      if (id === 'CASH') return rates.fetchSeries(id, from, to, ctx);
+      const points = DATES.flatMap((date, i) =>
+        date >= from && date <= to && !o.drop?.includes(date) && (!o.from || date >= o.from)
+          ? [{ date, value: 50 * closes[i]! }]
+          : [],
+      );
+      return { points, completeSpan: true };
+    },
+  });
+  /** A daily run storing the full index, then `job` with `later`; the run, alerts, withdrawals. */
+  const vanish = async (later: SeriesSource, job: 'weekly' | 'daily') => {
+    const { db } = await setup();
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', indexSeries: 'IDX' },
+    ]);
+    const { notifier, sent } = fakeNotifier();
+    const clock = ticking();
+    const bars = [barSource('p'), barSource('s')];
+    const first = await runJob(
+      db,
+      { ...emptyPlugins(), bars, series: [currentIndex()] },
+      options(notifier, { clock }),
+    );
+    expect(first.ok).toBe(true);
+    const before = clock().toISOString();
+    const r = await runJob(
+      db,
+      { ...emptyPlugins(), bars, series: [later] },
+      options(notifier, { job, clock }),
+    );
+    const ops = sent.filter((m) => m.target === 'ops').map((m) => m.text);
+    const gone = await db.select().from(schema.seriesWithdrawals);
+    return { db, r, ops, gone, before };
+  };
+  const GONE = '2026-01-07';
+
+  it('weekly: an index date inside the served span that vanished is withdrawn, told, skipped from then on', async () => {
+    const { db, r, ops, gone, before } = await vanish(currentIndex({ drop: [GONE] }), 'weekly');
+    expect(r.ok).toBe(true);
+    expect(gone).toMatchObject([{ series: 'IDX', date: GONE, source: 'rates', publishedAt: null }]);
+    const knownAt = gone[0]!.knownAt;
+    expect(knownAt > before).toBe(true);
+    // Told on the withdrawals line, never as a changed value.
+    const told = ops.find((t) => t.startsWith('Saku: the weekly refetch changed 1 stored values'));
+    expect(told).toContain(`Withdrawn by the source: IDX value@rates 1 (${GONE})`);
+    expect(told!.split('IDX value@rates')).toHaveLength(2);
+    // Point in time: the old value before the withdrawal, the day before from it on.
+    const pit = await seriesPointInTime(db, 'IDX', 'rates');
+    expect(pit.asOf(GONE, before)).toMatchObject({ date: GONE });
+    expect(pit.asOf(GONE, knownAt)).toMatchObject({ date: sessions.before(GONE, 1) });
+    // The value kept (append-only).
+    const kept = await db.select().from(schema.series).where(eq(schema.series.date, GONE));
+    expect(kept.filter((x) => x.series === 'IDX')).toHaveLength(1);
+  });
+
+  it('weekly: a served span that starts later withdraws nothing and tells nothing', async () => {
+    const start = '2026-01-07';
+    const { db, r, ops, gone } = await vanish(currentIndex({ from: start }), 'weekly');
+    expect(r.ok).toBe(true);
+    expect(gone).toEqual([]);
+    expect(ops.some((t) => t.includes('Withdrawn by the source'))).toBe(false);
+    // Every stored value before the span is still read.
+    const stored = (await db.select().from(schema.series))
+      .filter((x) => x.series === 'IDX' && x.date < start)
+      .map((x) => x.date)
+      .sort();
+    expect(stored.length).toBeGreaterThan(0);
+    const pit = await seriesPointInTime(db, 'IDX', 'rates');
+    const at = new Date('2026-12-31T00:00:00Z').toISOString();
+    expect(
+      pit
+        .knownAt(at)
+        .filter((x) => x.date < start)
+        .map((x) => x.date),
+    ).toEqual(stored);
+  });
+
+  it('daily: a date missing from a partial fetch is never inferred withdrawn', async () => {
+    const recent = sessions.before(TARGET, 2);
+    const { r, gone } = await vanish(currentIndex({ drop: [recent] }), 'daily');
+    expect(r.ok).toBe(true);
+    expect(gone).toEqual([]);
   });
 });

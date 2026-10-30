@@ -42,7 +42,14 @@ import {
   providerUsageStore,
   savedPluginInfos,
 } from '../registry';
-import type { IssuerSource, Logger, PluginContext, PluginInfo } from '../types';
+import type {
+  IssuerSource,
+  Logger,
+  PluginContext,
+  PluginInfo,
+  SeriesFetch,
+  SeriesPoint,
+} from '../types';
 import type { IssuerAvailability } from './verify';
 
 /** The earliest date a bootstrap asks for. */
@@ -75,6 +82,12 @@ export interface SourceReport {
    * to the admins as their own kind, never as a changed value.
    */
   withdrawnValues: Record<string, TradingDate[]>;
+  /**
+   * Series: per item, how many stored dates with a value lie outside the span a response complete
+   * for its span served (`SeriesFetch.completeSpan`, full fetches only; spec 2026-10-31
+   * vanished-values). Kept, never withdrawn; the dates are listed once in the run log.
+   */
+  outsideSpan: Record<string, number>;
   /** Issuer sources: the tickers it supports (all of them when `supports` failed). */
   supported?: string[];
 }
@@ -122,7 +135,27 @@ function report(source: string, kind: SourceReport['kind']): SourceReport {
     missing: {},
     revisedValues: {},
     withdrawnValues: {},
+    outsideSpan: {},
   };
+}
+
+/**
+ * A series response as `SeriesFetch`: a plain list is not complete for its span. Anything else
+ * is refused (the item fails), never read as a list: a wrong `completeSpan` would make core infer
+ * withdrawals, or miss them.
+ */
+export function seriesFetchOf(got: SeriesPoint[] | SeriesFetch): SeriesFetch {
+  if (Array.isArray(got)) return { points: got, completeSpan: false };
+  const r = got as Partial<SeriesFetch> | null;
+  if (
+    typeof r !== 'object' ||
+    r === null ||
+    !Array.isArray(r.points) ||
+    typeof r.completeSpan !== 'boolean'
+  ) {
+    throw new Error('series response is neither a list of points nor { points, completeSpan }');
+  }
+  return { points: r.points, completeSpan: r.completeSpan };
 }
 
 /**
@@ -271,17 +304,27 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
     if (!ctx) continue;
     await perItem(r, source.info.provides.series ?? [], o.log, async (id) => {
       const from = windowStart(source.info, wanted(), o.to);
-      const points = await source.fetchSeries(id, from, o.to, ctx);
-      noteValues(
-        r,
-        await storeSeries(db, {
-          series: id,
-          source: source.info.key,
-          points,
-          fetchedAt: now().toISOString(),
-        }),
-        o.log,
-      );
+      const got = seriesFetchOf(await source.fetchSeries(id, from, o.to, ctx));
+      // Vanished values (spec 2026-10-31 vanished-values): only a full fetch (bootstrap, weekly)
+      // of a response the plug-in declares complete for its span is compared with the stored
+      // dates; a daily fetch never infers a withdrawal, whatever it declares.
+      const stored = await storeSeries(db, {
+        series: id,
+        source: source.info.key,
+        points: got.points,
+        fetchedAt: now().toISOString(),
+        completeSpan: o.mode !== 'daily' && got.completeSpan,
+      });
+      noteValues(r, stored, o.log);
+      const outside = stored.outsideSpan ?? [];
+      if (outside.length > 0) {
+        r.outsideSpan[id] = outside.length;
+        o.log.info(
+          `series ${r.source} ${id}: ${outside.length} stored dates outside the span the source ` +
+            'served (kept, not withdrawn)',
+          { from: outside[0], to: outside.at(-1), dates: outside },
+        );
+      }
     });
   }
 

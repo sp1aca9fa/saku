@@ -166,7 +166,7 @@ interface PluginInfo {
 }
 interface PluginContext { http: PoliteHttp; now: Date; log: Logger; }
 interface BarSource { info: PluginInfo; fetchBars(ticker: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<RawBar[]>; } // RawBar flags split-adjusted closes
-interface SeriesSource { info: PluginInfo; fetchSeries(id: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<SeriesPoint[]>; } // with publishedAt when known
+interface SeriesSource { info: PluginInfo; fetchSeries(id: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<SeriesPoint[] | SeriesFetch>; } // with publishedAt when known; SeriesFetch = { points, completeSpan } (current values complete for their span: core infers withdrawals on full fetches, docs/data-pipeline.md "Vanished values")
 interface FxSource { info: PluginInfo; fetch(pair: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<FxRate[]>; }
 interface IssuerSource { info: PluginInfo; supports(ticker: string): boolean; fetchRecords(ticker: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<IssuerRecord[]>; }
 interface TaxRegime { info: PluginInfo; accountTypes: AccountType[]; rules: RegimeRules; } // declarative, C1

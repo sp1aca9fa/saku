@@ -338,15 +338,19 @@ describe('FRED', () => {
         fredRoutes(() => fixture('fred-sp500-current.json'), refused),
         { apiKey: 'abc' },
       );
-      const points = await fredSeries.fetchSeries('SP500', '2026-01-01', '2026-01-06', ctx);
+      const got = await fredSeries.fetchSeries('SP500', '2026-01-01', '2026-01-06', ctx);
       // FRED's real-time period is the fetch day for every row: not a publication time, so no
-      // publishedAt (stored as known from the fetch, never earlier); '.' left out.
-      expect(points).toEqual([
-        { date: '2026-01-02', value: 5001.25 },
-        { date: '2026-01-05', value: 5010.5 },
-        { date: '2026-01-06', value: 4998 },
-      ]);
-      expect(points.every((p) => !('publishedAt' in p))).toBe(true);
+      // publishedAt (stored as known from the fetch, never earlier); '.' left out. Declared
+      // complete for its span (spec 2026-10-31 vanished-values): core may infer a withdrawal.
+      expect(got).toEqual({
+        points: [
+          { date: '2026-01-02', value: 5001.25 },
+          { date: '2026-01-05', value: 5010.5 },
+          { date: '2026-01-06', value: 4998 },
+        ],
+        completeSpan: true,
+      });
+      expect(Array.isArray(got) ? [] : got.points.every((p) => !('publishedAt' in p))).toBe(true);
       expect(ctx.requested).toHaveLength(2);
       const url = new URL(ctx.requested[1]!);
       expect(url.pathname).toBe('/fred/series/observations');
@@ -387,6 +391,40 @@ describe('FRED', () => {
       await expect(
         fredSeries.fetchSeries('SP500', '2026-01-01', '2026-01-06', wrongStatus),
       ).rejects.toThrow(/^HTTP 404/);
+    });
+
+    it('refuses current values shorter than announced or at the wrong offset (declared complete)', async () => {
+      const answer = fixture('fred-sp500-current.json') as {
+        count: number;
+        observations: unknown[];
+      };
+      const answering = (page: object) =>
+        fixtureContext(
+          fredRoutes(() => ({ ...answer, ...page }), refused),
+          { apiKey: 'abc' },
+        );
+      // A short answer would read as values FRED no longer has: refused, never a shorter span.
+      await expect(
+        fredSeries.fetchSeries(
+          'SP500',
+          '2026-01-01',
+          '2026-01-06',
+          answering({ observations: answer.observations.slice(0, 3) }),
+        ),
+      ).rejects.toThrow(/3 observations read, 4 announced/);
+      await expect(
+        fredSeries.fetchSeries('SP500', '2026-01-01', '2026-01-06', answering({ offset: 2 })),
+      ).rejects.toThrow(/observation page at the wrong offset/);
+    });
+
+    it('a series with vintages stays a plain list (never declared complete for its span)', async () => {
+      const ctx = fixtureContext(
+        fredRoutes(() => fixture('fred-dtb3.json')),
+        { apiKey: 'abc' },
+      );
+      expect(
+        Array.isArray(await fredSeries.fetchSeries('DTB3', '2026-01-01', '2026-01-06', ctx)),
+      ).toBe(true);
     });
 
     it('refuses a repeated date or a bad value in the current values', async () => {
