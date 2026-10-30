@@ -1,5 +1,6 @@
 import type { RawBar } from '@saku/core';
 import { describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 import {
   groupFactors,
   issuerRecordsOf,
@@ -165,8 +166,15 @@ describe('vintages', () => {
       { date: '2026-01-02', value: 3.61, publishedAt: '2026-01-05T23:00:00Z' },
       { date: '2026-01-02', value: 3.62, publishedAt: '2026-01-07T18:00:00-05:00' },
     ];
-    expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't1' })).toBe(2);
-    expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't2' })).toBe(0);
+    expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't1' })).toEqual({
+      inserted: 2,
+      revised: [],
+    });
+    // A new publication time is a new vintage, not a revision.
+    expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt: 't2' })).toEqual({
+      inserted: 0,
+      revised: [],
+    });
     expect(await db.select().from(series)).toHaveLength(2);
     const pit = await seriesPointInTime(db, 'S', 'x');
     expect(pit.asOf('2026-01-02', '2026-01-06')!.value).toBe(3.61);
@@ -208,7 +216,10 @@ describe('vintages', () => {
     const db = await testDb();
     const points = [{ date: '2026-01-02', value: 5001.25 }];
     const fetchedAt = '2026-01-07T01:00:00.000Z';
-    expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt })).toBe(1);
+    expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt })).toEqual({
+      inserted: 1,
+      revised: [],
+    });
     const rows = await db.select().from(series);
     expect(rows.map((r) => [r.publishedAt, r.knownAt])).toEqual([[null, fetchedAt]]);
     const pit = await seriesPointInTime(db, 'S', 'x');
@@ -216,12 +227,58 @@ describe('vintages', () => {
     expect(pit.asOf('2026-01-02', fetchedAt)!.value).toBe(5001.25);
   });
 
+  it('a refetch that reports a stored value differently is a revision: a new row, the old kept', async () => {
+    const db = await testDb();
+    const at = (h: number) => `2026-01-0${h}T01:00:00.000Z`;
+    const points = (v: number) => [
+      { date: '2026-01-02', value: v },
+      { date: '2026-01-05', value: 10 },
+    ];
+    await storeSeries(db, { series: 'S', source: 'x', points: points(5001.25), fetchedAt: at(7) });
+    // Same values again: nothing stored, nothing revised.
+    expect(
+      await storeSeries(db, {
+        series: 'S',
+        source: 'x',
+        points: points(5001.25),
+        fetchedAt: at(8),
+      }),
+    ).toEqual({ inserted: 0, revised: [] });
+    // One value changed, one new date.
+    expect(
+      await storeSeries(db, {
+        series: 'S',
+        source: 'x',
+        points: [...points(5002), { date: '2026-01-06', value: 11 }],
+        fetchedAt: at(9),
+      }),
+    ).toEqual({ inserted: 1, revised: [{ item: 'S', date: '2026-01-02' }] });
+    const rows = await db.select().from(series).where(eq(series.date, '2026-01-02'));
+    expect(rows.map((r) => [r.value, r.knownAt])).toEqual([
+      [5001.25, at(7)],
+      [5002, at(9)],
+    ]);
+    const pit = await seriesPointInTime(db, 'S', 'x');
+    expect(pit.asOf('2026-01-02', at(8))!.value).toBe(5001.25);
+    expect(pit.asOf('2026-01-02', at(9))!.value).toBe(5002);
+    // A published vintage rewritten (same publication time, another value) is a revision too.
+    const vintage = (v: number) => [
+      { date: '2026-01-02', value: v, publishedAt: '2026-01-05T23:00:00Z' },
+    ];
+    await storeSeries(db, { series: 'T', source: 'x', points: vintage(1), fetchedAt: at(7) });
+    expect(
+      await storeSeries(db, { series: 'T', source: 'x', points: vintage(2), fetchedAt: at(8) }),
+    ).toEqual({ inserted: 0, revised: [{ item: 'T', date: '2026-01-02' }] });
+  });
+
   it('without a publication time, a changed value is a new row known from its fetch', async () => {
     const db = await testDb();
     const rate = (r: number) => [{ pair: 'USDXXX', date: '2026-01-02', rate: r }];
     await storeFx(db, { source: 'x', kind: 'valuation', rates: rate(100), fetchedAt: 't1' });
     await storeFx(db, { source: 'x', kind: 'valuation', rates: rate(100), fetchedAt: 't2' });
-    await storeFx(db, { source: 'x', kind: 'valuation', rates: rate(101), fetchedAt: 't3' });
+    expect(
+      await storeFx(db, { source: 'x', kind: 'valuation', rates: rate(101), fetchedAt: 't3' }),
+    ).toEqual({ inserted: 0, revised: [{ item: 'USDXXX', date: '2026-01-02' }] });
     await storeFx(db, { source: 'x', kind: 'valuation', rates: rate(100), fetchedAt: 't4' });
     const rows = await db.select().from(fxRates);
     expect(rows.map((r) => [r.rate, r.knownAt])).toEqual([

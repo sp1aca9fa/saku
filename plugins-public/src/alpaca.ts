@@ -1,6 +1,6 @@
 // Alpaca market data (official API): raw daily bars from 2016, with dividends and splits from
 // the corporate actions endpoint. https://docs.alpaca.markets/docs/about-market-data-api
-import { tradingDateOf } from '@saku/core';
+import { tradingDateOf, zonedInstant } from '@saku/core';
 import type { BarSource, PluginContext, RawBar } from '@saku/plugin-sdk';
 import { z } from 'zod';
 
@@ -39,15 +39,17 @@ const ActionsPage = z.object({
 export const ALPACA_RECENT_MS = 16 * 60_000;
 
 /**
- * The bars query's `end` (inclusive; RFC 3339 or `YYYY-MM-DD` per the stock bars reference). A
- * date before today in New York stays a date. Today or later (a date end means the whole day,
- * which reaches into the last 15 minutes) is capped at `now` minus ALPACA_RECENT_MS as an RFC 3339
- * instant; a bar not yet complete then is fetched again by a later run, whose window covers the
- * date. `now` is the run's clock, taken before the request, so the cap is at least that far back.
+ * The bars query's `end` (inclusive; RFC 3339 or `YYYY-MM-DD` per the stock bars reference),
+ * always an RFC 3339 instant: the end of `to` in New York (23:59:59; a date `end` means the same,
+ * which between 00:00 and 00:16 New York the next day still lies within the last 15 minutes), or
+ * `now` minus ALPACA_RECENT_MS, whichever is earlier. A bar not complete at the cap is fetched
+ * again by a later run, whose window covers the date. `now` is the run's clock, taken before the
+ * request, so the cap is at least that far back.
  */
 export function alpacaBarsEnd(to: string, now: Date): string {
-  if (to < tradingDateOf(now)) return to;
-  return new Date(now.getTime() - ALPACA_RECENT_MS).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const endOfDay = Date.parse(zonedInstant(to, '23:59', 'America/New_York')) + 59_000;
+  const cap = now.getTime() - ALPACA_RECENT_MS;
+  return new Date(Math.min(endOfDay, cap)).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 const auth = (ctx: PluginContext) => ({
@@ -96,7 +98,7 @@ export const alpaca: BarSource = {
     const end = alpacaBarsEnd(to, ctx.now);
     // Capped before `from` even starts (a run just after midnight asking for today only):
     // nothing can be asked for yet.
-    if (end.length > 10 && tradingDateOf(Date.parse(end)) < from) return [];
+    if (tradingDateOf(Date.parse(end)) < from) return [];
     const barPages = await pages(
       `${BASE}/v2/stocks/bars?symbols=${symbol}&timeframe=1Day&start=${from}&end=${encodeURIComponent(end)}&adjustment=raw&feed=sip&limit=10000`,
       BarsPage,

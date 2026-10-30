@@ -14,8 +14,9 @@ import {
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import { emptyPlugins } from '../registry';
-import type { BarSource, Notifier } from '../types';
+import type { BarSource, Notifier, SeriesSource } from '../types';
 import { type RunOptions, runJob } from './run';
+import { eq } from 'drizzle-orm';
 import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
 
 const sessions = new Sessions({
@@ -251,5 +252,95 @@ describe('a daily run', () => {
       ['core_vs_reference', 1],
       ['incremental_vs_full', 1],
     ]);
+  });
+});
+
+describe('an index without publication times (known from the fetch)', () => {
+  /**
+   * The cash rate as the testkit gives it, plus an index `IDX` that follows the bars' closes and
+   * has no `publishedAt` (like FRED's SP500, known from the run that fetched it). `revise`: the
+   * index now reports another value for a date.
+   */
+  const withIndex = (revise?: { date: string; factor: number }): SeriesSource => ({
+    info: testInfo('rates', 'series', {
+      suggestedRole: 'primary',
+      provides: { series: ['CASH', 'IDX'], cashRates: { USD: 'CASH' } },
+    }),
+    async fetchSeries(id, from, to, ctx) {
+      if (id === 'CASH') return rates.fetchSeries(id, from, to, ctx);
+      return DATES.flatMap((date, i) =>
+        date >= from && date <= to
+          ? [{ date, value: 50 * closes[i]! * (date === revise?.date ? revise.factor : 1) }]
+          : [],
+      );
+    },
+  });
+  /** A clock that moves on at each reading, so the order of readings matters. */
+  const ticking = () => {
+    let t = Date.parse('2026-01-17T01:30:00Z');
+    return () => new Date((t += 1000));
+  };
+  const indexResults = async (db: Awaited<ReturnType<typeof testDb>>, runId: string) =>
+    (await db.select().from(schema.checkResults).where(eq(schema.checkResults.runId, runId)))
+      .filter((r) => r.checkName.startsWith('index_'))
+      .map((r) => `${r.checkName} ${r.status}`);
+
+  it("the run's own index check reads the values it fetched (no index_unavailable)", async () => {
+    const { db } = await setup();
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', indexSeries: 'IDX' },
+    ]);
+    const { notifier } = fakeNotifier();
+    const r = await runJob(
+      db,
+      { ...emptyPlugins(), bars: [barSource('p'), barSource('s')], series: [withIndex()] },
+      options(notifier, { clock: ticking() }),
+    );
+    expect(r).toMatchObject({ ok: true });
+    const stored = await db.select().from(schema.series).where(eq(schema.series.series, 'IDX'));
+    expect(stored.length).toBeGreaterThan(0);
+    // Known from the run's fetch (no publication time), never earlier.
+    expect(stored.every((x) => x.publishedAt === null && x.knownAt > '2026-01-17T01:30:00')).toBe(
+      true,
+    );
+    const index = await indexResults(db, r.runId);
+    expect(index.length).toBeGreaterThan(0);
+    expect(index.every((x) => x === 'index_match green')).toBe(true);
+  });
+
+  it('weekly: a refetched index value reported differently is a revision, told with the bars', async () => {
+    const { db } = await setup();
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', indexSeries: 'IDX' },
+    ]);
+    const { notifier, sent } = fakeNotifier();
+    const clock = ticking();
+    const bars = [barSource('p'), barSource('s')];
+    expect(
+      (
+        await runJob(
+          db,
+          { ...emptyPlugins(), bars, series: [withIndex()] },
+          options(notifier, { clock }),
+        )
+      ).ok,
+    ).toBe(true);
+    const r = await runJob(
+      db,
+      {
+        ...emptyPlugins(),
+        bars,
+        series: [withIndex({ date: '2026-01-05', factor: 1.0001 })],
+      },
+      options(notifier, { job: 'weekly', clock }),
+    );
+    expect(r).toMatchObject({ ok: true });
+    const ops = sent.filter((m) => m.target === 'ops').map((m) => m.text);
+    expect(
+      ops.find((t) => t.startsWith('Saku: the weekly refetch changed 1 stored values')),
+    ).toContain('IDX value@rates 1 (2026-01-05)');
+    // A new row known from the refetch; the old value kept.
+    const rows = await db.select().from(schema.series).where(eq(schema.series.date, '2026-01-05'));
+    expect(rows.filter((x) => x.series === 'IDX')).toHaveLength(2);
   });
 });

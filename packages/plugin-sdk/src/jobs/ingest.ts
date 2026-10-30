@@ -6,6 +6,7 @@
 import type { TradingDate } from '@saku/core';
 import {
   type Db,
+  type StoredValues,
   activeSymbols,
   fillSymbolMeta,
   getSetting,
@@ -37,6 +38,12 @@ export interface SourceReport {
   readjustments: number;
   /** Stored dates a source no longer returned, per item. */
   missing: Record<string, TradingDate[]>;
+  /**
+   * Series and FX: stored dates whose value the source now reports differently, per item (each a
+   * new row known from this fetch; the old one kept). Counted in `revised` and reported with the
+   * bar revisions.
+   */
+  revisedValues: Record<string, TradingDate[]>;
   /** Issuer sources: the tickers it supports (all of them when `supports` failed). */
   supported?: string[];
 }
@@ -80,7 +87,15 @@ function report(source: string, kind: SourceReport['kind']): SourceReport {
     revised: 0,
     readjustments: 0,
     missing: {},
+    revisedValues: {},
   };
+}
+
+/** Adds what storing series values or FX rates did to the source's report. */
+function noteValues(r: SourceReport, stored: StoredValues): void {
+  r.inserted += stored.inserted;
+  r.revised += stored.revised.length;
+  for (const { item, date } of stored.revised) (r.revisedValues[item] ??= []).push(date);
 }
 
 /** Runs `each` per item; a block or quota stop ends the source, other errors are per item. */
@@ -176,12 +191,15 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
     await perItem(r, source.info.provides.series ?? [], o.log, async (id) => {
       const from = windowStart(source.info, wanted(), o.to);
       const points = await source.fetchSeries(id, from, o.to, ctx);
-      r.inserted += await storeSeries(db, {
-        series: id,
-        source: source.info.key,
-        points,
-        fetchedAt: now().toISOString(),
-      });
+      noteValues(
+        r,
+        await storeSeries(db, {
+          series: id,
+          source: source.info.key,
+          points,
+          fetchedAt: now().toISOString(),
+        }),
+      );
     });
   }
 
@@ -198,12 +216,15 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
     await perItem(r, supported, o.log, async (pair) => {
       const from = windowStart(source.info, wanted(), o.to);
       const rates = await source.fetchRates(pair, from, o.to, ctx);
-      r.inserted += await storeFx(db, {
-        source: source.info.key,
-        kind: 'valuation',
-        rates,
-        fetchedAt: now().toISOString(),
-      });
+      noteValues(
+        r,
+        await storeFx(db, {
+          source: source.info.key,
+          kind: 'valuation',
+          rates,
+          fetchedAt: now().toISOString(),
+        }),
+      );
     });
   }
 

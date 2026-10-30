@@ -48,17 +48,29 @@ describe('Alpaca', () => {
     // 2026-10-29 20:35 New York (EDT), as on the second bootstrap.
     const now = new Date('2026-10-30T00:35:00Z');
 
-    it('caps an end of today at 16 minutes before the run, as an RFC 3339 instant', () => {
+    it('ends at the earlier of the day end in New York and 16 minutes before the run', () => {
       expect(ALPACA_RECENT_MS).toBe(16 * 60_000);
+      // Today: the run's clock minus 16 minutes.
       expect(alpacaBarsEnd('2026-10-29', now)).toBe('2026-10-30T00:19:00Z');
       // Later than today is capped the same way.
       expect(alpacaBarsEnd('2026-10-30', now)).toBe('2026-10-30T00:19:00Z');
-      // A past day stays a date (its whole day is long over).
-      expect(alpacaBarsEnd('2026-10-28', now)).toBe('2026-10-28');
-      // Today is the New York date: 2026-10-30 in UTC is still 2026-10-29 there.
-      expect(alpacaBarsEnd('2026-10-29', new Date('2026-10-30T03:59:00Z'))).toBe(
-        '2026-10-30T03:43:00Z',
+      // A past day: its end, 23:59:59 New York (EDT, UTC-4), as an instant.
+      expect(alpacaBarsEnd('2026-10-28', now)).toBe('2026-10-29T03:59:59Z');
+      // 00:05 New York the next day: the day's end is within the last 15 minutes, so capped.
+      expect(alpacaBarsEnd('2026-10-29', new Date('2026-10-30T04:05:00Z'))).toBe(
+        '2026-10-30T03:49:00Z',
       );
+      // 00:20 New York the next day: the day's end is old enough.
+      expect(alpacaBarsEnd('2026-10-29', new Date('2026-10-30T04:20:00Z'))).toBe(
+        '2026-10-30T03:59:59Z',
+      );
+      // Winter time (EST, UTC-5), and the day of the clock change (2026-11-01 ends in EST).
+      expect(alpacaBarsEnd('2026-01-15', now)).toBe('2026-01-16T04:59:59Z');
+      expect(alpacaBarsEnd('2026-11-01', new Date('2026-11-03T00:00:00Z'))).toBe(
+        '2026-11-02T04:59:59Z',
+      );
+      // Summer time starts 2026-03-08: that day ends in EDT.
+      expect(alpacaBarsEnd('2026-03-08', now)).toBe('2026-03-09T03:59:59Z');
     });
 
     it('asks for bars up to the cap and corporate actions up to the date', async () => {

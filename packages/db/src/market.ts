@@ -262,22 +262,47 @@ export function groupFactors(
 }
 
 /**
+ * What storing series values or FX rates did. Every row is appended; a stored row is never
+ * changed (its old value stays readable as known until the new row's `known_at`).
+ */
+export interface StoredValues {
+  /** Rows for a date and publication time (or, with none given, a date) not stored before. */
+  inserted: number;
+  /**
+   * Dates (per series or pair) whose latest stored value for the same publication time (or, with
+   * none given, the same date) the source now reports differently: stored as a new row known
+   * from its own publication time or fetch, reported like a bar revision. A new publication time
+   * is a new vintage, not a revision.
+   */
+  revised: { item: string; date: TradingDate }[];
+}
+
+/**
  * Keeps a value only when it is new: no stored row for that date and publication time (or, with
- * none given, for that date) yet, or the latest stored one says something else.
+ * none given, for that date) yet, or the latest stored one says something else (a revision).
  */
 function newVintages<T extends { date: string; publishedAt: string | null; fetchedAt: string }>(
   stored: T[],
   incoming: T[],
   same: (a: T, b: T) => boolean,
-): T[] {
+): { rows: T[]; revisedRows: number; revised: TradingDate[] } {
   const latest = new Map<string, T>();
   for (const row of [...stored].sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt))) {
     latest.set(`${row.date}|${row.publishedAt ?? ''}`, row);
   }
-  return incoming.filter((row) => {
+  const rows: T[] = [];
+  const revised = new Set<TradingDate>();
+  let revisedRows = 0;
+  for (const row of incoming) {
     const prev = latest.get(`${row.date}|${row.publishedAt ?? ''}`);
-    return !prev || !same(prev, row);
-  });
+    if (prev && same(prev, row)) continue;
+    if (prev) {
+      revised.add(row.date);
+      revisedRows++;
+    }
+    rows.push(row);
+  }
+  return { rows, revisedRows, revised: [...revised].sort() };
 }
 
 /**
@@ -307,15 +332,15 @@ const readKnownAt = <T extends { knownAt: string }>(rows: T[]): T[] =>
 export async function storeSeries(
   db: Db,
   input: { series: string; source: string; points: SeriesPoint[]; fetchedAt: string },
-): Promise<number> {
-  if (input.points.length === 0) return 0;
+): Promise<StoredValues> {
+  if (input.points.length === 0) return { inserted: 0, revised: [] };
   const dates = input.points.map((p) => p.date).sort();
   const key = and(eq(series.series, input.series), eq(series.source, input.source));
   const stored = await db
     .select()
     .from(series)
     .where(and(key, between(series.date, dates[0]!, dates.at(-1)!)));
-  const rows = newVintages(
+  const { rows, revisedRows, revised } = newVintages(
     stored,
     input.points.map((p) => ({
       series: input.series,
@@ -331,14 +356,17 @@ export async function storeSeries(
   for (let i = 0; i < rows.length; i += CHUNK) {
     await db.insert(series).values(rows.slice(i, i + CHUNK));
   }
-  return rows.length;
+  return {
+    inserted: rows.length - revisedRows,
+    revised: revised.map((date) => ({ item: input.series, date })),
+  };
 }
 
 export async function storeFx(
   db: Db,
   input: { source: string; kind: FxKind; rates: FxRate[]; fetchedAt: string },
-): Promise<number> {
-  let count = 0;
+): Promise<StoredValues> {
+  const out: StoredValues = { inserted: 0, revised: [] };
   const pairs = [...new Set(input.rates.map((r) => r.pair))];
   for (const pair of pairs) {
     const rates = input.rates.filter((r) => r.pair === pair);
@@ -354,7 +382,7 @@ export async function storeFx(
           between(fxRates.date, dates[0]!, dates.at(-1)!),
         ),
       );
-    const rows = newVintages(
+    const { rows, revisedRows, revised } = newVintages(
       stored,
       rates.map((r) => ({
         pair,
@@ -371,9 +399,10 @@ export async function storeFx(
     for (let i = 0; i < rows.length; i += CHUNK) {
       await db.insert(fxRates).values(rows.slice(i, i + CHUNK));
     }
-    count += rows.length;
+    out.inserted += rows.length - revisedRows;
+    out.revised.push(...revised.map((date) => ({ item: pair, date })));
   }
-  return count;
+  return out;
 }
 
 const ISSUER_FIELDS = ['nav', 'distribution', 'split'] as const;

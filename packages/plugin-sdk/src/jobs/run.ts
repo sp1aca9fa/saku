@@ -50,7 +50,11 @@ export interface RunOptions {
   /** The cash series' business days; a run without it fails before any request. */
   seriesSessions: Sessions | undefined;
   now: Date;
-  /** The time the checks look from (values known by then count); default: the clock. */
+  /**
+   * The run's clock: the fetch time stored with values (`known_at` of a value without a
+   * publication time) and the time the checks look from (values known by then count), read in
+   * that order, so a value fetched by the run is known to its checks. Default: the system clock.
+   */
   clock?: () => Date;
   log: Logger;
   context: (info: PluginInfo) => PluginContext;
@@ -134,6 +138,8 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       if (!incomplete.includes(what)) incomplete.push(what);
     };
     const failures: string[] = [];
+    /** Series and FX values the sources now report differently (bar revisions are in the db). */
+    let valueRevisions: Parameters<typeof sendRevisions>[1]['revisions'] = [];
     /** The current engine must reproduce the record, or each difference is annotated and told. */
     const recomputeAndTell = async () => {
       const r = await recompute(db, { runId, code: o.code });
@@ -166,10 +172,26 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         runId,
         log,
         context: o.context,
+        ...(o.clock && { now: o.clock }),
       });
       for (const r of reports) {
-        log.info(summary(r), { source: r.source, failed: r.failed, missing: r.missing });
+        log.info(summary(r), {
+          source: r.source,
+          failed: r.failed,
+          missing: r.missing,
+          ...(Object.keys(r.revisedValues).length > 0 && { revisedValues: r.revisedValues }),
+        });
       }
+      valueRevisions = reports.flatMap((r) =>
+        Object.entries(r.revisedValues).map(([item, dates]) => ({
+          ticker: item,
+          source: r.source,
+          field: r.kind === 'fx' ? 'rate' : 'value',
+          count: dates.length,
+          from: dates.reduce((a, b) => (b < a ? b : a)),
+          to: dates.reduce((a, b) => (b > a ? b : a)),
+        })),
+      );
       const failing = reports.filter((r) => r.stopped || r.failed.length > 0);
       incomplete = failing.filter(countsForRun).map((r) => r.source);
       // Best effort (issuer data): logged, graded yellow by verify (the fund's staleness and the
@@ -259,7 +281,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     if (job === 'weekly') {
       // Layer G: the record against the corrected data, then what the full refetch changed.
       await recomputeAndTell();
-      const revisions = await revisionsOfRun(db, runId);
+      const revisions = [...(await revisionsOfRun(db, runId)), ...valueRevisions];
       log.info(`Revisions: ${revisions.reduce((n, r) => n + r.count, 0)}`, { revisions });
       if (revisions.length > 0) {
         const sent = await sendRevisions(db, { ...alerting, runId, revisions });
