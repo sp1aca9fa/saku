@@ -54,6 +54,12 @@ the descriptions to the database. The fields:
   fetches' ratios of one real re-adjustment can differ. A change within it is stored without a
   re-adjustment event. Default 1e-9 (double precision), at most 1e-5. State the provider's
   precision it rests on next to the value, and check it with `pnpm sources readjustments`.
+- `publishes` (issuer sources): what their records hold, `{ nav?: true, distributions?: true,
+  splits?: true }`, at least one. Layer D compares only the declared kinds: a NAV-only file
+  declares `{ nav: true }` and its missing distributions are never read as mismatches; values of
+  an undeclared kind are ignored. Not declared: inferred from the records (NAV when any record
+  has one; distributions and splits always compared), so declare it whenever you know. If what
+  the files hold differs per fund, leave it out.
 
 ### The context
 

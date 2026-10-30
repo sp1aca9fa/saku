@@ -67,13 +67,18 @@ export function allInfos(plugins: PluginModule): PluginInfo[] {
   ].map((p) => p.info);
 }
 
+/** The kinds an issuer source can declare it publishes (`PluginInfo.publishes`). */
+const PUBLISHED_KINDS = ['nav', 'distributions', 'splits'];
+
 /**
- * Keys are lowercase identifiers, unique per kind, each source names its terms, and a declared
- * adjusted-close rounding is a small positive number.
+ * Keys are lowercase identifiers, unique per kind, each source names its terms, a declared
+ * adjusted-close rounding is a small positive number, and a `publishes` declaration is an issuer
+ * source's, naming at least one known kind, each `true` (a declaration of nothing, or with a
+ * misspelt kind, would silently leave its checks out of layer D).
  */
 export function validateInfos(
   infos: (Pick<PluginInfo | NotifierInfo, 'key' | 'kind' | 'termsUrl'> &
-    Pick<Partial<PluginInfo>, 'adjCloseRounding'>)[],
+    Pick<Partial<PluginInfo>, 'adjCloseRounding' | 'publishes'>)[],
 ): void {
   const seen = new Set<string>();
   for (const info of infos) {
@@ -86,6 +91,19 @@ export function validateInfos(
     if (!info.termsUrl) throw new Error(`Plug-in "${info.key}" has no termsUrl.`);
     if (info.adjCloseRounding !== undefined) {
       checkAdjCloseRounding(info.adjCloseRounding, `Plug-in "${info.key}"`);
+    }
+    if (info.publishes !== undefined) {
+      const p: unknown = info.publishes;
+      const entries = p !== null && typeof p === 'object' ? Object.entries(p) : [];
+      if (
+        info.kind !== 'issuer' ||
+        entries.length === 0 ||
+        entries.some(([k, v]) => !PUBLISHED_KINDS.includes(k) || v !== true)
+      ) {
+        throw new Error(
+          `Plug-in "${info.key}": publishes is for issuer sources and names at least one of ${PUBLISHED_KINDS.join(', ')}, each true.`,
+        );
+      }
     }
   }
 }

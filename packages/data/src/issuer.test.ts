@@ -222,6 +222,103 @@ describe('layer D (issuer reconciliation)', () => {
     ).toEqual([]);
   });
 
+  describe('a declaration of what the source publishes', () => {
+    const checks = (rs: ReturnType<typeof layerD>) => [...new Set(rs.map((r) => r.check))].sort();
+    const all = { nav: true, distributions: true, splits: true } as const;
+
+    it('NAV only: no event result, even with a primary event and none in its records', () => {
+      // Daily NAV records without events (a NAV file): undeclared, they would flag the ex-date.
+      const navOnly = navs(0.001).map(({ distribution: _d, split: _s, ...r }) => r);
+      expect(of(layerD(primary, navOnly, opts), 'distribution_match')[0]).toMatchObject({
+        status: 'yellow',
+        message: 'event missing in issuer data',
+      });
+      const rs = layerD(primary, navOnly, { ...opts, tolerance: 0.005, publishes: { nav: true } });
+      expect(checks(rs)).toEqual(['issuer_stale', 'nav_premium']);
+      expect(rs.every((r) => r.status === 'green')).toBe(true);
+      // Events in its records are not its claim: ignored, never compared.
+      const wrong = navs().map((r) => (r.distribution ? { ...r, distribution: 9 } : r));
+      expect(checks(layerD(primary, wrong, { ...opts, publishes: { nav: true } }))).toEqual([
+        'issuer_stale',
+        'nav_premium',
+      ]);
+    });
+
+    it('events only: no premium and no NAV freshness, even with NAVs in its records', () => {
+      const rs = layerD(primary, navs(0.5), {
+        ...opts,
+        tolerance: 0.01,
+        toleranceInvalid: true,
+        supported: true,
+        publishes: { distributions: true, splits: true },
+      });
+      expect(checks(rs)).toEqual(['distribution_match', 'split_match']);
+      expect(rs.every((r) => r.status === 'green')).toBe(true);
+      // No record at all for a supported fund: no claim of an event, so nothing (not yellow).
+      const none = layerD(primary, [], { ...opts, supported: true, publishes: { splits: true } });
+      expect(none).toEqual([]);
+      // A record missing on an event date reads as no event (records are event dates only).
+      const noDist = navs()
+        .filter((r) => r.split)
+        .map(({ nav: _n, ...r }) => r);
+      const d = layerD(primary, [...noDist, { date: dates[0]!, distribution: 0.5 }], {
+        ...opts,
+        publishes: { distributions: true },
+      });
+      expect(checks(d)).toEqual(['distribution_match']);
+      expect(of(d, 'distribution_match').map((r) => [r.date, r.status, r.message])).toEqual([
+        [dates[0], 'yellow', 'event only in issuer data'],
+        [dates[2], 'yellow', 'event missing in issuer data'],
+      ]);
+    });
+
+    it('events only: a failed fetch or a plug-in not loaded stays yellow (never silent)', () => {
+      const events = navs()
+        .filter((r) => r.distribution)
+        .map(({ nav: _n, ...r }) => r);
+      const publishes = { distributions: true } as const;
+      expect(
+        of(layerD(primary, [], { ...opts, unavailable: true, publishes }), 'issuer_stale'),
+      ).toEqual([expect.objectContaining({ date: TO, status: 'yellow', message: 'not fetched' })]);
+      expect(
+        of(layerD(primary, events, { ...opts, notLoaded: true, publishes }), 'issuer_stale'),
+      ).toEqual([expect.objectContaining({ status: 'yellow', message: 'plug-in not loaded' })]);
+      expect(
+        of(layerD(primary, [], { ...opts, notLoaded: true, publishes }), 'issuer_stale'),
+      ).toEqual([]);
+    });
+
+    it('NAV declared but none stored among its records: yellow (unknown), never silent', () => {
+      const events = navs()
+        .filter((r) => r.distribution)
+        .map(({ nav: _n, ...r }) => r);
+      const rs = layerD(primary, events, { ...opts, publishes: all });
+      expect(of(rs, 'issuer_stale')).toEqual([
+        expect.objectContaining({ status: 'yellow', message: 'NAV declared, none stored' }),
+      ]);
+      // A NAV source has a record per date: the split date without one is not compared.
+      expect(of(rs, 'split_match')).toEqual([]);
+      expect(of(rs, 'distribution_match')[0]!.status).toBe('green');
+    });
+
+    it('all declared: the same results as undeclared', () => {
+      const cases: [IssuerRecord[], Partial<Parameters<typeof layerD>[2]>][] = [
+        [navs(0.001), { tolerance: 0.005 }],
+        [navs(0.1), { tolerance: 0.01, toleranceInvalid: true }],
+        [navs().filter((r) => r.date !== dates[2]), {}],
+        [navs().map((r) => ({ ...r, distribution: undefined })), {}],
+        [navs().slice(0, 3), { unavailable: true }],
+        [navs().slice(0, 4), { notLoaded: true }],
+        [[], { supported: true }],
+      ];
+      for (const [records, extra] of cases) {
+        expect(layerD(primary, records, { ...opts, ...extra, publishes: all })).toEqual(
+          layerD(primary, records, { ...opts, ...extra }),
+        );
+      }
+    });
+  });
+
   it('ignores records after the run date and returns nothing without records', () => {
     const later = [...navs(), { date: '2026-01-12', nav: 1, currency: 'USD' }];
     expect(of(layerD(primary, later, opts), 'nav_premium')).toHaveLength(5);

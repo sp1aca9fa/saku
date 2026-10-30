@@ -51,6 +51,21 @@ describe('plug-in registry', () => {
     }
   });
 
+  it('refuses a publishes declaration that is not an issuer source naming known kinds', () => {
+    const issuer = { ...info, kind: 'issuer' as const };
+    expect(() => validateInfos([{ ...issuer, publishes: { nav: true } }])).not.toThrow();
+    expect(() =>
+      validateInfos([{ ...issuer, publishes: { distributions: true, splits: true } }]),
+    ).not.toThrow();
+    const bad: unknown[] = [{}, { navs: true }, { nav: false }, { nav: 'yes' }, null, []];
+    for (const publishes of bad) {
+      expect(() =>
+        validateInfos([{ ...issuer, publishes: publishes as PluginInfo['publishes'] }]),
+      ).toThrow(/publishes/);
+    }
+    expect(() => validateInfos([{ ...info, publishes: { nav: true } }])).toThrow(/publishes/);
+  });
+
   it("hands over the run's final time when given", () => {
     expect(pluginContext(info, log, { env: {}, finalAfter: '18:30' }).finalAfter).toBe('18:30');
     expect(pluginContext(info, log, { env: {} }).finalAfter).toBeUndefined();

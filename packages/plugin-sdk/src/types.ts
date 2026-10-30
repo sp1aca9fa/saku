@@ -65,6 +65,12 @@ export interface PluginInfo {
    * provider's precision it rests on next to the value.
    */
   adjCloseRounding?: number;
+  /**
+   * Issuer sources: what their records hold (`IssuerPublishes` in `@saku/data`). Layer D compares
+   * only the declared kinds; an undeclared one is not checked (no result, never green). Not
+   * declared: inferred from the records (NAV when any has one; distributions and splits always).
+   */
+  publishes?: { nav?: true; distributions?: true; splits?: true };
 }
 
 export interface Logger {

@@ -696,6 +696,33 @@ describe('verify', () => {
     expect((await issuerStats(db, period)).rows[0]).toEqual(before);
   });
 
+  it('compares only what an issuer source declares it publishes', async () => {
+    const { db } = await setup();
+    await seedSourceRoles(db, [
+      { key: 'iss', dataKind: 'issuer', suggestedRole: 'check' },
+      { key: 'iss2', dataKind: 'issuer', suggestedRole: 'check' },
+    ]);
+    // Both hold NAVs and the distribution of the 7th; one declares NAV only, one events only.
+    await issue(db, 'iss', (close) => close);
+    await issue(db, 'iss2', (close) => close);
+    const runId = await startRun(db, 'daily');
+    await verify(db, {
+      runId,
+      sessions,
+      mode: 'daily',
+      from: '2026-01-06',
+      to: '2026-01-08',
+      issuerPublishes: { iss: { nav: true }, iss2: { distributions: true } },
+    });
+    const checks = async (source: string) => [
+      ...new Set(
+        (await layerDResults(db)).filter((r) => r.source === source).map((r) => r.checkName),
+      ),
+    ];
+    expect((await checks('iss')).sort()).toEqual(['issuer_stale', 'nav_premium']);
+    expect(await checks('iss2')).toEqual(['distribution_match']);
+  });
+
   it('grades a fund the issuer supports or failed for, with no NAV stored, yellow', async () => {
     const { db } = await setup();
     await seedSourceRoles(db, [

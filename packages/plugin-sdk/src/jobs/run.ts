@@ -214,6 +214,10 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       now: o.clock?.() ?? new Date(),
       issuers,
       sourceCalendars,
+      // What each loaded issuer source declares it publishes (layer D compares only those).
+      issuerPublishes: Object.fromEntries(
+        used.issuers.flatMap((s) => (s.info.publishes ? [[s.info.key, s.info.publishes]] : [])),
+      ),
       ...(job === 'daily'
         ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
         : { mode: 'full' as const }),

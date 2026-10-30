@@ -45,6 +45,19 @@ export function navPremiums(
   });
 }
 
+/**
+ * What an issuer source declares it publishes (`PluginInfo.publishes`). Layer D compares only the
+ * declared kinds: an undeclared one gets no result for its check (the source makes no claim, so
+ * nothing was compared and nothing is green). Values of an undeclared kind in its records are
+ * ignored. Not declared at all: what it publishes is inferred from its records (NAV when any
+ * record has one, distributions and splits always compared).
+ */
+export interface IssuerPublishes {
+  nav?: true;
+  distributions?: true;
+  splits?: true;
+}
+
 export interface LayerDOptions {
   /** The issuer source's key (stored with each result). */
   source: string;
@@ -57,6 +70,8 @@ export interface LayerDOptions {
    * `nav_tolerance_invalid` result on the run's date says so (for a source with NAV).
    */
   toleranceInvalid?: boolean;
+  /** What the source declares it publishes; absent: inferred from its records. */
+  publishes?: IssuerPublishes;
   /** The source says it publishes this fund (`supports`). */
   supported?: boolean;
   /** This run's fetch from the source failed or stopped for this fund. */
@@ -73,7 +88,10 @@ export interface LayerDOptions {
 
 /**
  * Layer D for one symbol and one issuer source, one result per check and date, every status
- * capped at LAYER_D_MAX_STATUS:
+ * capped at LAYER_D_MAX_STATUS. With a `publishes` declaration only the declared kinds are
+ * checked (`nav_premium`, the NAV's `issuer_stale` and `nav_tolerance_invalid` with NAV;
+ * `distribution_match` with distributions; `split_match` with splits); an undeclared kind has no
+ * result, never a green one. Without a declaration, as below (inferred from the records):
  * - `nav_premium`: |close / NAV - 1| against the fund's tolerance (no tolerance: green, the
  *   deviation recorded). A NAV that is not positive, or not in the fund's currency, is a
  *   mismatch and never a premium.
@@ -87,7 +105,10 @@ export interface LayerDOptions {
  *   behind. With no NAV stored at all, yellow when this run's fetch failed for the fund, or when
  *   the source supports it and has no record of it (a NAV-less source that delivered records is
  *   events-only and has no freshness). A source whose plug-in is not loaded is yellow for every fund
- *   it has records for, whatever their age.
+ *   it has records for, whatever their age. A source declaring NAV with records but no NAV among
+ *   them is yellow (its NAV is unknown). A source declaring no NAV has no NAV freshness: only a
+ *   fetch that failed this run, or a plug-in not loaded, is yellow (what it publishes is unknown
+ *   for the run); having no record is not (a fund may have had no event).
  */
 export function layerD(
   primary: RawBar[],
@@ -102,9 +123,19 @@ export function layerD(
   const tolerance = o.toleranceInvalid ? undefined : o.tolerance;
   const later = (a: TradingDate, b: TradingDate) => (a > b ? a : b);
   const earlier = (a: TradingDate, b: TradingDate) => (a < b ? a : b);
-  const publishesNav = recs.some((r) => r.nav !== undefined);
+  const d = o.publishes;
+  // Compared kinds: the declared ones; without a declaration, all (NAV where records have it).
+  const navOn = d === undefined || d.nav === true;
+  const eventsOn: Record<string, boolean> = {
+    distribution_match: d === undefined || d.distributions === true,
+    split_match: d === undefined || d.splits === true,
+  };
+  const navs = navOn ? recs.filter((r) => r.nav !== undefined) : [];
+  // A NAV source has a record per date it publishes (a date without one is unknown); an
+  // events-only source has records on event dates only (a date without one has no event).
+  const publishesNav = d === undefined ? navs.length > 0 : d.nav === true;
 
-  for (const r of recs) {
+  for (const r of navs) {
     const b = mine.get(r.date);
     if (!b || r.nav === undefined) continue;
     const bad =
@@ -150,6 +181,7 @@ export function layerD(
         { check: 'distribution_match', a: p?.divCash ?? 0, b: s?.distribution ?? 0, none: 0 },
         { check: 'split_match', a: p?.splitFactor ?? 1, b: s?.split ?? 1, none: 1 },
       ]) {
+        if (!eventsOn[ev.check]) continue;
         if (ev.a === ev.none && ev.b === ev.none) continue;
         if (!s && publishesNav) {
           // A NAV source without a record that day: the event cannot be compared (unknown).
@@ -185,8 +217,21 @@ export function layerD(
   }
 
   // Freshness on the run's date.
-  const lastNav = recs.filter((r) => r.nav !== undefined).at(-1)?.date;
-  if (o.notLoaded) {
+  const lastNav = navs.at(-1)?.date;
+  if (!navOn) {
+    // No NAV declared: no freshness to judge, but a fetch that failed or a plug-in not loaded
+    // leaves this run's events unknown (never left silent; not loaded, as below, only for the
+    // funds it has records for).
+    if ((o.notLoaded && recs.length > 0) || o.unavailable) {
+      out.push({
+        ...base,
+        check: 'issuer_stale',
+        date: o.to,
+        status: cap('yellow'),
+        message: o.notLoaded ? 'plug-in not loaded' : 'not fetched',
+      });
+    }
+  } else if (o.notLoaded) {
     // Which funds it would support is unknown: those it has records for are graded.
     if (recs.length > 0) {
       out.push({
@@ -211,19 +256,23 @@ export function layerD(
       tolerance: ISSUER_MAX_BEHIND,
       ...(behind > ISSUER_MAX_BEHIND && { message: `latest NAV ${lastNav}` }),
     });
-  } else if (o.unavailable || (o.supported && recs.length === 0)) {
-    // Never graded green by having nothing to compare.
+  } else if (o.unavailable || (o.supported && recs.length === 0) || (d && recs.length > 0)) {
+    // Never graded green by having nothing to compare (a declared NAV with none stored included).
     out.push({
       ...base,
       check: 'issuer_stale',
       date: o.to,
       status: cap('yellow'),
       tolerance: ISSUER_MAX_BEHIND,
-      message: o.unavailable ? 'not fetched, no NAV stored' : 'supported, no record stored',
+      message: o.unavailable
+        ? 'not fetched, no NAV stored'
+        : recs.length === 0
+          ? 'supported, no record stored'
+          : 'NAV declared, none stored',
     });
   }
 
-  if (o.toleranceInvalid && publishesNav) {
+  if (o.toleranceInvalid && navs.length > 0) {
     out.push({
       ...base,
       check: 'nav_tolerance_invalid',

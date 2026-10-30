@@ -8,7 +8,7 @@
 | 2026-10-30 | A separate healthchecks.io check for the weekly run | Claude | Reliability | new | Today only the daily run pings |
 | 2026-10-30 | FRED values withdrawn (revised to '.') or leaving the 10-year licence window keep the old vintage as latest, silently; store or flag withdrawn values | Claude (review) | Reliability | new | Pre-existing; affects asOf for a withdrawn value |
 | 2026-10-30 | ECB: accept a leading empty part only when the series really starts later (ask for its first observation) | Claude (review) | Reliability | accepted | A wrong 404 on the first part would shorten history silently. Built 2026-10-30: one `firstNObservations=1` request; refused unless every needed series starts after the empty span |
-| 2026-10-30 | Issuer sources declare what they publish (NAV, distributions, splits), so a NAV-only file does not flag every ex-date | Claude | Reliability | new | Layer D is advisory until thresholds are set |
+| 2026-10-30 | Issuer sources declare what they publish (NAV, distributions, splits), so a NAV-only file does not flag every ex-date | Claude | Reliability | accepted | Done 2026-10-30 (`PluginInfo.publishes`) |
 | 2026-10-30 | Index on `data_health(run_id)` | Claude | Reliability | accepted | Done 2026-10-30 (migration 0008) |
 | 2026-10-30 | Full passes store per-symbol green coverage, so a symbol skipped in a full run never reads green from older data | Claude (review) | Reliability | new | Coverage ranges cover the known cases |
 | 2026-10-30 | Compare holdings order-insensitively when counting switches (a reorder with no trade counted) | Claude (review) | Evidence | accepted | Done 2026-10-30 (core and reference); matters for testfol parity |
@@ -17,3 +17,4 @@
 | 2026-10-30 | Plug-ins declare a provider id (default: the key), so two plug-ins for one provider share its quota | Claude (review) | Reliability | new | Each loaded key is a different provider today |
 | 2026-10-30 | Quota guard for bandwidth limits (e.g. 1 GB per month) | Claude | Reliability | new | Not declared by any plug-in yet |
 | 2026-10-30 | ECB: refuse when the first rate received comes well after the start the ECB states (a gap inside the first part with rates); also gaps inside any part | Claude (review) | Reliability | new | Needs an allowance in TARGET days (owner); FX freshness covers only recent gaps |
+| 2026-10-30 | One core helper for "this holding reads the cash rate" (CASH_USD or leverage other than 1), used by the backtest and parity | Claude (build) | Reliability | new | parity.ts repeats the backtest financing rule today |

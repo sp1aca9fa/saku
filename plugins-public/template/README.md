@@ -9,4 +9,7 @@ not loaded by the jobs (only `src/index.ts` of `plugins-public/` and `plugins/` 
   private repo)
 - `test/example-bars.test.ts`: the test, run by `pnpm test`
 
+An issuer source (`IssuerSource`) also declares what its records hold in `info.publishes`
+(`{ nav: true }` for a NAV-only file); see `docs/plugins.md`.
+
 A tax regime template follows in Stage C1.

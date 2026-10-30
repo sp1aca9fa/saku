@@ -13,6 +13,7 @@ import { totalReturnIndex } from '@saku/core';
 import {
   type CheckResult,
   type DayHealth,
+  type IssuerPublishes,
   type Sessions,
   TOLERANCE,
   adjReturnCheck,
@@ -71,6 +72,11 @@ export interface VerifyOptions {
    * day the primary's calendar is closed is an expected gap. None given: no day counts as closed.
    */
   sourceCalendars?: Record<string, Sessions>;
+  /**
+   * What each issuer source declares it publishes (`PluginInfo.publishes`), by source key: layer
+   * D compares only those kinds. A source not named: inferred from its records.
+   */
+  issuerPublishes?: Record<string, IssuerPublishes>;
 }
 
 export interface IssuerAvailability {
@@ -454,6 +460,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
             ...(a?.supported.includes(s.ticker) && { supported: true }),
             ...(a?.unavailable.includes(s.ticker) && { unavailable: true }),
             ...(notLoaded(source) && { notLoaded: true }),
+            ...(o.issuerPublishes?.[source] && { publishes: o.issuerPublishes[source] }),
           }),
         );
       }
