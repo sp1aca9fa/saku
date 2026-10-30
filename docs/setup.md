@@ -6,6 +6,8 @@ the code is cloned to `~/code/saku`. The machine itself (updates, ssh keys, powe
 set up as for any home server; nothing below is specific to one.
 
 Stage A1 sets up the data jobs only: the web app (and its Tailscale Funnel address) comes later.
+Related guides: `docs/running.md` (jobs, schedule, logs), `docs/backups.md`, `docs/troubleshooting.md`,
+`docs/plugins.md`.
 
 ## 1. Node and the code
 
