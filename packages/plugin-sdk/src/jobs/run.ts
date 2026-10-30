@@ -255,6 +255,11 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
           },
         );
         for (const t of f.today) log.info(`${t.version}: ${t.allocation} (${t.dataStatus})`, t);
+        // A stored version that no longer parses was skipped: the run is not complete.
+        if (f.errors.length > 0) {
+          log.warn('Forward: versions that do not parse were skipped', { errors: f.errors });
+          markIncomplete('forward');
+        }
         // Undelivered alerts are retried at the next check (sent ones are not repeated).
         const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
         log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
