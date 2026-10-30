@@ -45,6 +45,19 @@ describe('reference: holdings identity ignores order', () => {
       expect(r.switches).toBe(1);
     });
 
+    it(`${execution}: swapped weights between the same tickers count as a switch`, () => {
+      const x: H = [
+        { ticker: 'SPY', weight: 40 },
+        { ticker: 'SSO', weight: 60 },
+      ];
+      const y: H = [
+        { ticker: 'SPY', weight: 60 },
+        { ticker: 'SSO', weight: 40 },
+      ];
+      const r = refBacktest({ execution, costs }, days([x, y, y, y]), bars, () => 0);
+      expect(r.switches).toBe(1);
+    });
+
     // Only the switch count is checked: the money for a repeated ticker is not defined yet.
     it(`${execution}: a repeated ticker is not the same as one weight for it`, () => {
       const one: H = [{ ticker: 'SPY', weight: 100 }];

@@ -182,6 +182,19 @@ describe('holdings compare order-insensitively (a reorder is no trade)', () => {
   it('compares tickers and weights as a multiset, exactly', () => {
     expect(sameHoldings(A, B)).toBe(true);
     expect(sameHoldings(A, C)).toBe(false);
+    // Swapped weights between the same tickers are a change.
+    expect(
+      sameHoldings(
+        [
+          { ticker: 'SPY', weight: 40 },
+          { ticker: 'SSO', weight: 60 },
+        ],
+        [
+          { ticker: 'SPY', weight: 60 },
+          { ticker: 'SSO', weight: 40 },
+        ],
+      ),
+    ).toBe(false);
     expect(sameHoldings(A, [{ ticker: 'SPY', weight: 100 }])).toBe(false);
     // A repeated ticker never matches a list without the repeat; weights are not merged.
     expect(

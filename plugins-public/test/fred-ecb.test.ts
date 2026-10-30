@@ -731,6 +731,27 @@ describe('ECB', () => {
           ),
         ).rejects.toThrow(/but the QQQ series starts on/);
       }
+      // Two empty leading parts, the first observation inside the second: the span runs to the
+      // end of the last empty part.
+      const twoRoute = (url: URL) => {
+        const start = url.searchParams.get('startPeriod')!;
+        const i = parts.findIndex((p) => p.from === start);
+        return i === 0
+          ? noResults()
+          : i === 1
+            ? header
+            : `${header}\nEXR.D.QQQ.EUR.SP00.A,D,QQQ,EUR,SP00,A,${start},2.5000`;
+      };
+      await expect(
+        ecb.fetchRates(
+          'EURQQQ',
+          '1999-01-01',
+          '2026-10-28',
+          fixtureContext(withFirst({ QQQ: parts[1]!.from }, twoRoute)),
+        ),
+      ).rejects.toThrow(
+        `ECB: no rates for EURQQQ from ${parts[0]!.from} to ${parts[1]!.to}, but the QQQ series starts on ${parts[1]!.from}`,
+      );
       // A range starting later: an empty first part of a series that started in 1999 is refused.
       const late = ecbChunks('2010-01-01', '2026-10-28');
       const lateRoute = (url: URL) => {

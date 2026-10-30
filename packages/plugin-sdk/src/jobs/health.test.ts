@@ -358,6 +358,8 @@ describe('healthReport', () => {
     // An older run's missing-bar result for BBB is not used: only the run that stored the row.
     const older = await run(db, 'daily', D[3]);
     await result(older, ids.BBB, 'yellow', NO_SECONDARY_BAR);
+    // An older run's real disagreement for AAA must not replace the deciding run's reading.
+    await result(older, ids.AAA, 'yellow', null);
     const id = await run(db, 'daily', D[3]);
     // AAA: stored before secondary_missing existed, plus the new code (read twice, listed once).
     await result(id, ids.AAA, 'yellow', NO_SECONDARY_BAR);
