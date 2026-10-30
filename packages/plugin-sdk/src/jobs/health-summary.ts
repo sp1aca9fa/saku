@@ -26,7 +26,7 @@
 //   non-green for reasons no check result carries (one source, a stand-in, series freshness), so
 //   they are counted too and a run is "all green" only when neither has a non-green row.
 import type { CheckLayer, HealthStatus, JobStatus, JobType, TradingDate } from '@saku/core';
-import { NO_SECONDARY_BAR, checkAsRead, worst } from '@saku/data';
+import { NO_SECONDARY_BAR, worst } from '@saku/data';
 import { type Db, schema } from '@saku/db';
 import {
   and,
@@ -43,7 +43,10 @@ import {
   sql,
 } from 'drizzle-orm';
 import { storedAny } from './health';
+import { reasonCode, reasonsAsRead } from './health-reasons';
 import { carriedReasonStatus } from './verify';
+
+export { reasonCode };
 
 const FULL: JobType[] = ['bootstrap', 'weekly', 'checks'];
 const NON_GREEN: HealthStatus[] = ['red', 'yellow'];
@@ -353,46 +356,6 @@ export async function runSummary(db: Db, run: SummaryRun): Promise<RunSummary> {
   };
 }
 
-/**
- * A stored reason code as shown: a `B.close_match@s` (on an overall row `X:B.close_match@s`) whose
- * every result of the run with that date, symbol (none on an overall row) and source is a missing
- * secondary bar stored before `secondary_missing` existed (`checkAsRead`) reads as
- * `B.secondary_missing@s`, so it is worded as a source without a bar, not a disagreement. Any
- * real close comparison among them, or no result at all, keeps the stored code. Stored rows are
- * never rewritten.
- */
-async function reasonsAsRead(db: Db, runId: string) {
-  const r = schema.checkResults;
-  // Per key: whether every result is the old missing-bar form (any status: a daily run stores the
-  // green comparisons too).
-  const allMissing = new Map<string, boolean>();
-  for (const x of await db
-    .select({
-      date: r.date,
-      symbolId: r.symbolId,
-      layer: r.layer,
-      checkName: r.checkName,
-      source: r.source,
-      message: r.message,
-    })
-    .from(r)
-    .where(and(eq(r.runId, runId), eq(r.layer, 'B'), eq(r.checkName, 'close_match')))) {
-    const key = JSON.stringify([x.date, x.symbolId, reasonCode({ ...x, check: x.checkName })]);
-    const missing = checkAsRead(x) === 'secondary_missing';
-    allMissing.set(key, (allMissing.get(key) ?? true) && missing);
-  }
-  return (row: { date: TradingDate; symbolId: number | null }, code: string): string => {
-    const m = /^((?:[^:@\s]+:)?)(B\.close_match@.+)$/.exec(code);
-    if (!m) return code;
-    // A prefix only on an overall row; a symbol row's code has none.
-    if ((m[1] !== '') !== (row.symbolId === null)) return code;
-    const key = JSON.stringify([row.date, row.symbolId, m[2]]);
-    return allMissing.get(key) === true
-      ? `${m[1]}${m[2]!.replace('B.close_match@', 'B.secondary_missing@')}`
-      : code;
-  };
-}
-
 /** Reasons verify always grades with the same status (verify.ts, packages/data symbolHealth). */
 function fixedStatus(code: string): HealthStatus | undefined {
   if (code === 'single_source' || code.startsWith('stand_in@')) return 'yellow';
@@ -616,11 +579,6 @@ export async function groupDates(
       message: x.message,
     })),
   };
-}
-
-/** The reason code of a check result, as the health rows name it (`B.close_match@source`). */
-export function reasonCode(g: { layer: CheckLayer; check: string; source: string | null }) {
-  return `${g.layer}.${g.check}${g.source ? `@${g.source}` : ''}`;
 }
 
 /** The latest runs of any kind (by start), for the message refusing an unknown run id. */

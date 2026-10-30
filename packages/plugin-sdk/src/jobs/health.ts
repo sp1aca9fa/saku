@@ -27,11 +27,17 @@
 // - A symbol before its first canonical bar is not part of the day (verify grades from there),
 //   unless its inception date says it should have data: then it is "not graded". An active
 //   symbol with no canonical bar at all is "not graded" unless the run graded it.
+// - Reasons are shown as read (`reasonsAsRead`, the rule `pnpm health --summary` uses): a missing
+//   secondary bar stored as `B.close_match@s` before `secondary_missing` existed reads as
+//   `B.secondary_missing@s` when every close_match result of the run that stored the row (same
+//   date, symbol, source) is that missing bar; a code read twice is listed once. Only the code
+//   shown changes: the stored rows and the status are as stored.
 // Unknown stays unknown: nothing here turns a missing grade into green.
 import type { HealthStatus, JobType, TradingDate } from '@saku/core';
 import { type Sessions, worst } from '@saku/data';
 import { type Db, schema } from '@saku/db';
 import { and, desc, eq, inArray, isNotNull, isNull, min } from 'drizzle-orm';
+import { reasonsAsRead } from './health-reasons';
 import { DAILY_OVERLAP } from './ingest';
 import { carriedReasonStatus } from './verify';
 
@@ -179,6 +185,17 @@ export async function healthReport(
         )
     )[0];
 
+  // One reading per deciding run (its close_match results), shared by the dates it decides.
+  const readers = new Map<string, ReturnType<typeof reasonsAsRead>>();
+  const readerOf = (runId: string) => {
+    let r = readers.get(runId);
+    if (!r) {
+      r = reasonsAsRead(db, runId);
+      readers.set(runId, r);
+    }
+    return r;
+  };
+
   const out: DayReport[] = [];
   for (const date of o.dates) {
     const run = await latest((r) => (r.from === undefined || r.from <= date) && date <= r.target);
@@ -207,9 +224,16 @@ export async function healthReport(
       ).map((r) => r.symbolId),
     );
     const coverage = full ? await coverageOf(run.id) : new Map<number, never>();
-    const grade = (row: { status: HealthStatus; reasons: string[] }): Grade => ({
+    const shownAs = await readerOf(run.id);
+    // The row's status as stored; its reasons as read (a code read twice listed once).
+    const grade = (row: {
+      date: TradingDate;
+      symbolId: number | null;
+      status: HealthStatus;
+      reasons: string[];
+    }): Grade => ({
       status: row.status,
-      reasons: [...row.reasons],
+      reasons: [...new Set(row.reasons.map((code) => shownAs(row, code)))],
     });
 
     const overallRow = rows.find((r) => r.symbolId === null);

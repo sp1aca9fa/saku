@@ -1,5 +1,5 @@
 import type { HealthStatus, JobType, RawBar } from '@saku/core';
-import { Sessions } from '@saku/data';
+import { NO_SECONDARY_BAR, Sessions } from '@saku/data';
 import {
   type Db,
   finishRun,
@@ -337,6 +337,61 @@ describe('healthReport', () => {
     expect(day!.overall.status).toBe('red');
     expect(await latestRun(db)).toMatchObject({ jobType: 'weekly', status: 'running' });
     expect(await latestGradedDate(db, sessions)).toBe(D[3]);
+  });
+
+  it('reads an old-style missing secondary bar as secondary_missing; a real disagreement stays', async () => {
+    const { db, ids, health } = await setup();
+    const result = (runId: string, symbol: number, status: HealthStatus, message: string | null) =>
+      db.insert(schema.checkResults).values({
+        runId,
+        layer: 'B',
+        checkName: 'close_match',
+        symbolId: symbol,
+        source: 's',
+        date: D[3],
+        status,
+        observed: message === null ? 1.1 : null,
+        expected: message === null ? 1 : null,
+        tolerance: 0.001,
+        message,
+      });
+    // An older run's missing-bar result for BBB is not used: only the run that stored the row.
+    const older = await run(db, 'daily', D[3]);
+    await result(older, ids.BBB, 'yellow', NO_SECONDARY_BAR);
+    const id = await run(db, 'daily', D[3]);
+    // AAA: stored before secondary_missing existed, plus the new code (read twice, listed once).
+    await result(id, ids.AAA, 'yellow', NO_SECONDARY_BAR);
+    await health(id, D[3], ids.AAA, 'yellow', ['B.close_match@s', 'B.secondary_missing@s']);
+    // BBB: the closes really differ.
+    await result(id, ids.BBB, 'yellow', null);
+    await health(id, D[3], ids.BBB, 'yellow', ['B.close_match@s', 'single_source']);
+    await health(id, D[3], null, 'yellow', ['AAA', 'BBB']);
+    const [day] = await healthReport(db, { dates: [D[3]], sessions });
+    expect(day).toMatchObject({
+      overall: { status: 'yellow', reasons: ['AAA', 'BBB'] },
+      symbols: [
+        { ticker: 'AAA', grade: { status: 'yellow', reasons: ['B.secondary_missing@s'] } },
+        {
+          ticker: 'BBB',
+          grade: { status: 'yellow', reasons: ['B.close_match@s', 'single_source'] },
+        },
+      ],
+      green: false,
+      run: { id },
+    });
+    // Stored rows untouched.
+    const stored = await db
+      .select({ symbolId: schema.dataHealth.symbolId, reasons: schema.dataHealth.reasons })
+      .from(schema.dataHealth)
+      .where(eq(schema.dataHealth.runId, id));
+    expect(stored.find((r) => r.symbolId === ids.AAA)!.reasons).toEqual([
+      'B.close_match@s',
+      'B.secondary_missing@s',
+    ]);
+    expect(stored.find((r) => r.symbolId === ids.BBB)!.reasons).toEqual([
+      'B.close_match@s',
+      'single_source',
+    ]);
   });
 
   it('nothing graded yet: no latest date, every date not graded', async () => {
