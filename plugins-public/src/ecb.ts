@@ -41,7 +41,8 @@ export function ecbChunks(from: string, to: string): { from: string; to: string 
  * Parses the API's `csvdata` answer into date -> rate (units of currency per euro), adding to
  * `out`; a date already there with another rate is refused. Returns the rows read. Columns are
  * found by name; only CURRENCY, TIME_PERIOD and OBS_VALUE are used, so the request asks for
- * `detail=dataonly` (no attribute columns). An empty answer has no rows.
+ * `detail=dataonly` (no attribute columns). An empty answer has no rows; a row with an empty
+ * OBS_VALUE is no observation (not counted).
  */
 function parseCsv(text: string, currency: string, out: Map<string, number>): number {
   if (text.trim() === '') return 0;
@@ -56,8 +57,13 @@ function parseCsv(text: string, currency: string, out: Map<string, number>): num
     const cells = row.split(',');
     if (cells[iCur] !== currency) continue;
     const date = cells[iDate] ?? '';
+    if (!isTradingDate(date)) throw new Error(`ECB: unreadable row "${row}"`);
+    // With `detail=dataonly`, a day the series has no rate comes as an empty OBS_VALUE (seen for
+    // 1999-12-31): no observation that day, like FRED's '.'. Only an empty cell counts; a
+    // non-empty value that is not a positive number, or a missing cell, is refused.
+    if (cells[iValue] === '') continue;
     const value = Number(cells[iValue]);
-    if (!isTradingDate(date) || !(value > 0)) throw new Error(`ECB: unreadable row "${row}"`);
+    if (!(value > 0)) throw new Error(`ECB: unreadable row "${row}"`);
     const had = out.get(date);
     if (had !== undefined && had !== value)
       throw new Error(`ECB: two rates for ${currency} on ${date}`);

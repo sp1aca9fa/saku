@@ -204,6 +204,18 @@ describe('vintages', () => {
     expect(pit.asOf('2026-01-05', '2026-01-06T05:00:00.000Z')!.value).toBe(3.61);
   });
 
+  it('a series value without a publication time is known from its fetch, never earlier', async () => {
+    const db = await testDb();
+    const points = [{ date: '2026-01-02', value: 5001.25 }];
+    const fetchedAt = '2026-01-07T01:00:00.000Z';
+    expect(await storeSeries(db, { series: 'S', source: 'x', points, fetchedAt })).toBe(1);
+    const rows = await db.select().from(series);
+    expect(rows.map((r) => [r.publishedAt, r.knownAt])).toEqual([[null, fetchedAt]]);
+    const pit = await seriesPointInTime(db, 'S', 'x');
+    expect(pit.asOf('2026-01-02', '2026-01-07T00:59:59.999Z')).toBeUndefined();
+    expect(pit.asOf('2026-01-02', fetchedAt)!.value).toBe(5001.25);
+  });
+
   it('without a publication time, a changed value is a new row known from its fetch', async () => {
     const db = await testDb();
     const rate = (r: number) => [{ pair: 'USDXXX', date: '2026-01-02', rate: r }];

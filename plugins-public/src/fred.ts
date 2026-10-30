@@ -2,13 +2,14 @@
 // exchange rates as a secondary FX source. Every vintage is fetched (ALFRED real-time periods),
 // so a past run's view can be reproduced. https://fred.stlouisfed.org/docs/api/fred/
 import { isTradingDate, zonedInstant } from '@saku/core';
-import type {
-  FxRate,
-  FxSource,
-  PluginContext,
-  PluginInfo,
-  SeriesPoint,
-  SeriesSource,
+import {
+  type FxRate,
+  type FxSource,
+  HttpError,
+  type PluginContext,
+  type PluginInfo,
+  type SeriesPoint,
+  type SeriesSource,
 } from '@saku/plugin-sdk';
 import { z } from 'zod';
 
@@ -99,12 +100,26 @@ async function vintageDates(id: string, ctx: PluginContext): Promise<string[]> {
   }
 }
 
-/** All rows of one real-time window (paged), including missing values. */
+/**
+ * FRED's answer for a series it serves without vintages (e.g. `SP500`, licensed from S&P Dow
+ * Jones Indices): HTTP 400 "The series does not exist in ALFRED but may exist in FRED. Try
+ * setting realtime_start and realtime_end to today's date or removing the realtime_start and
+ * realtime_end variables." Matched by this message, never by the status alone: any other 400
+ * still fails the series.
+ */
+const NOT_IN_ALFRED = /series does not exist in ALFRED/i;
+const notInAlfred = (e: unknown): boolean =>
+  e instanceof HttpError && e.status === 400 && NOT_IN_ALFRED.test(e.detail ?? '');
+
+/**
+ * All rows of one real-time window (paged), including missing values. Without a window, FRED's
+ * default real-time period applies (today: the current values only).
+ */
 async function windowRows(
   id: string,
   from: string,
   to: string,
-  realtime: { start: string; end: string },
+  realtime: { start: string; end: string } | null,
   ctx: PluginContext,
 ): Promise<Row[]> {
   const out: Row[] = [];
@@ -112,7 +127,7 @@ async function windowRows(
     const url =
       `${API}/observations?series_id=${encodeURIComponent(id)}&api_key=${ctx.apiKey}` +
       `&file_type=json&observation_start=${from}&observation_end=${to}` +
-      `&realtime_start=${realtime.start}&realtime_end=${realtime.end}` +
+      (realtime ? `&realtime_start=${realtime.start}&realtime_end=${realtime.end}` : '') +
       `&limit=${PAGE}&offset=${offset}`;
     const page = Observations.parse(await ctx.http.json(url));
     for (const o of page.observations) {
@@ -156,8 +171,20 @@ function sameValue(a: string, b: string): boolean {
  * window starts on a vintage date by construction). A row that starts before its window without
  * matching such a row, or lies outside its window, is refused.
  */
-async function observations(id: string, from: string, to: string, ctx: PluginContext) {
-  const vintages = await vintageDates(id, ctx);
+async function observations(
+  id: string,
+  from: string,
+  to: string,
+  ctx: PluginContext,
+): Promise<SeriesPoint[]> {
+  let vintages: string[];
+  try {
+    vintages = await vintageDates(id, ctx);
+  } catch (e) {
+    if (!notInAlfred(e)) throw e;
+    ctx.log.info(`FRED ${id}: no vintages in ALFRED; current values only, known from the fetch`);
+    return currentValues(id, from, to, ctx);
+  }
   const windows: { start: string; end: string }[] = [];
   for (let i = 0; i < Math.max(1, vintages.length); i += FRED_VINTAGES_PER_WINDOW) {
     const next = vintages[i + FRED_VINTAGES_PER_WINDOW];
@@ -221,6 +248,38 @@ async function observations(id: string, from: string, to: string, ctx: PluginCon
       value,
       publishedAt: zonedInstant(o.realtime_start, '18:00', 'America/New_York'),
     });
+  }
+  return out;
+}
+
+/**
+ * The current values of a series FRED keeps no vintages for (see NOT_IN_ALFRED), missing values
+ * ('.') left out. Rule: these points carry no `publishedAt`. FRED's real-time period here is the
+ * request's own day (its default), the same for every row, so it says when we asked, not when the
+ * value was published. Without `publishedAt`, storage sets `known_at` to the fetch time
+ * (`storeSeries` in packages/db/src/market.ts; requirements 04, point-in-time reads through
+ * `asOf`): a value counts as known when we first saw it, never earlier, so no read before the
+ * fetch can use it (no look-ahead). A later fetch stores a row only when the value changed, at
+ * its own fetch time (a revision, never an edit). One row per date is expected; a second is
+ * refused (it would be two values with the same knowledge time).
+ */
+async function currentValues(
+  id: string,
+  from: string,
+  to: string,
+  ctx: PluginContext,
+): Promise<SeriesPoint[]> {
+  const out: SeriesPoint[] = [];
+  let previous: string | undefined;
+  for (const o of await windowRows(id, from, to, null, ctx)) {
+    if (previous !== undefined && o.date <= previous) {
+      throw new Error(`FRED ${id}: repeated or unordered date in current values ${o.date}`);
+    }
+    previous = o.date;
+    if (o.value === '.') continue;
+    const value = Number(o.value);
+    if (!Number.isFinite(value)) throw new Error(`FRED ${id}: unreadable value "${o.value}"`);
+    out.push({ date: o.date, value });
   }
   return out;
 }

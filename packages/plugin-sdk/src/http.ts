@@ -185,7 +185,9 @@ export class PoliteHttp {
         throw new Error(`request ${reason} after ${attempt + 1} tries: ${shown}`);
       }
       if (res.status === 403 || res.status === 429) {
-        this.blocked = `HTTP ${res.status} for ${shown}`;
+        // A 403 says why it refused (e.g. a plan limit), masked and cut like any 4xx excerpt.
+        const detail = res.status === 403 ? await this.excerpt(res, url) : undefined;
+        this.blocked = `HTTP ${res.status} for ${shown}${detail ? `: ${detail}` : ''}`;
         throw new BlockedError(this.blocked);
       }
       if (res.status >= 500 && attempt < this.o.retries) {

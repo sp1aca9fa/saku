@@ -20,7 +20,7 @@ A source that refuses (403, 429, a challenge page) or would pass 80% of a declar
 | Data | Primary | Secondary | Notes |
 |---|---|---|---|
 | Daily bars | Tiingo | Alpaca (from 2016), Massive (2 years), Yahoo (private, full history) | Roles seeded from the plug-ins' suggestions once per data kind; the admin decides |
-| Series | FRED (`DTB3`, `SP500`) | | Every vintage kept (ALFRED real-time periods; fetched in windows of at most 1000 vintages, see `docs/data-spike.md`) |
+| Series | FRED (`DTB3`, `SP500`) | | Every vintage kept (ALFRED real-time periods; fetched in windows of at most 1000 vintages, see `docs/data-spike.md`). A series FRED keeps no vintages for (`SP500`): current values, known from the fetch time |
 | FX | ECB (USD/base as a cross of two euro rates) | FRED H.10, Yahoo | Valuation rates; tax rates come with C1 |
 | Calendars | NYSE, Federal Reserve, TARGET | | Versioned tables from the `calendars` plug-in |
 

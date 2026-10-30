@@ -174,6 +174,26 @@ describe('why a request was refused', () => {
     );
   });
 
+  it('says why a 403 stopped the source, masked, also on later requests', async () => {
+    const body = JSON.stringify({ message: 'plan refuses this; key SECRET9 ?apikey=SECRET9' });
+    const { http, calls } = fakeClient([() => new Response(body, { status: 403 }), ok], {
+      secrets: ['SECRET9'],
+    });
+    const why = 'plan refuses this; key *** ?apikey=***';
+    expect(await refused(http, 'https://example.test/a?apikey=SECRET9')).toBe(
+      `HTTP 403 for https://example.test/a?apikey=***: ${why}`,
+    );
+    expect(await refused(http, 'https://example.test/b')).toBe(
+      `stopped for this run: HTTP 403 for https://example.test/a?apikey=***: ${why}`,
+    );
+    expect(calls).toHaveLength(1);
+    // A 429 still names only the request.
+    const limited = fakeClient([() => new Response('slow down', { status: 429 })]);
+    expect(await refused(limited.http, 'https://example.test/a')).toBe(
+      'HTTP 429 for https://example.test/a',
+    );
+  });
+
   it('adds no excerpt to a server error', async () => {
     const { http } = fakeClient([() => new Response('stack trace', { status: 500 })], {
       retries: 0,

@@ -326,6 +326,110 @@ describe('FRED', () => {
     );
   });
 
+  describe('a series without vintages in ALFRED (SP500)', () => {
+    const refused = () =>
+      new Response(JSON.stringify(fixture('fred-not-in-alfred.json')), {
+        status: 400,
+      });
+
+    it('fetches the current values, with no publication time claimed', async () => {
+      const ctx = fixtureContext(
+        fredRoutes(() => fixture('fred-sp500-current.json'), refused),
+        { apiKey: 'abc' },
+      );
+      const points = await fredSeries.fetchSeries('SP500', '2026-01-01', '2026-01-06', ctx);
+      // FRED's real-time period is the fetch day for every row: not a publication time, so no
+      // publishedAt (stored as known from the fetch, never earlier); '.' left out.
+      expect(points).toEqual([
+        { date: '2026-01-02', value: 5001.25 },
+        { date: '2026-01-05', value: 5010.5 },
+        { date: '2026-01-06', value: 4998 },
+      ]);
+      expect(points.every((p) => !('publishedAt' in p))).toBe(true);
+      expect(ctx.requested).toHaveLength(2);
+      const url = new URL(ctx.requested[1]!);
+      expect(url.pathname).toBe('/fred/series/observations');
+      expect(url.searchParams.get('series_id')).toBe('SP500');
+      expect(url.searchParams.get('observation_start')).toBe('2026-01-01');
+      expect(url.searchParams.get('observation_end')).toBe('2026-01-06');
+      expect(url.searchParams.has('realtime_start')).toBe(false);
+      expect(url.searchParams.has('realtime_end')).toBe(false);
+    });
+
+    it('gives FX rates without a publication time too', async () => {
+      const ctx = fixtureContext(
+        fredRoutes(() => fixture('fred-sp500-current.json'), refused),
+        { apiKey: 'abc' },
+      );
+      const rates = await fredFx.fetchRates('USDJPY', '2026-01-01', '2026-01-06', ctx);
+      expect(rates[0]).toEqual({ pair: 'USDJPY', date: '2026-01-02', rate: 5001.25 });
+    });
+
+    it('still fails on any other 400 from the vintage dates', async () => {
+      const other = () => new Response(JSON.stringify(fixture('fred-error.json')), { status: 400 });
+      const ctx = fixtureContext(
+        fredRoutes(() => fixture('fred-sp500-current.json'), other),
+        { apiKey: 'abc' },
+      );
+      await expect(
+        fredSeries.fetchSeries('SP500', '2026-01-01', '2026-01-06', ctx),
+      ).rejects.toThrow(/^HTTP 400 for .*vintagedates.*realtime_start is not valid/);
+      expect(ctx.requested).toHaveLength(1);
+      // The same message with another status is not the ALFRED case either.
+      const wrongStatus = fixtureContext(
+        fredRoutes(
+          () => fixture('fred-sp500-current.json'),
+          () => new Response(JSON.stringify(fixture('fred-not-in-alfred.json')), { status: 404 }),
+        ),
+        { apiKey: 'abc' },
+      );
+      await expect(
+        fredSeries.fetchSeries('SP500', '2026-01-01', '2026-01-06', wrongStatus),
+      ).rejects.toThrow(/^HTTP 404/);
+    });
+
+    it('refuses a repeated date or a bad value in the current values', async () => {
+      const answer = fixture('fred-sp500-current.json') as {
+        observations: { date: string; value: string }[];
+      };
+      const withRows = (rows: { date: string; value: string }[]) =>
+        fixtureContext(
+          fredRoutes(
+            () => ({
+              ...answer,
+              count: rows.length,
+              observations: rows.map((r) => ({
+                realtime_start: '2026-01-07',
+                realtime_end: '2026-01-07',
+                ...r,
+              })),
+            }),
+            refused,
+          ),
+          { apiKey: 'abc' },
+        );
+      await expect(
+        fredSeries.fetchSeries(
+          'SP500',
+          '2026-01-01',
+          '2026-01-06',
+          withRows([
+            { date: '2026-01-02', value: '5001.25' },
+            { date: '2026-01-02', value: '5002.00' },
+          ]),
+        ),
+      ).rejects.toThrow(/repeated or unordered date/);
+      await expect(
+        fredSeries.fetchSeries(
+          'SP500',
+          '2026-01-01',
+          '2026-01-06',
+          withRows([{ date: '2026-01-02', value: 'n/a' }]),
+        ),
+      ).rejects.toThrow(/unreadable value/);
+    });
+  });
+
   it('says why FRED refused a request, without the key', async () => {
     const key = 'abcd1234efgh';
     const error = fixture('fred-error.json') as { error_message: string };
@@ -397,6 +501,66 @@ describe('ECB', () => {
         fixtureContext(() => noYen),
       ),
     ).rejects.toThrow(/one currency/);
+  });
+
+  it('skips a day with an empty rate and refuses a value that is not a positive number', async () => {
+    const header = csv.split('\n')[0]!;
+    const rows = (usd: string) =>
+      [
+        header,
+        'EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,1999-12-30,1.0000',
+        // Not on the last line, where the answer's trailing whitespace is trimmed.
+        `EXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,1999-12-31,${usd}`,
+        'EXR.D.JPY.EUR.SP00.A,D,JPY,EUR,SP00,A,1999-12-30,100.00',
+        'EXR.D.JPY.EUR.SP00.A,D,JPY,EUR,SP00,A,1999-12-31,',
+      ].join('\n');
+    // Both currencies empty on 1999-12-31: no observation that day, not a rate of 0.
+    const rates = await ecb.fetchRates(
+      'USDJPY',
+      '1999-12-30',
+      '1999-12-31',
+      fixtureContext(() => rows('')),
+    );
+    expect(rates.map((r) => [r.date, r.rate])).toEqual([['1999-12-30', 100]]);
+    // Only one currency empty: the day is half missing, refused as before.
+    await expect(
+      ecb.fetchRates(
+        'USDJPY',
+        '1999-12-30',
+        '1999-12-31',
+        fixtureContext(() => rows('1.0100')),
+      ),
+    ).rejects.toThrow(/one currency/);
+    for (const bad of ['0', '-1.0', 'NaN', ' ', 'x']) {
+      await expect(
+        ecb.fetchRates(
+          'USDJPY',
+          '1999-12-30',
+          '1999-12-31',
+          fixtureContext(() => rows(bad)),
+        ),
+      ).rejects.toThrow(/unreadable row/);
+    }
+    // A row cut before its value column (no cell at all) is refused, not skipped.
+    const cut = `${header}\nEXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,1999-12-31`;
+    await expect(
+      ecb.fetchRates(
+        'EURUSD',
+        '1999-12-30',
+        '1999-12-31',
+        fixtureContext(() => cut),
+      ),
+    ).rejects.toThrow(/unreadable row/);
+    // An empty value with an unreadable date is still refused.
+    const badDate = `${header}\nEXR.D.USD.EUR.SP00.A,D,USD,EUR,SP00,A,1999-13-31,`;
+    await expect(
+      ecb.fetchRates(
+        'EURUSD',
+        '1999-12-30',
+        '1999-12-31',
+        fixtureContext(() => badDate),
+      ),
+    ).rejects.toThrow(/unreadable row/);
   });
 
   describe('long ranges', () => {

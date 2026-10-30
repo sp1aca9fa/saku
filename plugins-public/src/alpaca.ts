@@ -30,6 +30,26 @@ const ActionsPage = z.object({
   next_page_token: z.string().nullable(),
 });
 
+/**
+ * How far before the request a bars query may end. The free (Basic) plan refuses SIP data of the
+ * latest 15 minutes (https://docs.alpaca.markets/docs/about-market-data-api, "Historical data
+ * limitation: latest 15 minutes"; HTTP 403 "subscription does not permit querying recent SIP
+ * data"); one more minute of margin.
+ */
+export const ALPACA_RECENT_MS = 16 * 60_000;
+
+/**
+ * The bars query's `end` (inclusive; RFC 3339 or `YYYY-MM-DD` per the stock bars reference). A
+ * date before today in New York stays a date. Today or later (a date end means the whole day,
+ * which reaches into the last 15 minutes) is capped at `now` minus ALPACA_RECENT_MS as an RFC 3339
+ * instant; a bar not yet complete then is fetched again by a later run, whose window covers the
+ * date. `now` is the run's clock, taken before the request, so the cap is at least that far back.
+ */
+export function alpacaBarsEnd(to: string, now: Date): string {
+  if (to < tradingDateOf(now)) return to;
+  return new Date(now.getTime() - ALPACA_RECENT_MS).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
 const auth = (ctx: PluginContext) => ({
   'APCA-API-KEY-ID': ctx.keys?.[KEY_ID] ?? '',
   'APCA-API-SECRET-KEY': ctx.keys?.[SECRET] ?? '',
@@ -73,8 +93,12 @@ export const alpaca: BarSource = {
 
   async fetchBars(ticker, from, to, ctx) {
     const symbol = encodeURIComponent(ticker);
+    const end = alpacaBarsEnd(to, ctx.now);
+    // Capped before `from` even starts (a run just after midnight asking for today only):
+    // nothing can be asked for yet.
+    if (end.length > 10 && tradingDateOf(Date.parse(end)) < from) return [];
     const barPages = await pages(
-      `${BASE}/v2/stocks/bars?symbols=${symbol}&timeframe=1Day&start=${from}&end=${to}&adjustment=raw&feed=sip&limit=10000`,
+      `${BASE}/v2/stocks/bars?symbols=${symbol}&timeframe=1Day&start=${from}&end=${encodeURIComponent(end)}&adjustment=raw&feed=sip&limit=10000`,
       BarsPage,
       ctx,
     );
@@ -95,6 +119,8 @@ export const alpaca: BarSource = {
       });
     }
 
+    // Corporate actions are not SIP market data (no 15-minute limit) and take dates only
+    // (`YYYY-MM-DD`, per the corporate actions reference): `to` as asked.
     const actions = await pages(
       `${BASE}/v1/corporate-actions?symbols=${symbol}&types=cash_dividend,forward_split,reverse_split&start=${from}&end=${to}&limit=1000`,
       ActionsPage,
