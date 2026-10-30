@@ -7,7 +7,8 @@
 // Quota guard (requirements 04): every source's client counts its provider's requests across runs
 // (the database's `provider_usage`, unless the context already has a store), on the run's clock
 // when one is injected. A bar, meta or issuer fetch names its symbol first, so a provider's
-// symbols-per-month limit holds; a fetch it refuses stops the source for the run like a block.
+// symbols-per-month limit holds: a new symbol it refuses fails that item only (symbols already
+// counted are still fetched); a request window it cannot wait out stops the source like a block.
 import type { TradingDate } from '@saku/core';
 import {
   type Db,
@@ -21,7 +22,13 @@ import {
   storeSeries,
 } from '@saku/db';
 import type { Sessions } from '@saku/data';
-import { BlockedError, type PoliteHttp, QuotaError, type UsageStore } from '../http';
+import {
+  BlockedError,
+  type PoliteHttp,
+  QuotaError,
+  SymbolQuotaError,
+  type UsageStore,
+} from '../http';
 import { type LoadedPlugins, providerUsageStore } from '../registry';
 import type { IssuerSource, Logger, PluginContext, PluginInfo } from '../types';
 import type { IssuerAvailability } from './verify';
@@ -105,7 +112,10 @@ function noteValues(r: SourceReport, stored: StoredValues): void {
   for (const { item, date } of stored.revised) (r.revisedValues[item] ??= []).push(date);
 }
 
-/** Runs `each` per item; a block or quota stop ends the source, other errors are per item. */
+/**
+ * Runs `each` per item; a block or a request-window quota stop ends the source, other errors
+ * (a refused new symbol included) are per item.
+ */
 async function perItem(
   r: SourceReport,
   items: string[],
@@ -117,7 +127,9 @@ async function perItem(
       await each(item);
       r.ok.push(item);
     } catch (e) {
-      if (e instanceof BlockedError || e instanceof QuotaError) {
+      const stops =
+        e instanceof BlockedError || (e instanceof QuotaError && !(e instanceof SymbolQuotaError));
+      if (stops) {
         r.stopped = message(e);
         log.warn(`${r.source} stopped for this run`, { reason: r.stopped });
         return;

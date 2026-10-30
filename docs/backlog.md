@@ -14,3 +14,5 @@
 | 2026-10-30 | Compare holdings order-insensitively when counting switches (a reorder with no trade counts today) | Claude (review) | Evidence | new | Core change; matters for testfol parity |
 | 2026-10-30 | testfol parity: check the cash rate series' health in the case window | Claude (review) | Reliability | new | Leveraged and cash cases depend on it |
 | 2026-10-30 | Plug-ins declare a calendar per series or pair (TARGET for ECB, Fed for DTB3), so expected gaps are exact | Claude | Reliability | new | NYSE calendar used meanwhile |
+| 2026-10-30 | Plug-ins declare a provider id (default: the key), so two plug-ins for one provider share its quota | Claude (review) | Reliability | new | Each loaded key is a different provider today |
+| 2026-10-30 | Quota guard for bandwidth limits (e.g. 1 GB per month) | Claude | Reliability | new | Not declared by any plug-in yet |

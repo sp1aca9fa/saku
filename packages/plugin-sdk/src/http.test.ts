@@ -7,6 +7,7 @@ import {
   type PoliteHttpOptions,
   QuotaError,
   SYMBOL_WINDOW_MS,
+  SymbolQuotaError,
   type UsageStore,
   WINDOWS,
   redactUrl,
@@ -102,8 +103,16 @@ describe('PoliteHttp', () => {
   });
 
   it('counts earlier requests and gives up when the wait is too long', async () => {
-    const history = Array.from({ length: 40 }, (_, k) => 1_000_000 - 1000 * (k + 1));
-    const { http, calls } = fakeClient([ok], { limits: { perHour: 50 }, history });
+    const requests = Array.from({ length: 40 }, (_, k) => 1_000_000 - 1000 * (k + 40));
+    const store: UsageStore = {
+      load: async () => ({ requests, symbols: new Map() }),
+      record: async () => {},
+    };
+    const { http, calls } = fakeClient([ok], {
+      limits: { perHour: 50 },
+      usage: { provider: 'p', store },
+      wallClock: () => 0,
+    });
     await expect(http.json('https://example.test/a')).rejects.toBeInstanceOf(QuotaError);
     expect(calls).toHaveLength(0);
   });
@@ -260,6 +269,7 @@ describe('PoliteHttp quota guard', () => {
       }) as typeof fetch,
       maxWaitMs: 1000,
       usage: { provider: 'p', store },
+      wallClock: () => 0,
       ...options,
     });
     return { http, calls };
@@ -290,6 +300,7 @@ describe('PoliteHttp quota guard', () => {
         at.now += ms;
       },
       usage: { provider: 'p', store },
+      wallClock: () => 0,
       fetchImpl: (async () => {
         // Recorded before the request left: what was stored already includes this one.
         seen = rows.length;
@@ -335,7 +346,7 @@ describe('PoliteHttp quota guard', () => {
     await expect(first.http.forSymbol('NEW')).rejects.toThrow(/400 of 500 symbols/);
     at.now += 60_000;
     const second = guarded(store, at, { limits });
-    await expect(second.http.forSymbol('NEW')).rejects.toBeInstanceOf(QuotaError);
+    await expect(second.http.forSymbol('NEW')).rejects.toBeInstanceOf(SymbolQuotaError);
     await second.http.forSymbol('S7');
     await second.http.json('https://example.test/again');
     expect(second.calls).toHaveLength(1);
@@ -353,7 +364,7 @@ describe('PoliteHttp quota guard', () => {
     const { http } = guarded(store, at, { limits: { symbolsPerMonth: 1 } });
     await http.forSymbol('AAA');
     await http.json('https://example.test/a');
-    await expect(http.forSymbol('BBB')).rejects.toBeInstanceOf(QuotaError);
+    await expect(http.forSymbol('BBB')).rejects.toBeInstanceOf(SymbolQuotaError);
     await http.json('https://example.test/series');
     expect(rows.map((r) => r.symbol)).toEqual(['AAA', null]);
   });
@@ -375,6 +386,24 @@ describe('PoliteHttp quota guard', () => {
     fresh.guard({ provider: 'p', store });
     expect(fresh.guarded).toBe(true);
     expect(() => fresh.guard({ provider: 'p', store })).toThrow(/already attached/);
+  });
+
+  it('records at the system time when the injected clock is frozen or behind', async () => {
+    const { store, rows } = memoryStore();
+    const wall = { now: 5_000_000 };
+    const frozen = { now: 1_000_000 };
+    const { http } = guarded(store, frozen, { wallClock: () => wall.now });
+    await http.json('https://example.test/a');
+    wall.now += 10_000;
+    await http.json('https://example.test/b');
+    // Stored never earlier than sent; the windows still read the injected clock (in memory).
+    expect(rows.map((r) => r.at)).toEqual([5_000_000, 5_010_000]);
+    expect(Math.max(...http.sent)).toBeLessThan(5_000_000);
+    // A clock ahead of the system one is kept: the later of the two.
+    const ahead = { now: 9_000_000 };
+    const late = guarded(store, ahead, { wallClock: () => wall.now });
+    await late.http.json('https://example.test/c');
+    expect(rows.at(-1)!.at).toBe(9_000_000);
   });
 
   it('the database store keeps the windows the guard needs', () => {

@@ -5,8 +5,9 @@
 // Quota guard (requirements 04 "Quota guard"): with a usage store attached, the limits hold across
 // runs, not only inside one. The provider's earlier requests (last day) and symbols (last 31 days)
 // are loaded before the first request, each request is recorded as it is sent (a run that crashes
-// keeps what it sent), and a new symbol that would pass 80% of `symbolsPerMonth` is refused.
-// History that is unknown (the store fails) sends nothing: the source stops for the run.
+// keeps what it sent), and a new symbol that would pass 80% of `symbolsPerMonth` is refused
+// (`SymbolQuotaError`: that symbol fails, symbols already counted are still fetched). History
+// that is unknown (the store fails) sends nothing: the source stops for the run.
 import type { ProviderLimits } from './types';
 
 /** The provider refused us (403, 429, a challenge page): the source stops for this run. */
@@ -22,6 +23,17 @@ export class QuotaError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'QuotaError';
+  }
+}
+
+/**
+ * A new symbol would pass 80% of the provider's symbols per 31 days. Only that symbol is refused:
+ * symbols already counted can still be fetched, so the caller fails the item, not the source.
+ */
+export class SymbolQuotaError extends QuotaError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SymbolQuotaError';
   }
 }
 
@@ -88,8 +100,6 @@ export function redactUrl(url: string): string {
 
 export interface PoliteHttpOptions {
   limits?: ProviderLimits;
-  /** Times (ms since epoch) of this provider's earlier requests, exact (kept in memory only). */
-  history?: number[];
   /** The quota guard's store and the provider key its requests are counted under. */
   usage?: { provider: string; store: UsageStore };
   /** Pause between any two requests. */
@@ -103,14 +113,20 @@ export interface PoliteHttpOptions {
   secrets?: string[];
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /** The clock the windows are read on (a run's injected clock, see `guard`). */
   clock?: () => number;
+  /**
+   * The system clock. A request is recorded at the later of the two clocks, so an injected clock
+   * that is frozen or behind never records a request earlier than it was sent. Tests replace it.
+   */
+  wallClock?: () => number;
 }
 
 export class PoliteHttp {
-  /** Request times in this run plus the history passed in or loaded, oldest first. */
-  readonly sent: number[];
+  /** Request times in this run plus the stored history, oldest first. */
+  readonly sent: number[] = [];
   private blocked: string | null = null;
-  private readonly o: Required<Omit<PoliteHttpOptions, 'history' | 'usage'>>;
+  private readonly o: Required<Omit<PoliteHttpOptions, 'usage'>>;
   private readonly secrets: string[];
   private usage: { provider: string; store: UsageStore } | undefined;
   /** The stored history, loaded once before the first request or symbol check. */
@@ -121,7 +137,6 @@ export class PoliteHttp {
   private symbol: string | null = null;
 
   constructor(options: PoliteHttpOptions = {}) {
-    this.sent = [...(options.history ?? [])].sort((a, b) => a - b);
     this.usage = options.usage;
     this.secrets = (options.secrets ?? []).filter((s) => s.length >= 4);
     this.o = {
@@ -135,6 +150,7 @@ export class PoliteHttp {
       fetchImpl: fetch,
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       clock: Date.now,
+      wallClock: Date.now,
       ...options,
     };
   }
@@ -160,8 +176,8 @@ export class PoliteHttp {
   /**
    * The symbol the following requests are for (a bar, meta or corporate-action fetch), recorded
    * with each; null for requests about no symbol. With a `symbolsPerMonth` limit, a symbol not
-   * yet counted in the last 31 days is refused (QuotaError) when it would pass 80% of the limit;
-   * a symbol already counted is always allowed.
+   * yet counted in the last 31 days is refused (SymbolQuotaError) when it would pass 80% of the
+   * limit; a symbol already counted is always allowed.
    */
   async forSymbol(symbol: string | null): Promise<void> {
     this.symbol = null;
@@ -173,7 +189,7 @@ export class PoliteHttp {
       const since = this.o.clock() - SYMBOL_WINDOW_MS;
       const counted = [...this.symbols].filter(([, at]) => at > since).map(([s]) => s);
       if (!counted.includes(symbol) && counted.length >= allowed) {
-        throw new QuotaError(
+        throw new SymbolQuotaError(
           `${counted.length} of ${limit} symbols per 31 days used (80% cap); ${symbol} is new`,
         );
       }
@@ -203,11 +219,16 @@ export class PoliteHttp {
     if ((this.symbols.get(symbol) ?? -Infinity) < at) this.symbols.set(symbol, at);
   }
 
-  /** Records a request about to be sent; one that cannot be recorded is not sent. */
+  /**
+   * Records a request about to be sent; one that cannot be recorded is not sent. Stored at the
+   * later of the run's clock and the system clock (never earlier than sent); kept in memory at
+   * the run's clock, which the windows are read on.
+   */
   private async note(at: number): Promise<void> {
     if (this.usage) {
       try {
-        await this.usage.store.record(this.usage.provider, at, this.symbol);
+        const stored = Math.max(at, this.o.wallClock());
+        await this.usage.store.record(this.usage.provider, stored, this.symbol);
       } catch (e) {
         throw new QuotaError(`request of ${this.usage.provider} not recorded: ${message(e)}`);
       }

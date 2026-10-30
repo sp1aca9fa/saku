@@ -1,7 +1,9 @@
 // Requests each provider received, kept across runs for the quota guard (requirements 04 "Quota
 // guard": never above 80% of any declared limit). Stored in `provider_usage` as buckets, never as
 // URLs, keys or bodies: per provider a `minute` row (UTC minute start, request count) and a `day`
-// row (UTC day, request count, distinct symbols requested that day).
+// row (UTC day, request count, distinct symbols requested that day). The request windows (minute,
+// hour, day) are read from the minute rows only; a day row's request count is informational (for
+// an admin view), never what a limit is checked against.
 //
 // Buckets lose exact times, so reads are conservative: each request counts as sent at the last
 // millisecond of its bucket (never earlier than it was sent), so a window never sees fewer

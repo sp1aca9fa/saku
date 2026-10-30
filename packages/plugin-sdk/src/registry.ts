@@ -161,17 +161,19 @@ export function pluginContext(
  * Contexts for notifiers in one run: one client per channel, so the service's pace and limits
  * apply across that channel's messages and a channel the service refuses (403, 429) stops only
  * itself; no automatic retry, since a resent POST could deliver an alert twice (what failed is
- * tried again at the next check).
+ * tried again at the next check). `usage`: the quota guard's store, so the service's limits hold
+ * across runs (counted under the notifier's key, all its channels together).
  */
 export function notifierContexts(
   log: Logger,
+  usage?: UsageStore,
 ): (notifier: Notifier, channelId: string) => PluginContext {
   const made = new Map<string, PluginContext>();
   return (notifier, channelId) => {
     const key = `${notifier.info.key} ${channelId}`;
     let ctx = made.get(key);
     if (!ctx) {
-      ctx = pluginContext(notifier.info, log, { http: { retries: 0 } });
+      ctx = pluginContext(notifier.info, log, { http: { retries: 0 }, ...(usage && { usage }) });
       made.set(key, ctx);
     }
     return ctx;

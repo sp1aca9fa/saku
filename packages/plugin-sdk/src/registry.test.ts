@@ -11,6 +11,7 @@ import {
   savePluginInfos,
   validateInfos,
 } from './registry';
+import { QuotaError, type UsageStore } from './http';
 import type { PluginInfo } from './types';
 
 const info: PluginInfo = {
@@ -87,5 +88,30 @@ describe('notifierContexts', () => {
     expect(contexts(notifier, 'c1')).toBe(a);
     // A channel the service refuses blocks only its own client.
     expect(contexts(notifier, 'c2').http).not.toBe(a.http);
+    expect(a.http.guarded).toBe(false);
+  });
+
+  it('with a usage store, every channel counts the service’s requests across runs', async () => {
+    const notifier = {
+      info: { key: 'fake', kind: 'notifier' as const, name: 'Fake', termsUrl: 'x', maxLength: 10 },
+      validTarget: () => true,
+      send: async () => {},
+    };
+    const asked: string[] = [];
+    const store: UsageStore = {
+      load: async (provider) => {
+        asked.push(provider);
+        throw new Error('database locked');
+      },
+      record: async () => {},
+    };
+    const contexts = notifierContexts({ info() {}, warn() {} }, store);
+    for (const channel of ['c1', 'c2']) {
+      const ctx = contexts(notifier, channel);
+      expect(ctx.http.guarded).toBe(true);
+      // Unknown usage: nothing is sent (the store is read before any request).
+      await expect(ctx.http.text('https://example.test/hook')).rejects.toBeInstanceOf(QuotaError);
+    }
+    expect(asked).toEqual(['fake', 'fake']);
   });
 });

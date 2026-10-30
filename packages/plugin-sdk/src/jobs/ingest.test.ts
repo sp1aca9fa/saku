@@ -1,5 +1,12 @@
 import type { RawBar } from '@saku/core';
-import { issuerRecordsOf, schema, setSetting, symbolId, upsertSymbols } from '@saku/db';
+import {
+  issuerRecordsOf,
+  recordProviderRequest,
+  schema,
+  setSetting,
+  symbolId,
+  upsertSymbols,
+} from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { Sessions } from '@saku/data';
 import { describe, expect, it } from 'vitest';
@@ -233,6 +240,8 @@ describe('ingest: quota guard across runs', () => {
       http: new PoliteHttp({
         minDelayMs: 0,
         sleep: async () => {},
+        // Recorded on the run's clock (these runs are dated before the test's system time).
+        wallClock: () => 0,
         limits,
         fetchImpl: (async (url: string) => {
           calls.push(url);
@@ -276,25 +285,24 @@ describe('ingest: quota guard across runs', () => {
     expect(calls).toHaveLength(2);
   });
 
-  it('a new symbol over 80% of symbolsPerMonth stops the source; a counted one is fetched', async () => {
+  it('a new symbol over 80% of symbolsPerMonth fails that item; a counted one after it is fetched', async () => {
     const db = await setup();
-    // 80% of 2 is 1 symbol in 31 days.
+    // BBB was asked for in an earlier run; 80% of 2 is 1 symbol in 31 days, so AAA is refused.
+    await recordProviderRequest(db, {
+      provider: 'q',
+      at: Date.parse('2026-01-10T12:00:00Z'),
+      symbol: 'BBB',
+    });
     const { src, calls, context } = httpSource({ symbolsPerMonth: 2 });
-    const plugins = { ...emptyPlugins(), bars: [src] };
-    const r = await ingest(db, plugins, {
-      ...options('daily'),
-      context,
-      now: at('2026-01-17T01:00:00Z'),
-    });
-    expect(r[0]).toMatchObject({ ok: ['AAA'] });
-    expect(r[0]!.stopped).toMatch(/1 of 2 symbols per 31 days/);
-    const next = await ingest(db, plugins, {
-      ...options('daily'),
-      context,
-      now: at('2026-01-18T01:00:00Z'),
-    });
-    expect(next[0]).toMatchObject({ ok: ['AAA'] });
-    expect(calls.map((u) => new URL(u).pathname)).toEqual(['/AAA', '/AAA']);
+    const r = await ingest(
+      db,
+      { ...emptyPlugins(), bars: [src] },
+      { ...options('daily'), context, now: at('2026-01-17T01:00:00Z') },
+    );
+    expect(r[0]).toMatchObject({ ok: ['BBB'], failed: [{ item: 'AAA' }] });
+    expect(r[0]!.failed[0]!.error).toMatch(/1 of 2 symbols per 31 days used .*AAA is new/);
+    expect(r[0]!.stopped).toBeUndefined();
+    expect(calls.map((u) => new URL(u).pathname)).toEqual(['/BBB']);
   });
 
   it('stores only provider buckets, counts and tickers (no URL or key)', async () => {

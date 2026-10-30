@@ -132,7 +132,7 @@ try {
       date: target,
       notifiers: plugins.notifiers,
       authSecret: process.env.AUTH_SECRET?.trim() ?? '',
-      context: notifierContexts(log),
+      context: notifierContexts(log, providerUsageStore(db)),
       log,
     },
     tsa: {

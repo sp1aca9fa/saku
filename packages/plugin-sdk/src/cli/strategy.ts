@@ -46,7 +46,7 @@ import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA, verifyToken } from '../jobs/anchor';
 import { recompute } from '../jobs/forward';
 import { codeVersion } from '../code-version';
-import { loadPlugins, notifierContexts } from '../registry';
+import { loadPlugins, notifierContexts, providerUsageStore } from '../registry';
 import { assertServerOnly } from '../server-only';
 
 assertServerOnly();
@@ -220,7 +220,11 @@ if (tool === 'strategy' && command === 'check') {
     const user = await getUserByUsername(db, flag('user')!);
     const t = translator(user?.language ?? (await getSetting(db, 'primary_language')) ?? 'en');
     const log = { info: () => {}, warn: () => {} };
-    await notifier.send(target, t('alerts.test'), notifierContexts(log)(notifier, channel.id));
+    await notifier.send(
+      target,
+      t('alerts.test'),
+      notifierContexts(log, providerUsageStore(db))(notifier, channel.id),
+    );
     console.log('Sent.');
   } else fail('pnpm channel add|list|disable|enable|test');
 } else if (tool === 'alert' && command === 'update-failed') {
@@ -230,7 +234,7 @@ if (tool === 'strategy' && command === 'check') {
     date: tradingDateOf(new Date()),
     notifiers,
     authSecret: process.env.AUTH_SECRET?.trim() ?? '',
-    context: notifierContexts(log),
+    context: notifierContexts(log, providerUsageStore(db)),
     log,
     from: flag('from') ?? fail('--from <commit>'),
     to: flag('to') ?? fail('--to <commit>'),
