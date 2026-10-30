@@ -6,7 +6,7 @@ import type { RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
 import { type Db, addChannel, createUser, schema, setSetting, upsertSymbols } from '@saku/db';
 import { testDb } from '@saku/db/testing';
-import { eq } from 'drizzle-orm';
+import { and, between, eq } from 'drizzle-orm';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { emptyPlugins } from '../registry';
 import type { BarSource } from '../types';
@@ -152,17 +152,20 @@ const options = (
   code: 'test',
   ...(parityDir && { parityDir }),
 });
-const plugins = (skip?: string) => ({
+const plugins = (skip?: string, cash = true) => ({
   ...emptyPlugins(),
   bars: [source('p', skip), source('s', skip)],
-  series: [cashRates(sessions, DATES, TARGET)],
+  series: cash ? [cashRates(sessions, DATES, TARGET)] : [],
 });
 
-/** A database with AAA's bars (two agreeing sources) and the cash rate, graded by a bootstrap. */
-async function seeded(skip?: string): Promise<Db> {
+/**
+ * A database with AAA's bars (two agreeing sources) and the cash rate (none: no series source
+ * declares one), graded by a bootstrap.
+ */
+async function seeded(skip?: string, cash = true): Promise<Db> {
   const db = await testDb();
   await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
-  await runJob(db, plugins(skip), options('bootstrap'));
+  await runJob(db, plugins(skip, cash), options('bootstrap'));
   return db;
 }
 
@@ -200,8 +203,10 @@ const validCase = (stats: Record<string, number>, extra: Record<string, unknown>
   stats,
   ...extra,
 });
-const run = (dir: string | undefined, on: Db = db) => parity(on, { dir, to: TARGET, sessions });
+const run = (dir: string | undefined, on: Db = db, seriesSessions = sessions) =>
+  parity(on, { dir, to: TARGET, sessions, seriesSessions });
 const STATS = { cagr: 0.1, maxDrawdown: -0.2, switches: 4 };
+const caseOf = (strategy: unknown) => ({ strategy, from: FROM, to: TARGET, stats: STATS });
 
 describe('parseCase', () => {
   it('accepts a same_close case with synthetic leverage', () => {
@@ -420,6 +425,110 @@ describe('parity on stored bars', () => {
     expect(missing!.message).toMatch(
       new RegExp(`AAA has 1 red, ungraded or missing days .* \\(first ${DATES[150]}\\)`),
     );
+  });
+
+  describe('the cash rate', () => {
+    // The fixture publishes each date's rate after the next session's close, so at a session's
+    // open (when the backtest reads it) the latest known value is two sessions old: the previous
+    // session's not yet published is the normal lag (green).
+    const leveraged = (stats = STATS) =>
+      validCase(stats, { strategy: alwaysIn({ holding: 'AAA?L=2' }) });
+    const fromIndex = DATES.indexOf(FROM);
+    /** Deletes the stored cash rates of `n` sessions in a row from DATES[at]. */
+    const dropCash = (on: Db, at: number, n: number) =>
+      on
+        .delete(schema.series)
+        .where(
+          and(
+            eq(schema.series.series, 'CASH'),
+            between(schema.series.date, DATES[at]!, DATES[at + n - 1]!),
+          ),
+        );
+
+    it('is green on the normal publication lag for a case holding cash or leverage', async () => {
+      const results = await run(
+        casesDir({ a_leveraged: leveraged(), b_switcher: caseOf(switcher) }),
+      );
+      for (const r of results) {
+        expect(r.message).not.toMatch(/cannot run|cash rate/);
+      }
+    });
+
+    it('a gap of 3 sessions is noted yellow; a gap of 8 refuses the case', async () => {
+      const own = await seeded();
+      const g = fromIndex + 50;
+      await dropCash(own, g, 3);
+      const dir = casesDir({ c: leveraged() });
+      const [yellow] = await run(dir, own);
+      // Read at the open of the session two after each missing one: 2, 3 and 4 business days old.
+      expect(yellow!.message).toMatch(
+        new RegExp(
+          `same_close \\(not achievable\\).*; cash rate 2 to 5 business days old: 3 decision days \\(first ${DATES[g + 2]}\\)$`,
+        ),
+      );
+
+      await dropCash(own, g + 3, 5);
+      const [red] = await run(dir, own);
+      expect(red!.status).toBe('red');
+      // 2 to 9 business days old from DATES[g + 2]: more than 5 from the fifth missing one on.
+      expect(red!.message).toBe(
+        `c: cannot run: the cash rate (CASH@rates) is unknown or more than 5 business days old on 4 decision days from ${FROM} to ${TARGET} (first ${DATES[g + 6]}: last value ${DATES[g - 1]}, 6 business days behind)`,
+      );
+    });
+
+    it('a case without cash or leverage ignores the cash rate entirely', async () => {
+      const own = await seeded();
+      await own.delete(schema.series).where(eq(schema.series.series, 'CASH'));
+      const e = expected();
+      const [plain] = await run(casesDir({ plain: validCase(e) }), own);
+      expect(plain!.status).toBe('green');
+      expect(plain!.message).not.toMatch(/cash/);
+      // A cash calendar that does not cover the window does not matter to it either.
+      const later = new Sessions({ ...sessions.calendar, validFrom: '2025-01-01' });
+      const [still] = await run(casesDir({ plain: validCase(e) }), own, later);
+      expect(still!.status).toBe('green');
+    });
+
+    it('no stored value refuses a case that needs one (unknown, never 0%)', async () => {
+      const own = await seeded();
+      await own.delete(schema.series).where(eq(schema.series.series, 'CASH'));
+      const [r] = await run(casesDir({ c: leveraged() }), own);
+      expect(r!.status).toBe('red');
+      expect(r!.message).toMatch(
+        new RegExp(`on \\d+ decision days .* \\(first ${FROM}: no value known\\)$`),
+      );
+    });
+
+    it('no cash source declared refuses a case that needs it', async () => {
+      const own = await seeded(undefined, false);
+      const dir = casesDir({
+        a_leveraged: leveraged(),
+        b_switcher: caseOf(switcher),
+        c_plain: validCase(expected()),
+      });
+      const results = await run(dir, own);
+      expect(results.map((r) => [r.caseName, r.status])).toEqual([
+        ['a_leveraged', 'red'],
+        ['b_switcher', 'red'],
+        ['c_plain', 'green'],
+      ]);
+      for (const r of results.slice(0, 2)) {
+        expect(r.message).toMatch(
+          /cannot run: the strategy holds cash or a leveraged ticker, and no series source declares the USD cash rate$/,
+        );
+      }
+    });
+
+    it('a decision day outside the cash calendar is unknown and refuses the case', async () => {
+      const later = new Sessions({ ...sessions.calendar, validFrom: '2025-01-01' });
+      const [r] = await run(casesDir({ c: leveraged() }), db, later);
+      expect(r!.status).toBe('red');
+      expect(r!.message).toMatch(
+        new RegExp(
+          `\\(first ${FROM}: outside the cash calendar t \\(2025-01-01 to 2026-12-31\\)\\)$`,
+        ),
+      );
+    });
   });
 
   it('runJob stores every case in full and fails the checks run on a red one', async () => {

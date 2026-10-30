@@ -314,7 +314,13 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         if (sent.failed.length > 0) markIncomplete('alerts');
       }
       // External golden values: the testfol cases the owner exported (requirements 13).
-      const cases = await parity(db, { dir: o.parityDir, to: target, sessions });
+      // The cash rate is graded on the calendar the run checks it on.
+      const cases = await parity(db, {
+        dir: o.parityDir,
+        to: target,
+        sessions,
+        seriesSessions: checkedSessions,
+      });
       if (cases.length === 0) log.info('testfol parity: no cases (none exported yet)');
       // Every case in full, green included (ours, testfol's, difference, window).
       await storeRunChecks(db, runId, cases, { all: true });

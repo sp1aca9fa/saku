@@ -33,6 +33,31 @@ export function seriesHealth(
   return { status: freshnessStatus(behind), behind };
 }
 
+/**
+ * A series' freshness as read before `date`'s session opens (a backtest reads the cash rate at
+ * 09:30 New York, requirements 04 "Point-in-time series"). `date`'s own observation cannot exist
+ * before its day has run, so the lag is counted in business days of the series' calendar
+ * strictly between `lastObservation` and `date`: the previous business day's value not yet
+ * published is the normal publication lag (green, 04: `DTB3` is published the next business day,
+ * one-day lag); more is a gap (yellow); more than MAX_STALE_DAYS is red; no value at all is red.
+ * Undefined when the lag cannot be counted on this calendar (`date` or `lastObservation` outside
+ * its valid range): unknown, never green.
+ */
+export function seriesHealthAtOpen(
+  sessions: Sessions,
+  date: TradingDate,
+  lastObservation: TradingDate | undefined,
+): { status: HealthStatus; behind: number } | undefined {
+  const { validFrom, validTo } = sessions.calendar;
+  if (date < validFrom || date > validTo) return undefined;
+  if (lastObservation === undefined) return { status: 'red', behind: Infinity };
+  if (lastObservation < validFrom || lastObservation > date) return undefined;
+  const behind = sessions
+    .between(lastObservation, date)
+    .filter((d) => d > lastObservation && d < date).length;
+  return { status: freshnessStatus(behind), behind };
+}
+
 /** The grade of a series `behind` business days behind (Infinity: no value at all). */
 export function freshnessStatus(behind: number): HealthStatus {
   return behind <= 1 ? 'green' : behind <= MAX_STALE_DAYS ? 'yellow' : 'red';

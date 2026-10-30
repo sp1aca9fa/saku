@@ -13,6 +13,8 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  CASH_USD,
+  type PointInTime,
   type StrategyDay,
   type TradingDate,
   Strategy,
@@ -23,9 +25,9 @@ import {
   parseTicker,
   summary,
 } from '@saku/core';
-import type { CheckResult, Sessions } from '@saku/data';
+import { type CheckResult, MAX_STALE_DAYS, type Sessions, seriesHealthAtOpen } from '@saku/data';
 import type { Db } from '@saku/db';
-import { cashRateReader } from './cash';
+import { cashPointInTime, cashRateOf, cashReadAt } from './cash';
 import { reader } from './forward';
 
 export const PARITY_CHECK = 'testfol_parity';
@@ -213,6 +215,52 @@ interface WindowHealth {
 }
 
 /**
+ * Whether the backtest reads the cash rate for a holding, as core's `backtest` does: CASH_USD
+ * accrues it, and any leverage other than 1 (an unparsable one included) is financed with it.
+ */
+const readsCashRate = (ticker: string) => ticker === CASH_USD || parseTicker(ticker).leverage !== 1;
+
+/** A strategy that can hold cash or a financed holding (the backtest holds allocations only). */
+export const usesCashRate = (strategy: Strategy) =>
+  strategy.allocations.some((a) => a.holdings.some((h) => readsCashRate(h.ticker)));
+
+/** The cash rate's freshness over the decision days of a case window. */
+interface CashHealth {
+  /** No value, more than MAX_STALE_DAYS business days behind, or not countable: refused. */
+  bad: { date: TradingDate; why: string }[];
+  yellow: TradingDate[];
+}
+
+/**
+ * The cash rate as the backtest reads it on each decision day (the value known at `cashReadAt`,
+ * the instant `cashRateOf` uses), graded on the cash series' own calendar by `seriesHealthAtOpen`
+ * (04 "Point-in-time series"). A day outside that calendar's valid range is unknown: refused,
+ * never green.
+ */
+function cashHealth(dates: TradingDate[], values: PointInTime, calendar: Sessions): CashHealth {
+  const h: CashHealth = { bad: [], yellow: [] };
+  for (const d of dates) {
+    const last = values.asOf(d, cashReadAt(d))?.date;
+    const g = seriesHealthAtOpen(calendar, d, last);
+    if (!g) {
+      h.bad.push({
+        date: d,
+        why: `outside the cash calendar ${calendar.calendar.version} (${calendar.calendar.validFrom} to ${calendar.calendar.validTo})`,
+      });
+    } else if (g.status === 'red') {
+      h.bad.push({
+        date: d,
+        why:
+          last === undefined
+            ? 'no value known'
+            : `last value ${last}, ${g.behind} business days behind`,
+      });
+    } else if (g.status === 'yellow') h.yellow.push(d);
+  }
+  return h;
+}
+
+/**
  * Every case in `dir` on the stored data, one result each (none without cases). Decisions come
  * from the whole stored history up to `to` (indicators and bands warm up on earlier data); the
  * equity curve runs from `from`, which must be the first decision day, to `to`.
@@ -223,15 +271,23 @@ interface WindowHealth {
  * canonical bar carries its latest grade (set by every verify run). A red or ungraded bar, or a
  * session of `sessions` without a stored bar, refuses the case; yellow days are computed and
  * counted in the message, the status still follows the tolerances.
+ *
+ * A case whose holdings read the cash rate (`usesCashRate`) is graded on it too, on every
+ * decision day from `from` to `to` (the backtest reads the rate on each day after the first; the
+ * indicators and bands never read it, so warm-up days are not graded): no cash source, no value,
+ * more than MAX_STALE_DAYS business days behind, or a day outside the cash series' calendar
+ * (`seriesSessions`) refuses the case; yellow days are counted in the message.
  */
 export async function parity(
   db: Db,
-  o: { dir: string | undefined; to: TradingDate; sessions: Sessions },
+  o: { dir: string | undefined; to: TradingDate; sessions: Sessions; seriesSessions: Sessions },
 ): Promise<ParityResult[]> {
   const names = caseFolders(o.dir);
   if (names.length === 0) return [];
   const { loadRows, barsOf } = await reader(db);
-  const cashRate = await cashRateReader(db);
+  // Loaded once: each read is in memory, through asOf.
+  const cash = await cashPointInTime(db);
+  const cashRate = cashRateOf(cash);
   const out: ParityResult[] = [];
 
   for (const name of names) {
@@ -329,15 +385,41 @@ export async function parity(
         refuse(`no decision on ${c.to} (the last is ${end}); to must be a stored trading day`);
         continue;
       }
+      let cashYellow: TradingDate[] = [];
+      if (usesCashRate(c.strategy)) {
+        if (!cash) {
+          refuse(
+            'the strategy holds cash or a leveraged ticker, and no series source declares the USD cash rate',
+          );
+          continue;
+        }
+        const h = cashHealth(
+          days.map((d) => d.date),
+          cash.values,
+          o.seriesSessions,
+        );
+        if (h.bad.length > 0) {
+          const first = h.bad[0]!;
+          refuse(
+            `the cash rate (${cash.series}@${cash.source}) is unknown or more than ${MAX_STALE_DAYS} business days old on ${h.bad.length} decision days from ${start} to ${end} (first ${first.date}: ${first.why})`,
+          );
+          continue;
+        }
+        cashYellow = h.yellow;
+      }
       const run = backtest({ strategy: c.strategy, days, bars, cashRate });
       const s = summary(run.points);
       const stats = compareStats({ ...s, switches: run.switches }, c.stats);
       const red = stats.some((x) => !x.within);
       const deviation = Math.max(...stats.map((x) => Math.abs(x.difference) / x.tolerance));
       const yellow = health.filter((h) => h.yellow.length > 0);
-      const notes = yellow.length
-        ? `; yellow days (warm-up days count): ${yellow.map((h) => `${h.ticker} ${h.yellow.length} (first ${h.yellow[0]})`).join(', ')}`
-        : '';
+      const notes =
+        (yellow.length
+          ? `; yellow days (warm-up days count): ${yellow.map((h) => `${h.ticker} ${h.yellow.length} (first ${h.yellow[0]})`).join(', ')}`
+          : '') +
+        (cashYellow.length
+          ? `; cash rate 2 to ${MAX_STALE_DAYS} business days old: ${cashYellow.length} decision days (first ${cashYellow[0]})`
+          : '');
       out.push(
         result(
           red ? 'red' : 'green',

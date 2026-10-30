@@ -2,7 +2,13 @@ import type { RawBar } from '@saku/core';
 import { describe, expect, it } from 'vitest';
 import { Sessions } from './calendar';
 import type { CheckResult } from './checks';
-import { type StandInInput, seriesHealth, standIns, symbolHealth } from './health';
+import {
+  type StandInInput,
+  seriesHealth,
+  seriesHealthAtOpen,
+  standIns,
+  symbolHealth,
+} from './health';
 
 const sessions = new Sessions({
   id: 't',
@@ -195,5 +201,57 @@ describe('seriesHealth', () => {
     expect(seriesHealth(fed, '2026-01-12', '2026-01-05').status).toBe('yellow');
     expect(seriesHealth(fed, '2026-01-13', '2026-01-05')).toEqual({ status: 'red', behind: 6 });
     expect(seriesHealth(fed, '2026-01-13', undefined).status).toBe('red');
+  });
+});
+
+describe('seriesHealthAtOpen', () => {
+  const fed = new Sessions({
+    id: 'f',
+    version: 'f',
+    validFrom: '2026-01-01',
+    validTo: '2026-12-31',
+    holidays: ['2026-01-19'],
+  });
+  it('counts business days strictly before the read date: the previous one missing is green', () => {
+    // Thursday read at the open with Tuesday's value: Wednesday's is not yet published.
+    expect(seriesHealthAtOpen(fed, '2026-01-08', '2026-01-06')).toEqual({
+      status: 'green',
+      behind: 1,
+    });
+    expect(seriesHealthAtOpen(fed, '2026-01-08', '2026-01-07')).toEqual({
+      status: 'green',
+      behind: 0,
+    });
+    // A value dated the read date (a fixed rate) is not behind.
+    expect(seriesHealthAtOpen(fed, '2026-01-08', '2026-01-08')!.behind).toBe(0);
+    // Tuesday after the Monday holiday with Thursday's value: only Friday is missing.
+    expect(seriesHealthAtOpen(fed, '2026-01-20', '2026-01-15')).toEqual({
+      status: 'green',
+      behind: 1,
+    });
+    expect(seriesHealthAtOpen(fed, '2026-01-08', '2026-01-05')).toEqual({
+      status: 'yellow',
+      behind: 2,
+    });
+    expect(seriesHealthAtOpen(fed, '2026-01-13', '2026-01-05')).toEqual({
+      status: 'yellow',
+      behind: 5,
+    });
+    expect(seriesHealthAtOpen(fed, '2026-01-14', '2026-01-05')).toEqual({
+      status: 'red',
+      behind: 6,
+    });
+    expect(seriesHealthAtOpen(fed, '2026-01-13', undefined)).toEqual({
+      status: 'red',
+      behind: Infinity,
+    });
+  });
+
+  it('outside the calendar the lag is unknown (never green)', () => {
+    expect(seriesHealthAtOpen(fed, '2025-12-31', '2025-12-30')).toBeUndefined();
+    expect(seriesHealthAtOpen(fed, '2027-01-04', '2026-12-31')).toBeUndefined();
+    expect(seriesHealthAtOpen(fed, '2026-01-05', '2025-12-31')).toBeUndefined();
+    // Unknown before missing: a date outside the calendar is not graded red either.
+    expect(seriesHealthAtOpen(fed, '2025-12-31', undefined)).toBeUndefined();
   });
 });
