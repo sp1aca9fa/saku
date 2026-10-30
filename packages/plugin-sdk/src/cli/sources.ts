@@ -45,7 +45,7 @@ import {
   readjustmentStats,
   readjustmentText,
 } from '../jobs/readjustments';
-import { allInfos, loadPlugins } from '../registry';
+import { allInfos, issuerPublishesOf, loadPlugins } from '../registry';
 import { DATA_KIND, dataKindOf, unassigned } from '../roles';
 import { assertServerOnly } from '../server-only';
 
@@ -133,7 +133,7 @@ if (tool === 'sources' && command === 'list') {
   const start = new Date(`${to}T00:00:00Z`);
   start.setUTCFullYear(start.getUTCFullYear() - years);
   const from = start.toISOString().slice(0, 10);
-  const stats = await issuerStats(db, { from, to });
+  const stats = await issuerStats(db, { from, to, publishes: issuerPublishesOf(plugins.issuers) });
   if (stats.toleranceInvalid) {
     console.log('Warning: issuer_nav_tolerance does not parse; layer D observes only until reset.');
   }
@@ -143,7 +143,10 @@ if (tool === 'sources' && command === 'list') {
     );
   }
   if (stats.rows.length === 0) {
-    console.log('No issuer records stored (an issuer plug-in with a role fetches them).');
+    console.log(
+      'No issuer NAV records stored (an issuer plug-in with a role fetches them; sources ' +
+        'declaring no NAV are left out).',
+    );
   } else {
     const pct = (v: number | undefined) => (v === undefined ? '-' : `${(100 * v).toFixed(3)}%`);
     console.log(

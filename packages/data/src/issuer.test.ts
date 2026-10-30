@@ -206,6 +206,17 @@ describe('layer D (issuer reconciliation)', () => {
     ]);
     // Its funds are unknown without records (the day overall says it is unavailable).
     expect(stale([])).toEqual([]);
+    // No declaration known: only the staleness, no comparison inferred from its records (a
+    // NAV-only source's missing distribution would read as a mismatch), no tolerance result.
+    const navOnly = navs(0.5).map(({ distribution: _d, split: _s, ...r }) => r);
+    expect(
+      layerD(primary, navOnly, {
+        ...opts,
+        tolerance: 0.01,
+        toleranceInvalid: true,
+        notLoaded: true,
+      }),
+    ).toEqual([expect.objectContaining({ check: 'issuer_stale', status: 'yellow' })]);
   });
 
   it('an invalid tolerance setting observes premiums only and says so (yellow)', () => {
@@ -254,9 +265,20 @@ describe('layer D (issuer reconciliation)', () => {
       });
       expect(checks(rs)).toEqual(['distribution_match', 'split_match']);
       expect(rs.every((r) => r.status === 'green')).toBe(true);
-      // No record at all for a supported fund: no claim of an event, so nothing (not yellow).
+      // No record at all for a supported fund: it covers no date, so the primary's split is not
+      // compared (yellow, never no result); the undeclared distribution has no result.
       const none = layerD(primary, [], { ...opts, supported: true, publishes: { splits: true } });
-      expect(none).toEqual([]);
+      expect(none).toEqual([
+        expect.objectContaining({
+          check: 'split_match',
+          date: dates[3],
+          status: 'yellow',
+          expected: 2,
+          message: 'not compared: no issuer record covers this date',
+        }),
+      ]);
+      // Not supported and no record: no claim about the fund at all.
+      expect(layerD(primary, [], { ...opts, publishes: { splits: true } })).toEqual([]);
       // A record missing on an event date reads as no event (records are event dates only).
       const noDist = navs()
         .filter((r) => r.split)
@@ -270,6 +292,38 @@ describe('layer D (issuer reconciliation)', () => {
         [dates[0], 'yellow', 'event only in issuer data'],
         [dates[2], 'yellow', 'event missing in issuer data'],
       ]);
+    });
+
+    it('events only: a primary event after its last record is not compared (yellow)', () => {
+      // Its last record is the 7th's distribution: the 8th's split is after it.
+      const events = navs()
+        .filter((r) => r.distribution)
+        .map(({ nav: _n, ...r }) => r);
+      const publishes = { distributions: true, splits: true } as const;
+      const rs = layerD(primary, events, { ...opts, publishes });
+      expect(of(rs, 'distribution_match')).toEqual([
+        expect.objectContaining({ date: dates[2], status: 'green' }),
+      ]);
+      expect(of(rs, 'split_match')).toEqual([
+        expect.objectContaining({
+          date: dates[3],
+          status: 'yellow',
+          expected: 2,
+          message: 'not compared: no issuer record covers this date',
+        }),
+      ]);
+      // An undeclared kind after it has no result.
+      expect(
+        of(layerD(primary, events, { ...opts, publishes: { distributions: true } }), 'split_match'),
+      ).toEqual([]);
+      // A failed fetch or a plug-in not loaded: issuer_stale says so instead.
+      for (const extra of [{ unavailable: true }, { notLoaded: true }]) {
+        const r = layerD(primary, events, { ...opts, ...extra, publishes });
+        expect(of(r, 'split_match')).toEqual([]);
+        expect(of(r, 'issuer_stale')[0]!.status).toBe('yellow');
+      }
+      // Undeclared (inferred events-only): unchanged, no date after its last record compared.
+      expect(of(layerD(primary, events, opts), 'split_match')).toEqual([]);
     });
 
     it('events only: a failed fetch or a plug-in not loaded stays yellow (never silent)', () => {
@@ -308,7 +362,6 @@ describe('layer D (issuer reconciliation)', () => {
         [navs().filter((r) => r.date !== dates[2]), {}],
         [navs().map((r) => ({ ...r, distribution: undefined })), {}],
         [navs().slice(0, 3), { unavailable: true }],
-        [navs().slice(0, 4), { notLoaded: true }],
         [[], { supported: true }],
       ];
       for (const [records, extra] of cases) {
@@ -316,6 +369,20 @@ describe('layer D (issuer reconciliation)', () => {
           layerD(primary, records, { ...opts, ...extra }),
         );
       }
+      // Not loaded: declared, today's rules (staleness and comparisons); undeclared, staleness
+      // only (above).
+      const notLoaded = layerD(primary, navs().slice(0, 4), {
+        ...opts,
+        notLoaded: true,
+        publishes: all,
+      });
+      expect(checks(notLoaded)).toEqual([
+        'distribution_match',
+        'issuer_stale',
+        'nav_premium',
+        'split_match',
+      ]);
+      expect(of(notLoaded, 'issuer_stale')[0]!.status).toBe('yellow');
     });
   });
 

@@ -1,3 +1,4 @@
+import { ISSUER_PUBLISHED_KINDS, type IssuerPublishes } from '@saku/data';
 import {
   type Db,
   checkAdjCloseRounding,
@@ -12,6 +13,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PoliteHttp, type PoliteHttpOptions, type UsageStore } from './http';
 import type {
+  IssuerSource,
   Logger,
   Notifier,
   NotifierInfo,
@@ -67,8 +69,12 @@ export function allInfos(plugins: PluginModule): PluginInfo[] {
   ].map((p) => p.info);
 }
 
-/** The kinds an issuer source can declare it publishes (`PluginInfo.publishes`). */
-const PUBLISHED_KINDS = ['nav', 'distributions', 'splits'];
+/** What each issuer source declares it publishes, by key (sources without a declaration left out). */
+export function issuerPublishesOf(issuers: IssuerSource[] = []): Record<string, IssuerPublishes> {
+  return Object.fromEntries(
+    issuers.flatMap((s) => (s.info.publishes ? [[s.info.key, s.info.publishes]] : [])),
+  );
+}
 
 /**
  * Keys are lowercase identifiers, unique per kind, each source names its terms, a declared
@@ -98,10 +104,12 @@ export function validateInfos(
       if (
         info.kind !== 'issuer' ||
         entries.length === 0 ||
-        entries.some(([k, v]) => !PUBLISHED_KINDS.includes(k) || v !== true)
+        entries.some(
+          ([k, v]) => !(ISSUER_PUBLISHED_KINDS as readonly string[]).includes(k) || v !== true,
+        )
       ) {
         throw new Error(
-          `Plug-in "${info.key}": publishes is for issuer sources and names at least one of ${PUBLISHED_KINDS.join(', ')}, each true.`,
+          `Plug-in "${info.key}": publishes is for issuer sources and names at least one of ${ISSUER_PUBLISHED_KINDS.join(', ')}, each true.`,
         );
       }
     }

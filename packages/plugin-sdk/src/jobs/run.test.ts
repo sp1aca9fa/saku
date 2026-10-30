@@ -14,7 +14,7 @@ import {
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import { emptyPlugins } from '../registry';
-import type { BarSource, Notifier, SeriesSource } from '../types';
+import type { BarSource, IssuerSource, Notifier, PluginInfo, SeriesSource } from '../types';
 import { type RunOptions, runJob } from './run';
 import { eq } from 'drizzle-orm';
 import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
@@ -298,6 +298,56 @@ describe('a daily run', () => {
     expect(e.filter((x) => x.layer === 'E').map((x) => [x.checkName, x.passed])).toEqual([
       ['core_vs_reference', 1],
       ['incremental_vs_full', 1],
+    ]);
+  });
+});
+
+describe('an issuer source declaring what it publishes', () => {
+  // The primary pays 0.5 on the 15th; the issuer publishes daily NAVs (the close) and no events.
+  const EX = '2026-01-15';
+  const paying = (key: string): BarSource => {
+    const s = barSource(key);
+    return {
+      info: s.info,
+      async fetchBars(ticker, from, to, ctx) {
+        return (await s.fetchBars(ticker, from, to, ctx)).map((b) =>
+          b.date === EX ? { ...b, divCash: 0.5 } : b,
+        );
+      },
+    };
+  };
+  const issuer = (publishes?: PluginInfo['publishes']): IssuerSource => ({
+    info: testInfo('iss', 'issuer', { suggestedRole: 'check', ...(publishes && { publishes }) }),
+    supports: (ticker) => ticker === 'AAA',
+    async fetchRecords(_ticker, from, to) {
+      return DATES.flatMap((date, i) =>
+        date >= from && date <= to ? [{ date, nav: closes[i]!, currency: 'USD' }] : [],
+      );
+    },
+  });
+  const layerD = async (publishes?: PluginInfo['publishes']) => {
+    const { db } = await setup();
+    const { notifier } = fakeNotifier();
+    await runJob(
+      db,
+      { ...plugins([paying('p'), paying('s')]), issuers: [issuer(publishes)] },
+      options(notifier),
+    );
+    const rows = await db
+      .select()
+      .from(schema.checkResults)
+      .where(eq(schema.checkResults.layer, 'D'));
+    return (check: string) => rows.filter((r) => r.source === 'iss' && r.checkName === check);
+  };
+
+  it('NAV only: the primary distribution is not compared (no distribution_match stored)', async () => {
+    const declared = await layerD({ nav: true });
+    expect(declared('nav_premium').length).toBeGreaterThan(0);
+    expect(declared('distribution_match')).toEqual([]);
+    // Undeclared, inferred: the NAV source's missing distribution reads as a mismatch.
+    const inferred = await layerD();
+    expect(inferred('distribution_match')).toEqual([
+      expect.objectContaining({ date: EX, message: 'event missing in issuer data' }),
     ]);
   });
 });

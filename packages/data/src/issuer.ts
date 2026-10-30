@@ -45,6 +45,9 @@ export function navPremiums(
   });
 }
 
+/** The kinds an issuer source can declare it publishes (the one list; the registry validates). */
+export const ISSUER_PUBLISHED_KINDS = ['nav', 'distributions', 'splits'] as const;
+
 /**
  * What an issuer source declares it publishes (`PluginInfo.publishes`). Layer D compares only the
  * declared kinds: an undeclared one gets no result for its check (the source makes no claim, so
@@ -52,11 +55,7 @@ export function navPremiums(
  * ignored. Not declared at all: what it publishes is inferred from its records (NAV when any
  * record has one, distributions and splits always compared).
  */
-export interface IssuerPublishes {
-  nav?: true;
-  distributions?: true;
-  splits?: true;
-}
+export type IssuerPublishes = { [K in (typeof ISSUER_PUBLISHED_KINDS)[number]]?: true };
 
 export interface LayerDOptions {
   /** The issuer source's key (stored with each result). */
@@ -100,7 +99,11 @@ export interface LayerDOptions {
  *   1%), within the dates both cover. A source that publishes NAV is compared on the dates it
  *   has a record; a primary event on a date it has none is yellow "not compared" (issuer data
  *   unavailable, 04 severity rules), never a mismatch. A source without NAV (events only)
- *   reports every event in its range, so a date without its record reads as no event.
+ *   reports every event in its range, so a date without its record reads as no event. A source
+ *   declaring events only (no NAV) covers no date after its last record: a primary event of a
+ *   declared kind after it, or any primary event when it supports the fund and has no record, is
+ *   yellow "not compared" (unknown, never no result), unless this run's fetch failed or its
+ *   plug-in is not loaded (then `issuer_stale` says so).
  * - `issuer_stale`: on the run's date, the latest NAV more than ISSUER_MAX_BEHIND sessions
  *   behind. With no NAV stored at all, yellow when this run's fetch failed for the fund, or when
  *   the source supports it and has no record of it (a NAV-less source that delivered records is
@@ -109,6 +112,8 @@ export interface LayerDOptions {
  *   them is yellow (its NAV is unknown). A source declaring no NAV has no NAV freshness: only a
  *   fetch that failed this run, or a plug-in not loaded, is yellow (what it publishes is unknown
  *   for the run); having no record is not (a fund may have had no event).
+ * A plug-in not loaded with no declaration known gets only that yellow `issuer_stale` (for the
+ * funds it has records for), no comparisons: what its records hold is unknown.
  */
 export function layerD(
   primary: RawBar[],
@@ -124,6 +129,23 @@ export function layerD(
   const later = (a: TradingDate, b: TradingDate) => (a > b ? a : b);
   const earlier = (a: TradingDate, b: TradingDate) => (a < b ? a : b);
   const d = o.publishes;
+  if (o.notLoaded && d === undefined) {
+    // Plug-in not loaded and no declaration known: what its records hold is unknown, and
+    // inferring it could read a NAV-only source's missing events as mismatches. Only the
+    // staleness, for the funds it has records for (which funds it would support is unknown).
+    if (recs.length > 0) {
+      const lastNav = recs.filter((r) => r.nav !== undefined).at(-1)?.date;
+      out.push({
+        ...base,
+        check: 'issuer_stale',
+        date: o.to,
+        status: cap('yellow'),
+        tolerance: ISSUER_MAX_BEHIND,
+        message: `plug-in not loaded${lastNav ? `, latest NAV ${lastNav}` : ''}`,
+      });
+    }
+    return out;
+  }
   // Compared kinds: the declared ones; without a declaration, all (NAV where records have it).
   const navOn = d === undefined || d.nav === true;
   const eventsOn: Record<string, boolean> = {
@@ -212,6 +234,32 @@ export function layerD(
               ev.a === ev.none ? 'event only in issuer data' : 'event missing in issuer data',
           }),
         });
+      }
+    }
+  }
+
+  // A declared events-only source covers no date after its last record (none at all: no date,
+  // when it supports the fund): a primary event there is unknown, never no result. A fetch that
+  // failed or a plug-in not loaded is graded by `issuer_stale` below instead.
+  if (d !== undefined && !publishesNav && !o.unavailable && !o.notLoaded) {
+    const lastRec = recs.at(-1)?.date;
+    if (lastRec !== undefined || o.supported) {
+      for (const b of bars) {
+        if (lastRec !== undefined && b.date <= lastRec) continue;
+        for (const ev of [
+          { check: 'distribution_match', a: b.divCash, none: 0 },
+          { check: 'split_match', a: b.splitFactor, none: 1 },
+        ]) {
+          if (!eventsOn[ev.check] || ev.a === ev.none) continue;
+          out.push({
+            ...base,
+            check: ev.check,
+            date: b.date,
+            status: cap('yellow'),
+            expected: ev.a,
+            message: 'not compared: no issuer record covers this date',
+          });
+        }
       }
     }
   }

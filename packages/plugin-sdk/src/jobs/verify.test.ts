@@ -721,6 +721,42 @@ describe('verify', () => {
     ];
     expect((await checks('iss')).sort()).toEqual(['issuer_stale', 'nav_premium']);
     expect(await checks('iss2')).toEqual(['distribution_match']);
+    // The premium statistics honor them too: no row for the source declaring no NAV.
+    const period = { from: '2026-01-01', to: '2026-01-08' };
+    expect((await issuerStats(db, period)).rows.map((r) => r.source)).toEqual(['iss', 'iss2']);
+    const declared = await issuerStats(db, {
+      ...period,
+      publishes: { iss: { nav: true }, iss2: { distributions: true } },
+    });
+    expect(declared.rows.map((r) => r.source)).toEqual(['iss']);
+  });
+
+  it('a source whose plug-in is not loaded gets only its staleness (no inferred comparisons)', async () => {
+    const { db } = await setup();
+    await seedSourceRoles(db, [{ key: 'iss', dataKind: 'issuer', suggestedRole: 'check' }]);
+    // NAV-only data stored earlier, far off the closes: inferred, it would be compared.
+    await storeIssuerRecords(db, {
+      symbolId: (await symbolId(db, 'AAA'))!,
+      source: 'iss',
+      records: dates.slice(0, 3).map((date) => ({ date, nav: 50, currency: 'USD' })),
+      fetchedAt: 't',
+    });
+    await db
+      .insert(schema.appSettings)
+      .values({ key: 'issuer_nav_tolerance', value: '{"AAA":0.01}' });
+    const runId = await startRun(db, 'daily');
+    const summary = await verify(db, {
+      runId,
+      sessions,
+      mode: 'daily',
+      from: '2026-01-06',
+      to: '2026-01-08',
+      issuers: [],
+    });
+    expect((await layerDResults(db)).map((r) => `${r.checkName} ${r.date} ${r.status}`)).toEqual([
+      'issuer_stale 2026-01-08 yellow',
+    ]);
+    expect(summary.reasons).toContain('issuer_unavailable@iss');
   });
 
   it('grades a fund the issuer supports or failed for, with no NAV stored, yellow', async () => {

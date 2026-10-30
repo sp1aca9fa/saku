@@ -16,7 +16,7 @@ import {
   sourceRolesOf,
   startRun,
 } from '@saku/db';
-import { type LoadedPlugins, allInfos, savePluginInfos } from '../registry';
+import { type LoadedPlugins, allInfos, issuerPublishesOf, savePluginInfos } from '../registry';
 import { DATA_KIND, assignedOnly, dataKindOf, unassigned } from '../roles';
 import type { Logger, PluginContext, PluginInfo } from '../types';
 import {
@@ -215,9 +215,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       issuers,
       sourceCalendars,
       // What each loaded issuer source declares it publishes (layer D compares only those).
-      issuerPublishes: Object.fromEntries(
-        used.issuers.flatMap((s) => (s.info.publishes ? [[s.info.key, s.info.publishes]] : [])),
-      ),
+      issuerPublishes: issuerPublishesOf(used.issuers),
       ...(job === 'daily'
         ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
         : { mode: 'full' as const }),

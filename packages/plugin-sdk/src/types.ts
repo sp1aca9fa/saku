@@ -14,6 +14,7 @@ import type {
   SourceRole,
   TradingDate,
 } from '@saku/core';
+import type { IssuerPublishes } from '@saku/data';
 import type { PoliteHttp } from './http';
 
 export type {
@@ -84,7 +85,7 @@ export interface PluginInfo {
    * only the declared kinds; an undeclared one is not checked (no result, never green). Not
    * declared: inferred from the records (NAV when any has one; distributions and splits always).
    */
-  publishes?: { nav?: true; distributions?: true; splits?: true };
+  publishes?: IssuerPublishes;
 }
 
 export interface Logger {

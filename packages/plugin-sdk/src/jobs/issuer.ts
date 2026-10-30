@@ -2,7 +2,7 @@
 // owner to set `issuer_nav_tolerance` from (requirements 04, "Per-ETF thresholds set in A3").
 // Read-only: `pnpm sources issuer-stats [--years N]` prints it.
 import type { TradingDate } from '@saku/core';
-import { type PremiumStats, navPremiums, premiumStats } from '@saku/data';
+import { type IssuerPublishes, type PremiumStats, navPremiums, premiumStats } from '@saku/data';
 import {
   type Db,
   activeSymbols,
@@ -34,10 +34,12 @@ export interface IssuerStats {
  * an issuer NAV in the fund's currency from `from` to `to`, and the median, 99th percentile and
  * largest |close / NAV - 1|. Closes are the canonical bars from the primary; stand-in days and
  * days graded red are left out (counted), since their close is not a trusted primary value.
+ * A source whose declaration (`publishes`, by source key) has no NAV has no row: it makes no NAV
+ * claim (as layer D); a source without a declaration has a row from the NAVs its records hold.
  */
 export async function issuerStats(
   db: Db,
-  o: { from: TradingDate; to: TradingDate },
+  o: { from: TradingDate; to: TradingDate; publishes?: Record<string, IssuerPublishes> },
 ): Promise<IssuerStats> {
   const nav = await navTolerances(db);
   const symbols = await activeSymbols(db);
@@ -61,6 +63,8 @@ export async function issuerStats(
         splitFactor: b.splitFactor,
       }));
     for (const [source, list] of records) {
+      const declared = o.publishes?.[source];
+      if (declared !== undefined && declared.nav !== true) continue;
       const inPeriod = list.filter((r) => r.date >= o.from && r.date <= o.to);
       const leftOut = { standIn: 0, red: 0 };
       for (const r of inPeriod) {
