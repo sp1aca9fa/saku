@@ -28,7 +28,7 @@
 //   - Passed needs at least GATE.sessions judged sessions (stage-a A1: daily runs over 20 trading
 //     days); fewer is "not passed yet", whatever the ratios.
 import { type TradingDate, isTradingDate } from '@saku/core';
-import type { Sessions } from '@saku/data';
+import { checkAsRead, type Sessions } from '@saku/data';
 import { type Db, activeSymbols, schema } from '@saku/db';
 import { and, asc, eq } from 'drizzle-orm';
 import { DAILY_OVERLAP } from './ingest';
@@ -191,18 +191,14 @@ export async function spikeReport(
     const available: Record<string, boolean> = {};
     // A secondary is available in a run when it was compared on the date (a close result) and
     // lacked no symbol's bar: `secondary_missing`, or, in results stored before that code
-    // existed, a `close_match` with the message 'no secondary bar'.
-    const missingBar = (r: Result) =>
-      r.checkName === 'secondary_missing' ||
-      (r.checkName === 'close_match' && r.message === 'no secondary bar');
+    // existed, a `close_match` with the message 'no secondary bar' (`checkAsRead`).
     for (const s of secondaries) {
       available[s] = own.some(({ rs: x }) => {
-        const closes = x.filter(
-          (r) =>
-            (r.checkName === 'close_match' || r.checkName === 'secondary_missing') &&
-            r.source === s,
-        );
-        return closes.length > 0 && !closes.some(missingBar);
+        const compared = x
+          .filter((r) => r.source === s)
+          .map(checkAsRead)
+          .filter((c) => c === 'close_match' || c === 'secondary_missing');
+        return compared.length > 0 && !compared.includes('secondary_missing');
       });
     }
 
@@ -247,7 +243,8 @@ export async function spikeReport(
         .filter((r) => r.status !== 'green')
         .map((r) => ({
           layer: r.layer,
-          check: r.checkName,
+          // A missing secondary bar stored before `secondary_missing` reads as that check.
+          check: checkAsRead(r),
           source: r.source,
           status: r.status,
           message: r.message,

@@ -158,6 +158,26 @@ export function layerA(
   return out;
 }
 
+/** The message of a `secondary_missing` result (layer B: the secondary has no bar for the date). */
+export const NO_SECONDARY_BAR = 'no secondary bar';
+
+/**
+ * A stored result's check name as read. Results stored before `secondary_missing` existed
+ * (2026-10-30) carry a missing secondary bar as a layer B `close_match` with the message
+ * `NO_SECONDARY_BAR`; they read as `secondary_missing`, so a source without a bar never reads as
+ * a disagreement (04 severity rules: a secondary unavailable is yellow). Stored rows stay as they
+ * are; health rows and forward records keep the reason code they were stored with.
+ */
+export function checkAsRead(r: {
+  layer: string;
+  checkName: string;
+  message?: string | null;
+}): string {
+  return r.layer === 'B' && r.checkName === 'close_match' && r.message === NO_SECONDARY_BAR
+    ? 'secondary_missing'
+    : r.checkName;
+}
+
 /**
  * Layer B: the primary against one secondary (already un-split), on the primary's dates. A date
  * the secondary lacks is a yellow `secondary_missing` (04 severity rules: a secondary unavailable
@@ -177,7 +197,7 @@ export function layerB(primary: RawBar[], secondary: RawBar[], source: string): 
         check: 'secondary_missing',
         date: p.date,
         status: 'yellow',
-        message: 'no secondary bar',
+        message: NO_SECONDARY_BAR,
       });
       continue;
     }

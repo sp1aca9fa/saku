@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { Sessions } from './calendar';
 import {
   adjReturnCheck,
+  checkAsRead,
   fxCheck,
   fxUnavailable,
   indexCheck,
@@ -125,6 +126,14 @@ describe('layer B', () => {
     expect(statuses(layerB(p, [bar('2026-01-05', 101)], 's'), 'close_match')[0]).toBe(
       '2026-01-05 red',
     );
+  });
+
+  it('reads a missing bar stored before secondary_missing as secondary_missing', () => {
+    const old = { layer: 'B', checkName: 'close_match', message: 'no secondary bar' };
+    expect(checkAsRead(old)).toBe('secondary_missing');
+    expect(checkAsRead({ ...old, message: null })).toBe('close_match');
+    expect(checkAsRead({ ...old, layer: 'D' })).toBe('close_match');
+    expect(checkAsRead({ layer: 'B', checkName: 'secondary_missing' })).toBe('secondary_missing');
   });
 
   it('requires events on the same dates within 1%', () => {

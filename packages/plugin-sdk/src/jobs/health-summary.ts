@@ -26,7 +26,7 @@
 //   non-green for reasons no check result carries (one source, a stand-in, series freshness), so
 //   they are counted too and a run is "all green" only when neither has a non-green row.
 import type { CheckLayer, HealthStatus, JobStatus, JobType, TradingDate } from '@saku/core';
-import { worst } from '@saku/data';
+import { NO_SECONDARY_BAR, checkAsRead, worst } from '@saku/data';
 import { type Db, schema } from '@saku/db';
 import {
   and,
@@ -47,6 +47,15 @@ import { carriedReasonStatus } from './verify';
 
 const FULL: JobType[] = ['bootstrap', 'weekly', 'checks'];
 const NON_GREEN: HealthStatus[] = ['red', 'yellow'];
+
+/**
+ * A stored result's check name as read, in SQL: `checkAsRead` (@saku/data), the same rule. A
+ * missing secondary bar stored before `secondary_missing` existed (a layer B `close_match` with
+ * the message 'no secondary bar') groups and filters as `secondary_missing`; stored rows stay as
+ * they are. Constants only (no bound parameters), so the select and the group by are the same
+ * expression.
+ */
+const CHECK_AS_READ = sql<string>`(case when ${schema.checkResults.layer} = 'B' and ${schema.checkResults.checkName} = 'close_match' and ${schema.checkResults.message} = ${sql.raw(`'${NO_SECONDARY_BAR}'`)} then 'secondary_missing' else ${schema.checkResults.checkName} end)`;
 /** The label of a result or health row that is about the day, not a symbol (FX, series). */
 export const DAY = 'day';
 /** At most this many dates are listed for one group. */
@@ -81,7 +90,11 @@ export interface HealthGroup {
    */
   status: HealthStatus;
   known: boolean;
-  /** A reason code as stored on the rows (`NO_REASON` for a non-green row without one). */
+  /**
+   * A reason code as stored on the rows (`NO_REASON` for a non-green row without one); a missing
+   * secondary bar stored as `B.close_match@s` before `secondary_missing` reads as
+   * `B.secondary_missing@s` (`reasonsAsRead`).
+   */
   reason: string;
   /** The symbol's ticker, or `DAY` for the overall rows. */
   symbol: string;
@@ -203,7 +216,7 @@ export async function runSummary(db: Db, run: SummaryRun): Promise<RunSummary> {
     .select({
       status: r.status,
       layer: r.layer,
-      check: r.checkName,
+      check: CHECK_AS_READ,
       symbolId: r.symbolId,
       source: r.source,
       count: count(),
@@ -212,7 +225,7 @@ export async function runSummary(db: Db, run: SummaryRun): Promise<RunSummary> {
     })
     .from(r)
     .where(and(eq(r.runId, run.id), inArray(r.status, NON_GREEN)))
-    .groupBy(r.status, r.layer, r.checkName, r.symbolId, r.source);
+    .groupBy(r.status, r.layer, CHECK_AS_READ, r.symbolId, r.source);
   const groups: SummaryGroup[] = grouped.map((g) => ({
     status: g.status,
     layer: g.layer,
@@ -280,6 +293,7 @@ export async function runSummary(db: Db, run: SummaryRun): Promise<RunSummary> {
     .from(h)
     .where(and(eq(h.runId, run.id), ne(h.status, 'green')));
   const statusOf = await reasonStatuses(db, run.id, names, healthRows);
+  const shownAs = await reasonsAsRead(db, run.id);
   const health = { day: { red: 0, yellow: 0 }, symbol: { red: 0, yellow: 0 } };
   const byReason = new Map<string, HealthGroup>();
   for (const row of healthRows) {
@@ -287,10 +301,16 @@ export async function runSummary(db: Db, run: SummaryRun): Promise<RunSummary> {
     const symbol = row.symbolId === null ? DAY : (names.get(row.symbolId) ?? `#${row.symbolId}`);
     // A non-green row without a reason is shown as such, never dropped.
     const reasons = row.reasons.length > 0 ? new Set(row.reasons) : new Set([NO_REASON]);
-    for (const reason of reasons) {
+    const shown = new Set<string>();
+    for (const stored of reasons) {
       // A derived status that is green, or worse than the row's own (the row keeps the worst of
-      // its reasons), contradicts what was stored: unknown, shown "in a <row status> row".
-      const derived = reason === NO_REASON ? undefined : statusOf(row, reason);
+      // its reasons), contradicts what was stored: unknown, shown "in a <row status> row". The
+      // status is looked up by the stored code; only the code shown may be read anew.
+      const derived = stored === NO_REASON ? undefined : statusOf(row, stored);
+      const reason = stored === NO_REASON ? stored : shownAs(row, stored);
+      // A row is counted once under each reason it shows.
+      if (shown.has(reason)) continue;
+      shown.add(reason);
       const own =
         derived === undefined || derived === 'green' || worst(derived, row.status) !== row.status
           ? undefined
@@ -330,6 +350,46 @@ export async function runSummary(db: Db, run: SummaryRun): Promise<RunSummary> {
     healthGroups,
     allGreen:
       complete && countsAgree && nonGreen.red + nonGreen.yellow === 0 && healthRows.length === 0,
+  };
+}
+
+/**
+ * A stored reason code as shown: a `B.close_match@s` (on an overall row `X:B.close_match@s`) whose
+ * every result of the run with that date, symbol (none on an overall row) and source is a missing
+ * secondary bar stored before `secondary_missing` existed (`checkAsRead`) reads as
+ * `B.secondary_missing@s`, so it is worded as a source without a bar, not a disagreement. Any
+ * real close comparison among them, or no result at all, keeps the stored code. Stored rows are
+ * never rewritten.
+ */
+async function reasonsAsRead(db: Db, runId: string) {
+  const r = schema.checkResults;
+  // Per key: whether every result is the old missing-bar form (any status: a daily run stores the
+  // green comparisons too).
+  const allMissing = new Map<string, boolean>();
+  for (const x of await db
+    .select({
+      date: r.date,
+      symbolId: r.symbolId,
+      layer: r.layer,
+      checkName: r.checkName,
+      source: r.source,
+      message: r.message,
+    })
+    .from(r)
+    .where(and(eq(r.runId, runId), eq(r.layer, 'B'), eq(r.checkName, 'close_match')))) {
+    const key = JSON.stringify([x.date, x.symbolId, reasonCode({ ...x, check: x.checkName })]);
+    const missing = checkAsRead(x) === 'secondary_missing';
+    allMissing.set(key, (allMissing.get(key) ?? true) && missing);
+  }
+  return (row: { date: TradingDate; symbolId: number | null }, code: string): string => {
+    const m = /^((?:[^:@\s]+:)?)(B\.close_match@.+)$/.exec(code);
+    if (!m) return code;
+    // A prefix only on an overall row; a symbol row's code has none.
+    if ((m[1] !== '') !== (row.symbolId === null)) return code;
+    const key = JSON.stringify([row.date, row.symbolId, m[2]]);
+    return allMissing.get(key) === true
+      ? `${m[1]}${m[2]!.replace('B.close_match@', 'B.secondary_missing@')}`
+      : code;
   };
 }
 
@@ -373,6 +433,9 @@ async function reasonStatuses(
     })
     .from(r)
     .where(and(eq(r.runId, runId), inArray(r.status, NON_GREEN)))) {
+    // The stored check name, not `CHECK_AS_READ`: a health row keeps the code it was stored with
+    // (`B.close_match@s` for a missing secondary bar before `secondary_missing`), and its results
+    // are stored under the same name.
     const key = JSON.stringify([x.date, x.symbolId, reasonCode(x)]);
     const prev = results.get(key);
     results.set(key, prev ? worst(prev, x.status) : x.status);
@@ -459,7 +522,7 @@ export async function checkSources(
   const rows = await db
     .selectDistinct({ source: r.source })
     .from(r)
-    .where(and(eq(r.runId, runId), eq(r.checkName, check)));
+    .where(and(eq(r.runId, runId), eq(CHECK_AS_READ, check)));
   return rows.map((x) => x.source).sort((a, b) => cmp(a ?? '', b ?? ''));
 }
 
@@ -487,7 +550,7 @@ export async function runHasCheck(db: Db, runId: string, check: string): Promise
   const [result] = await db
     .select({ runId: schema.checkResults.runId })
     .from(schema.checkResults)
-    .where(and(eq(schema.checkResults.runId, runId), eq(schema.checkResults.checkName, check)))
+    .where(and(eq(schema.checkResults.runId, runId), eq(CHECK_AS_READ, check)))
     .limit(1);
   if (result) return true;
   const [summary] = await db
@@ -501,7 +564,7 @@ export async function runHasCheck(db: Db, runId: string, check: string): Promise
 /** The names of the checks with a non-green result in the run, sorted. */
 export async function nonGreenChecks(db: Db, runId: string): Promise<string[]> {
   const rows = await db
-    .selectDistinct({ check: schema.checkResults.checkName })
+    .selectDistinct({ check: CHECK_AS_READ })
     .from(schema.checkResults)
     .where(
       and(eq(schema.checkResults.runId, runId), inArray(schema.checkResults.status, NON_GREEN)),
@@ -522,7 +585,7 @@ export async function groupDates(
   const r = schema.checkResults;
   const where = and(
     eq(r.runId, runId),
-    eq(r.checkName, f.check),
+    eq(CHECK_AS_READ, f.check),
     inArray(r.status, NON_GREEN),
     f.symbolId === undefined
       ? undefined

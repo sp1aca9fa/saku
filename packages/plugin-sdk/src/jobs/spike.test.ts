@@ -115,10 +115,11 @@ describe('spikeReport', () => {
     expect(report.layerB).toEqual({ days: 2, passed: 2 });
     expect(report.layerC).toEqual({ days: 3, passed: 3 });
     expect(report.passed).toBe(false); // 67% availability is below 95%
+    // Stored as `close_match` before `secondary_missing` existed: listed as that check.
     expect(report.days[1]!.nonGreen).toEqual([
       {
         layer: 'B',
-        check: 'close_match',
+        check: 'secondary_missing',
         source: 's',
         status: 'yellow',
         message: 'no secondary bar',
@@ -172,7 +173,7 @@ describe('spikeReport', () => {
       expect(report.availability.s).toBeCloseTo(1 / 3, 12);
       expect(report.layerB).toEqual({ days: 1, passed: 1 });
       expect(report.days[2]!.nonGreen.map((r) => [r.check, r.status, r.message])).toEqual([
-        [m.checkName, 'yellow', 'no secondary bar'],
+        ['secondary_missing', 'yellow', 'no secondary bar'],
       ]);
     });
   }

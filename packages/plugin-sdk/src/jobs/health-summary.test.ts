@@ -51,6 +51,7 @@ async function setup() {
       symbol?: number | null;
       source?: string | null;
       observed?: number;
+      message?: string;
     },
   ) =>
     db.insert(schema.checkResults).values({
@@ -64,7 +65,7 @@ async function setup() {
       observed: o.observed ?? null,
       expected: null,
       tolerance: 0.001,
-      message: null,
+      message: o.message ?? null,
     });
   const health = (runId: string, date: string, symbol: number | null, status: HealthStatus) =>
     db
@@ -528,6 +529,121 @@ describe('groupDates', () => {
     expect(await runHasCheck(db, id, 'all_green')).toBe(true);
     expect(await runHasCheck(db, id, 'unknown')).toBe(false);
     expect(await nonGreenChecks(db, id)).toEqual(['alpha', 'zeta']);
+  });
+});
+
+describe('a missing secondary bar stored before secondary_missing', () => {
+  it('reads as secondary_missing in groups, filters and health-row reasons', async () => {
+    const { db, ids, result } = await setup();
+    const id = await run(db, 'bootstrap', '2026-01-07');
+    // The old form (AAA), a real disagreement (AAA), the current form (BBB).
+    const old = { status: 'yellow' as const, message: 'no secondary bar' };
+    await result(id, { date: '2026-01-05', ...old });
+    await result(id, { date: '2026-01-06', ...old });
+    await result(id, { date: '2026-01-07', status: 'red' });
+    await result(id, {
+      date: '2026-01-06',
+      status: 'yellow',
+      check: 'secondary_missing',
+      symbol: ids.BBB,
+      message: 'no secondary bar',
+    });
+    await db.insert(schema.dataHealth).values([
+      {
+        runId: id,
+        date: '2026-01-05',
+        symbolId: ids.AAA,
+        status: 'yellow',
+        reasons: ['B.close_match@s2'],
+      },
+      {
+        runId: id,
+        date: '2026-01-06',
+        symbolId: ids.AAA,
+        status: 'yellow',
+        reasons: ['B.close_match@s2'],
+      },
+      {
+        runId: id,
+        date: '2026-01-07',
+        symbolId: ids.AAA,
+        status: 'red',
+        reasons: ['B.close_match@s2'],
+      },
+      {
+        runId: id,
+        date: '2026-01-06',
+        symbolId: ids.BBB,
+        status: 'yellow',
+        reasons: ['B.secondary_missing@s2'],
+      },
+    ]);
+    const s = await runSummary(db, (await findRun(db, id))!);
+    expect(s.groups.map((g) => [g.status, g.check, g.symbol, g.count, g.first, g.last])).toEqual([
+      ['red', 'close_match', 'AAA', 1, '2026-01-07', '2026-01-07'],
+      ['yellow', 'secondary_missing', 'AAA', 2, '2026-01-05', '2026-01-06'],
+      ['yellow', 'secondary_missing', 'BBB', 1, '2026-01-06', '2026-01-06'],
+    ]);
+    // The stored codes still find their own results (known statuses); an old missing bar shows
+    // as secondary_missing, a real disagreement stays close_match.
+    expect(
+      s.healthGroups.map((g) => [g.symbol, g.reason, g.status, g.known, g.count, g.first]),
+    ).toEqual([
+      ['AAA', 'B.close_match@s2', 'red', true, 1, '2026-01-07'],
+      ['AAA', 'B.secondary_missing@s2', 'yellow', true, 2, '2026-01-05'],
+      ['BBB', 'B.secondary_missing@s2', 'yellow', true, 1, '2026-01-06'],
+    ]);
+    const missing = await groupDates(db, id, { check: 'secondary_missing' });
+    expect(missing.rows.map((r) => [r.date, r.symbol, r.message])).toEqual([
+      ['2026-01-05', 'AAA', 'no secondary bar'],
+      ['2026-01-06', 'AAA', 'no secondary bar'],
+      ['2026-01-06', 'BBB', 'no secondary bar'],
+    ]);
+    expect(missing.total).toBe(3);
+    const closes = await groupDates(db, id, { check: 'close_match' });
+    expect(closes.rows.map((r) => [r.date, r.status])).toEqual([['2026-01-07', 'red']]);
+    expect(await checkSources(db, id, 'secondary_missing')).toEqual(['s2']);
+    expect(await runHasCheck(db, id, 'secondary_missing')).toBe(true);
+    expect(await nonGreenChecks(db, id)).toEqual(['close_match', 'secondary_missing']);
+  });
+
+  it('a health-row reason shows as secondary_missing only when every matched result is', async () => {
+    const { db, ids, result } = await setup();
+    const id = await run(db, 'daily', '2026-01-06');
+    const old = { status: 'yellow' as const, message: 'no secondary bar' };
+    // 01-05: an old missing bar and a real comparison for the same key: stays close_match.
+    await result(id, { date: '2026-01-05', ...old });
+    await result(id, { date: '2026-01-05', status: 'green' });
+    // 01-06: no result for the key at all: stays as stored.
+    // On the overall row: the day's own result (no symbol), old form.
+    await result(id, { date: '2026-01-06', ...old, symbol: null, source: 'fx2' });
+    // A layer other than B with the same name and message is not the old form.
+    await result(id, { date: '2026-01-06', ...old, layer: 'D', source: 'iss' });
+    const row = (date: string, symbol: number | null, reasons: string[]) =>
+      db
+        .insert(schema.dataHealth)
+        .values({ runId: id, date, symbolId: symbol, status: 'yellow', reasons });
+    await row('2026-01-05', ids.AAA, ['B.close_match@s2']);
+    await row('2026-01-06', ids.AAA, ['B.close_match@s2', 'D.close_match@iss']);
+    await row('2026-01-06', null, ['X:B.close_match@fx2']);
+    const s = await runSummary(db, (await findRun(db, id))!);
+    expect(s.healthGroups.map((g) => [g.symbol, g.reason, g.first]).sort()).toEqual(
+      [
+        ['AAA', 'B.close_match@s2', '2026-01-05'],
+        ['AAA', 'B.close_match@s2', '2026-01-06'],
+        ['AAA', 'D.close_match@iss', '2026-01-06'],
+        [DAY, 'X:B.secondary_missing@fx2', '2026-01-06'],
+      ].sort(),
+    );
+  });
+
+  it('an old-form run with only missing bars has no close_match left to read', async () => {
+    const { db, result } = await setup();
+    const id = await run(db, 'daily', '2026-01-05');
+    await result(id, { date: '2026-01-05', status: 'yellow', message: 'no secondary bar' });
+    expect(await checkSources(db, id, 'close_match')).toEqual([]);
+    expect(await runHasCheck(db, id, 'close_match')).toBe(false);
+    expect(await groupDates(db, id, { check: 'close_match' })).toEqual({ rows: [], total: 0 });
   });
 });
 
