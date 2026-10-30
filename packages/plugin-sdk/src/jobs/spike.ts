@@ -89,7 +89,7 @@ export interface SpikeReport {
    * With `from`: the sessions before it that a daily run targeted (any status), neither listed
    * nor counted, and how many of them failed some part of the gate (`dayFailed`).
    */
-  leftOut?: { from: TradingDate; sessions: number; failed: number };
+  leftOut?: { from: TradingDate; sessions: number; failed: number; notJudged: number };
 }
 
 type Result = typeof schema.checkResults.$inferSelect;
@@ -288,8 +288,13 @@ export async function spikeReport(
       }
     });
     let failed = 0;
-    for (const date of earlier) if (dayFailed(await judge(date))) failed++;
-    leftOut = { from: start, sessions: earlier.length, failed };
+    let notJudged = 0;
+    for (const date of earlier) {
+      const d = await judge(date);
+      if (d.reason === 'pending' || d.layerCPending) notJudged++;
+      else if (dayFailed(d)) failed++;
+    }
+    leftOut = { from: start, sessions: earlier.length, failed, notJudged };
   }
   return {
     days,

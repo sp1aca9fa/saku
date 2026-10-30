@@ -193,7 +193,7 @@ function spikeMarkdown(r: SpikeReport): string {
     `Layer B (gate >= ${pct(GATE.layerB)}): ${r.layerB.passed}/${r.layerB.days}. Layer C (gate >= ${pct(GATE.layerC)}): ${r.layerC.passed}/${r.layerC.days}.`,
     ...(r.leftOut
       ? [
-          `Counted from ${r.leftOut.from} (--from; ${r.leftOut.sessions} earlier sessions with daily runs left out, ${r.leftOut.failed} of them failed)`,
+          `Counted from ${r.leftOut.from} (--from; ${r.leftOut.sessions} earlier sessions with daily runs left out, ${r.leftOut.failed} of them failed${r.leftOut.notJudged ? `, ${r.leftOut.notJudged} not judged yet` : ''})`,
         ]
       : []),
     `Numeric gate: ${verdict(r)} (every failure must still be explained).`,

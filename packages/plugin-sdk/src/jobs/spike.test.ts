@@ -253,6 +253,9 @@ describe('spikeReport', () => {
     expect(report.days[0]).toMatchObject({ layerCPass: false, layerCPending: true });
     expect(report).toMatchObject({ pending: 1, passed: false, layerC: { days: 0, passed: 0 } });
     expect(report.through).toBeUndefined();
+    // Left out by --from while its index can still arrive: not judged yet, never counted as clean.
+    const later = await spikeReport(db, { sessions, open: '2026-01-06', from: '2026-01-06' });
+    expect(later.leftOut).toEqual({ from: '2026-01-06', sessions: 1, failed: 0, notJudged: 1 });
 
     // The next run checks 01-05 in its window; 01-06 now waits for the index.
     const next = await runFor(db, '2026-01-06', {
@@ -419,7 +422,7 @@ describe('spikeReport', () => {
     expect(report).toMatchObject({ judged: 2, primaryOkDays: 2, ratiosMet: true });
     // What it left out: the sessions earlier daily runs targeted (01-02 crashed, 01-06 primary
     // failed), both failed.
-    expect(report.leftOut).toEqual({ from: '2026-01-12', sessions: 2, failed: 2 });
+    expect(report.leftOut).toEqual({ from: '2026-01-12', sessions: 2, failed: 2, notJudged: 0 });
     // Without --from nothing is left out.
     expect((await spikeReport(db, { sessions, to: '2026-01-13' })).leftOut).toBeUndefined();
 
