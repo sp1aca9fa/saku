@@ -341,8 +341,9 @@ interface VintageRow {
  * Keeps a vintage only when it is new: no stored row for that date and publication time (or,
  * with none given, for that date) yet, or the latest stored one (value or withdrawal, by fetch
  * time) says something else (a revision). A withdrawal is the same as a stored withdrawal for
- * the same key, so a refetch stores nothing (idempotent). Refuses a value and a withdrawal for
- * the same date and publication time in one response (which one holds would be a guess).
+ * the same key, so a refetch stores nothing (idempotent). The same vintage twice in one response
+ * is kept once; two different ones for the same date and publication time (two values, or a
+ * value and a withdrawal) are refused whole (which one holds would be a guess).
  *
  * `known_at` (spec 2026-10-30 restated-vintage; requirements 04, no look-ahead): a vintage first
  * seen is known from its publication time (the source's history), as given in `incoming`; a
@@ -354,16 +355,25 @@ function newVintages<T extends VintageRow>(
   incoming: T[],
   item: string,
 ): { values: T[]; withdrawals: T[]; result: Omit<StoredValues, 'inserted'> & { new: number } } {
-  const key = (r: T) => `${r.date}|${r.publishedAt ?? ''}`;
+  const key = (r: T) => vintageKey(r.date, r.publishedAt);
   const seen = new Map<string, T>();
+  const unique: T[] = [];
   for (const row of incoming) {
     const other = seen.get(key(row));
-    if (other && (other.value === null) !== (row.value === null)) {
+    if (other === undefined) {
+      seen.set(key(row), row);
+      unique.push(row);
+      continue;
+    }
+    // The same vintage twice is kept once; two different ones (two values, or a value and a
+    // withdrawal) are refused whole: which one holds would be a guess (the DB's row order).
+    if (other.value !== row.value) {
       throw new Error(
-        `${item}: a value and a withdrawal for ${row.date} with the same publication time`,
+        other.value === null || row.value === null
+          ? `${item}: a value and a withdrawal for ${row.date} with the same publication time`
+          : `${item}: two different values for ${row.date} with the same publication time`,
       );
     }
-    seen.set(key(row), row);
   }
   const latest = new Map<string, T>();
   for (const row of [...stored].sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt))) {
@@ -374,7 +384,7 @@ function newVintages<T extends VintageRow>(
   const revised = new Set<TradingDate>();
   const withdrawn = new Set<TradingDate>();
   let fresh = 0;
-  for (let row of incoming) {
+  for (let row of unique) {
     const prev = latest.get(key(row));
     if (prev && prev.value === row.value) continue;
     // Both UTC ISO text (`instant`, and the jobs' fetch time), so string order is time order.
@@ -401,13 +411,28 @@ function newVintages<T extends VintageRow>(
  * A publication time as UTC ISO text, so `known_at` values compare correctly as strings. A date
  * without a time is refused: read as midnight it would make a value known hours early.
  */
-function instant(text: string): string {
+function instant(text: string, what = 'publishedAt'): string {
   const ms = Date.parse(text);
   // A time without Z or an offset would be read in the server's own time zone.
   if (!/T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/.test(text) || Number.isNaN(ms)) {
-    throw new Error(`publishedAt must be an instant with a time of day and a zone, not "${text}"`);
+    throw new Error(`${what} must be an instant with a time of day and a zone, not "${text}"`);
   }
   return new Date(ms).toISOString();
+}
+
+/**
+ * The vintage a row belongs to: its date and publication moment, so the same moment spelled
+ * differently (`Z` or `-05:00`) is one vintage (review of 0e9f235). The moment is the normalized
+ * instant; a legacy row whose `published_at` is a date only (stored before a time was required,
+ * which `instant` refuses) keeps its raw text. No publication time: the date alone.
+ */
+function vintageKey(date: string, publishedAt: string | null): string {
+  if (publishedAt === null) return `${date}|`;
+  try {
+    return `${date}|${instant(publishedAt)}`;
+  } catch {
+    return `${date}|${publishedAt}`;
+  }
 }
 
 /**
@@ -422,14 +447,42 @@ const readKnownAt = <T extends { knownAt: string }>(rows: T[]): T[] =>
   );
 
 /**
+ * A point's stored value: a finite number, or null for a withdrawal. Anything else (a missing,
+ * null or NaN value without `withdrawn: true`, or a withdrawal that also carries a value) is
+ * refused, and with it the whole response (nothing stored), like issuer records: read as a
+ * withdrawal or stored as NaN it would change what a point-in-time read returns (requirements 04,
+ * "Point-in-time series"; spec 2026-10-30 withdrawn-values; plug-in contract in docs/plugins.md).
+ */
+function vintageValue(
+  point: { date: string; withdrawn?: unknown },
+  value: unknown,
+  what: string,
+): number | null {
+  if (point.withdrawn === true) {
+    if (value === undefined || value === null) return null;
+    throw new Error(`${what}: a withdrawal on ${point.date} that also carries a value`);
+  }
+  if (point.withdrawn !== undefined && point.withdrawn !== false) {
+    throw new Error(`${what}: "withdrawn" on ${point.date} is neither true nor absent`);
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${what}: a value on ${point.date} that is not a finite number`);
+  }
+  return value;
+}
+
+/**
  * Stores a series' vintages: values in `series`, withdrawals in `series_withdrawals` (both
- * append-only; see `newVintages` for what counts as new).
+ * append-only; see `newVintages` for what counts as new). A point that is neither a finite
+ * value nor a withdrawal refuses the whole response (`vintageValue`).
  */
 export async function storeSeries(
   db: Db,
   input: { series: string; source: string; points: SeriesPoint[]; fetchedAt: string },
 ): Promise<StoredValues> {
   if (input.points.length === 0) return { inserted: 0, revised: [], withdrawn: [] };
+  // UTC ISO text, so `newVintages` and reads compare it with `known_at` as strings.
+  const fetchedAt = instant(input.fetchedAt, 'fetchedAt');
   const dates = input.points.map((p) => p.date).sort();
   const range = [dates[0]!, dates.at(-1)!] as const;
   const common = { series: input.series, source: input.source };
@@ -462,10 +515,10 @@ export async function storeSeries(
     input.points.map((p) => ({
       ...common,
       date: p.date,
-      value: p.withdrawn ? null : p.value,
+      value: vintageValue(p, p.value, `${input.source} ${input.series}`),
       publishedAt: p.publishedAt ?? null,
-      fetchedAt: input.fetchedAt,
-      knownAt: p.publishedAt ? instant(p.publishedAt) : input.fetchedAt,
+      fetchedAt,
+      knownAt: p.publishedAt ? instant(p.publishedAt) : fetchedAt,
     })),
     input.series,
   );
@@ -482,11 +535,21 @@ export async function storeSeries(
   return { inserted: result.new, revised: result.revised, withdrawn: result.withdrawn };
 }
 
+/**
+ * Stores FX vintages per pair: rates in `fx_rates`, withdrawals in `fx_withdrawals` (both
+ * append-only; see `newVintages`). A rate that is neither a finite number nor a withdrawal, or
+ * two different vintages for one pair, date and publication time, refuses the whole response.
+ */
 export async function storeFx(
   db: Db,
   input: { source: string; kind: FxKind; rates: FxRate[]; fetchedAt: string },
 ): Promise<StoredValues> {
   const out: StoredValues = { inserted: 0, revised: [], withdrawn: [] };
+  if (input.rates.length === 0) return out;
+  // UTC ISO text, so `newVintages` and reads compare it with `known_at` as strings.
+  const fetchedAt = instant(input.fetchedAt, 'fetchedAt');
+  const rows: (typeof fxRates.$inferInsert)[] = [];
+  const gone: (typeof fxWithdrawals.$inferInsert)[] = [];
   const pairs = [...new Set(input.rates.map((r) => r.pair))];
   for (const pair of pairs) {
     const rates = input.rates.filter((r) => r.pair === pair);
@@ -526,27 +589,29 @@ export async function storeFx(
       rates.map((r) => ({
         ...common,
         date: r.date,
-        value: r.withdrawn ? null : r.rate,
+        value: vintageValue(r, r.rate, `${input.source} ${pair}`),
         publishedAt: r.publishedAt ?? null,
-        fetchedAt: input.fetchedAt,
-        knownAt: r.publishedAt ? instant(r.publishedAt) : input.fetchedAt,
+        fetchedAt,
+        knownAt: r.publishedAt ? instant(r.publishedAt) : fetchedAt,
       })),
       pair,
     );
-    const rows = values.map(({ value, ...r }) => ({ ...r, rate: value! }));
-    const gone = withdrawals.map(({ value: _, ...r }) => r);
-    await db.transaction(async (tx) => {
-      for (let i = 0; i < rows.length; i += CHUNK) {
-        await tx.insert(fxRates).values(rows.slice(i, i + CHUNK));
-      }
-      for (let i = 0; i < gone.length; i += CHUNK) {
-        await tx.insert(fxWithdrawals).values(gone.slice(i, i + CHUNK));
-      }
-    });
+    rows.push(...values.map(({ value, ...r }) => ({ ...r, rate: value! })));
+    gone.push(...withdrawals.map(({ value: _, ...r }) => r));
     out.inserted += result.new;
     out.revised.push(...result.revised);
     out.withdrawn.push(...result.withdrawn);
   }
+  // Written only after every pair passed, in one transaction: a refused pair refuses the whole
+  // response (nothing stored).
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      await tx.insert(fxRates).values(rows.slice(i, i + CHUNK));
+    }
+    for (let i = 0; i < gone.length; i += CHUNK) {
+      await tx.insert(fxWithdrawals).values(gone.slice(i, i + CHUNK));
+    }
+  });
   return out;
 }
 
@@ -663,7 +728,7 @@ interface StoredVintage {
  *
  * Vintage time (spec 2026-10-30 restated-vintage): rows without `published_at` use their own
  * `known_at` (their fetch). Rows with one share the vintage of every row with the same date and
- * `published_at` text (the key `newVintages` stores by), and its time is the earliest `known_at`
+ * publication moment (`vintageKey`, the key `newVintages` stores by), and its time is the earliest `known_at`
  * among them: the first-seen row's, which is its publication time (later restatements are known
  * at or after it). Taken from the stored, already normalized `known_at` rather than by parsing
  * `published_at` again, so older rows (date-only, read as known at the day end) rank as they
@@ -673,11 +738,25 @@ function vintages(
   values: (StoredVintage & { value: number })[],
   withdrawals: StoredVintage[],
 ): Vintage[] {
+  const key = (r: StoredVintage) => vintageKey(r.date, r.publishedAt);
+  const firstSeen = new Set<string>();
   const all = readKnownAt([
     ...values.map((r) => ({ ...r, withdrawn: false as const })),
     ...withdrawals.map((r) => ({ ...r, withdrawn: true as const, value: undefined })),
-  ]).sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt));
-  const key = (r: StoredVintage) => `${r.date}|${r.publishedAt}`;
+  ])
+    .sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt))
+    .map((r) => {
+      // Restatement rule on read too (requirements 04, no look-ahead; review of 0e9f235): the
+      // first-fetched row of a vintage keeps its known_at; a later row of the same vintage (a
+      // restatement) is known only from its fetch, whatever its stored known_at says (rows
+      // stored before that rule, legacy date-only ones included). Nothing stored is changed.
+      if (r.publishedAt === null) return r;
+      if (!firstSeen.has(key(r))) {
+        firstSeen.add(key(r));
+        return r;
+      }
+      return r.fetchedAt > r.knownAt ? { ...r, knownAt: r.fetchedAt } : r;
+    });
   const vintageAt = new Map<string, string>();
   for (const r of all) {
     if (r.publishedAt === null) continue;

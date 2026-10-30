@@ -180,18 +180,31 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
           failed: r.failed,
           missing: r.missing,
           ...(Object.keys(r.revisedValues).length > 0 && { revisedValues: r.revisedValues }),
+          ...(Object.keys(r.withdrawnValues).length > 0 && {
+            withdrawnValues: r.withdrawnValues,
+          }),
         });
       }
-      valueRevisions = reports.flatMap((r) =>
-        Object.entries(r.revisedValues).map(([item, dates]) => ({
+      // Changed values and withdrawn ones (the source no longer has a value for the date) are
+      // told as different kinds: a withdrawal is never described as a new value.
+      const told = (
+        r: (typeof reports)[number],
+        byItem: Record<string, string[]>,
+        kind: 'changed' | 'withdrawn',
+      ) =>
+        Object.entries(byItem).map(([item, dates]) => ({
           ticker: item,
           source: r.source,
           field: r.kind === 'fx' ? 'rate' : 'value',
           count: dates.length,
           from: dates.reduce((a, b) => (b < a ? b : a)),
           to: dates.reduce((a, b) => (b > a ? b : a)),
-        })),
-      );
+          kind,
+        }));
+      valueRevisions = reports.flatMap((r) => [
+        ...told(r, r.revisedValues, 'changed'),
+        ...told(r, r.withdrawnValues, 'withdrawn'),
+      ]);
       const failing = reports.filter((r) => r.stopped || r.failed.length > 0);
       incomplete = failing.filter(countsForRun).map((r) => r.source);
       // Best effort (issuer data): logged, graded yellow by verify (the fund's staleness and the

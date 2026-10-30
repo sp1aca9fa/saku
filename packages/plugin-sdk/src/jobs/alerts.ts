@@ -291,7 +291,11 @@ export function sendUpdateFailed(
   });
 }
 
-/** What a weekly refetch revised, once per run. */
+/**
+ * What a weekly refetch revised, once per run: changed values (bars, series, FX), and values the
+ * source withdrew (`kind: 'withdrawn'`: it no longer has a value for those dates; spec 2026-10-30
+ * withdrawn-values), each kind in its own line so a withdrawal never reads as a new value.
+ */
 export function sendRevisions(
   db: Db,
   o: AlertOptions & {
@@ -303,26 +307,34 @@ export function sendRevisions(
       count: number;
       from: string;
       to: string;
+      /** Default `changed`. */
+      kind?: 'changed' | 'withdrawn';
     }[];
   },
 ): Promise<AlertSummary> {
   const count = o.revisions.reduce((n, r) => n + r.count, 0);
-  const items = o.revisions
-    .slice(0, 8)
-    .map(
-      (r) =>
-        `${r.ticker} ${r.field}@${r.source} ${r.count} (${r.from === r.to ? r.from : `${r.from}..${r.to}`})`,
-    )
-    .join(', ');
+  const listed = (rows: typeof o.revisions) => {
+    const items = rows
+      .slice(0, 8)
+      .map(
+        (r) =>
+          `${r.ticker} ${r.field}@${r.source} ${r.count} (${r.from === r.to ? r.from : `${r.from}..${r.to}`})`,
+      )
+      .join(', ');
+    return rows.length > 8 ? `${items}, ...` : items;
+  };
+  const changed = o.revisions.filter((r) => r.kind !== 'withdrawn');
+  const withdrawn = o.revisions.filter((r) => r.kind === 'withdrawn');
   return sendAdminAlert(db, {
     ...o,
     subject: `revisions:${o.runId}`,
     type: 'revisions',
     lines: (t) => [
       t('alerts.revisions.title', { count }),
-      t('alerts.revisions.body', {
-        items: o.revisions.length > 8 ? `${items}, ...` : items,
-      }),
+      ...(changed.length > 0 ? [t('alerts.revisions.body', { items: listed(changed) })] : []),
+      ...(withdrawn.length > 0
+        ? [t('alerts.revisions.withdrawn', { items: listed(withdrawn) })]
+        : []),
     ],
   });
 }

@@ -124,13 +124,27 @@ function source(
   return s;
 }
 
+/** A source's withdrawal of its published values for `dates`, from `at` (spec withdrawn-values). */
+type Withdrawal = { dates: string[]; at: string };
+/** The withdrawals a fetch at `now` already sees (a source cannot send one before it happens). */
+const withdrawalsSeen = (w: Withdrawal | undefined, from: string, to: string, now: Date) =>
+  w && now.getTime() >= Date.parse(w.at)
+    ? w.dates.filter((d) => d >= from && d <= to).map((date) => ({ date, publishedAt: w.at }))
+    : [];
+
 /**
- * The series source: the USD cash rate (`cashUntil`: the first date it no longer has) and SPY's
- * price index `IDX` (SPY's close x10, published 18:00 New York the next session); the index has
- * nothing after `indexUntil` and fails every call once `to` reaches `indexDownFrom`.
+ * The series source: the USD cash rate (`cashUntil`: the first date it no longer has;
+ * `cashWithdrawn`: dates the source later withdraws) and SPY's price index `IDX` (SPY's close
+ * x10, published 18:00 New York the next session); the index has nothing after `indexUntil` and
+ * fails every call once `to` reaches `indexDownFrom`.
  */
 function seriesSource(
-  o: { cashUntil?: string; indexUntil?: string; indexDownFrom?: string } = {},
+  o: {
+    cashUntil?: string;
+    cashWithdrawn?: Withdrawal;
+    indexUntil?: string;
+    indexDownFrom?: string;
+  } = {},
 ): SeriesSource {
   const cash = cashRates(sessions, DATES, o.cashUntil ?? TARGET);
   const spy = clean().SPY;
@@ -140,7 +154,13 @@ function seriesSource(
       provides: { series: ['CASH', 'IDX'], cashRates: { USD: 'CASH' } },
     },
     async fetchSeries(id, from, to, ctx) {
-      if (id !== 'IDX') return cash.fetchSeries(id, from, to, ctx);
+      if (id !== 'IDX') {
+        const gone = withdrawalsSeen(o.cashWithdrawn, from, to, ctx.now);
+        return [
+          ...(await cash.fetchSeries(id, from, to, ctx)),
+          ...gone.map((g) => ({ ...g, withdrawn: true as const })),
+        ];
+      }
       if (o.indexDownFrom && to >= o.indexDownFrom) throw new Error('idx: HTTP 503');
       return spy
         .filter((b) => b.date >= from && b.date <= to && (!o.indexUntil || b.date <= o.indexUntil))
@@ -157,7 +177,8 @@ const rates = seriesSource();
 /**
  * An FX source for `USDJPY` (rate 150, published 16:00 UTC the same day); `primary` suggests
  * itself as the primary; nothing after `until`; every call failing once `to` reaches `downFrom`;
- * no rate on the `closed` days, declared as its calendar `fx-cal` when `declared`.
+ * no rate on the `closed` days, declared as its calendar `fx-cal` when `declared`; the rates of
+ * `withdrawn` dates later withdrawn.
  */
 function fxSource(
   key: string,
@@ -167,6 +188,7 @@ function fxSource(
     downFrom?: string;
     closed?: string[];
     declared?: boolean;
+    withdrawn?: Withdrawal;
   } = {},
 ) {
   const s: FxSource = {
@@ -175,11 +197,18 @@ function fxSource(
       ...(o.declared && { calendar: 'fx-cal' }),
     }),
     supports: (pair) => pair === 'USDJPY',
-    async fetchRates(pair, from, to) {
+    async fetchRates(pair, from, to, ctx) {
       if (o.downFrom && to >= o.downFrom) throw new Error(`${key}: HTTP 503`);
-      return DATES.filter(
-        (d) => d >= from && d <= to && (!o.until || d <= o.until) && !o.closed?.includes(d),
-      ).map((date) => ({ pair, date, rate: 150, publishedAt: `${date}T16:00:00Z` }));
+      return [
+        ...DATES.filter(
+          (d) => d >= from && d <= to && (!o.until || d <= o.until) && !o.closed?.includes(d),
+        ).map((date) => ({ pair, date, rate: 150, publishedAt: `${date}T16:00:00Z` })),
+        ...withdrawalsSeen(o.withdrawn, from, to, ctx.now).map((g) => ({
+          ...g,
+          pair,
+          withdrawn: true as const,
+        })),
+      ];
     },
   };
   return s;
@@ -643,6 +672,66 @@ describe('fault injection (layer F)', () => {
       true,
     );
     expect(adminAlerts.join('\n')).toMatch(/CASH/);
+  });
+
+  // A published value withdrawn before the run (spec 2026-10-30 withdrawn-values): its date has
+  // no value any more, so freshness is graded from the earlier date, never green as if it existed.
+  // Withdrawn at 00:00 UTC on 01-17, after the values were published, before the daily run (01:30).
+  const WITHDRAWN_AT = '2026-01-17T00:00:00.000Z';
+
+  it('a withdrawn cash value: freshness from the earlier date (yellow), the strategy unaffected', async () => {
+    // At the run, the latest published cash value is the previous session's (published 18:00 New
+    // York the next session): green, one day behind (the control). Withdrawn, the one before it
+    // is the latest: two behind, yellow.
+    const last = sessions.before(TARGET, 1);
+    const gone = seriesSource({ cashWithdrawn: { dates: [last], at: WITHDRAWN_AT } });
+    const { db, result, today, adminAlerts } = await run(sources(), gone);
+    expect(result.ok).toBe(true);
+    // The cash rate grades the day overall, never the signal (see the stale cash case above).
+    expect(today).toMatchObject({ dataStatus: 'green', allocation: 'Risk on' });
+    const [overall] = await db
+      .select()
+      .from(schema.dataHealth)
+      .where(eq(schema.dataHealth.runId, result.runId))
+      .then((rows) => rows.filter((r) => r.symbolId === null && r.date === TARGET));
+    expect(overall).toMatchObject({ status: 'yellow' });
+    expect(overall!.reasons).toContain('CASH:stale(2)@rates');
+    expect(adminAlerts.join('\n')).toContain('CASH: 2 business days behind (rates)');
+    // Stored append-only: the value kept, the withdrawal beside it.
+    const kept = await db.select().from(schema.series).where(eq(schema.series.date, last));
+    expect(kept.filter((r) => r.series === 'CASH')).toHaveLength(1);
+    expect(await db.select().from(schema.seriesWithdrawals)).toMatchObject([
+      { series: 'CASH', date: last, knownAt: WITHDRAWN_AT },
+    ]);
+  });
+
+  it('withdrawn FX primary rates (base JPY): freshness from the earlier date, never green', async () => {
+    // The primary publishes the run's date the same day (green, none behind, see the control
+    // below). Its last two rates withdrawn: two behind, yellow. (Only the run's date withdrawn
+    // would be one behind, which is green by the normal publication lag, 04.)
+    const dates = [sessions.before(TARGET, 1), TARGET];
+    const fx = [
+      fxSource('fxp', { primary: true, withdrawn: { dates, at: WITHDRAWN_AT } }),
+      fxSource('fxs'),
+    ];
+    const { db, result, today, adminAlerts } = await run(sources(), rates, undefined, {
+      base: 'JPY',
+      sources: fx,
+    });
+    expect(result.ok).toBe(true);
+    // FX health never affects a signal computed in USD (04): the day overall only.
+    expect(today).toMatchObject({ dataStatus: 'green', allocation: 'Risk on' });
+    const [overall] = await db
+      .select()
+      .from(schema.dataHealth)
+      .where(eq(schema.dataHealth.runId, result.runId))
+      .then((rows) => rows.filter((r) => r.symbolId === null && r.date === TARGET));
+    expect(overall!.status).not.toBe('green');
+    expect(overall!.reasons).toContain('USDJPY:stale(2)@fxp');
+    expect(adminAlerts.join('\n')).toContain('USDJPY: 2 business days behind');
+    expect(
+      (await db.select().from(schema.fxWithdrawals)).map((r) => [r.source, r.date]).sort(),
+    ).toEqual(dates.map((d) => ['fxp', d]));
   });
 
   it('the index source down for days: the fund yellow, the allocation kept, admins told', async () => {

@@ -58,6 +58,18 @@ describe('FRED withdrawn values', () => {
     ]);
   });
 
+  it('reads rows in real-time order even when one window sends them out of order', async () => {
+    // One window (4 vintages); the same rows as above, reversed.
+    const ctx = context(vintages, () => [...rows].reverse());
+    expect(await fredSeries.fetchSeries('DTB3', '2026-01-01', '2026-01-06', ctx)).toEqual([
+      { date: '2026-01-02', value: 3.61, publishedAt: at18NY('2026-01-05') },
+      { date: '2026-01-02', withdrawn: true, publishedAt: at18NY('2026-01-08') },
+      { date: '2026-01-02', value: 3.65, publishedAt: at18NY('2026-01-12') },
+      { date: '2026-01-06', value: 3.7, publishedAt: at18NY('2026-01-08') },
+      { date: '2026-01-06', withdrawn: true, publishedAt: at18NY('2026-01-09') },
+    ]);
+  });
+
   it('maps a withdrawal of an H.10 rate to an FX withdrawal', async () => {
     const ctx = context(vintages, () => rows.slice(0, 2));
     expect(await fredFx.fetchRates('USDJPY', '2026-01-01', '2026-01-06', ctx)).toEqual([

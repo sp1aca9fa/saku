@@ -21,6 +21,7 @@ import {
   describeReason,
   sendDataHealthAdmin,
   sendJobFailure,
+  sendRevisions,
   sendStrategyAlerts,
   sendUpdateFailed,
 } from './alerts';
@@ -370,6 +371,55 @@ describe('admin alerts', () => {
         ].join('\n'),
       },
     ]);
+  });
+});
+
+describe('revisions alert', () => {
+  const revision = {
+    source: 'fred',
+    field: 'value',
+    count: 1,
+    from: '2026-01-05',
+    to: '2026-01-05',
+  };
+
+  it.each(['en', 'ja'])(
+    'tells a withdrawn value as its own kind, never as a changed one (%s)',
+    async (language) => {
+      const { db, owner } = await setup(language);
+      await setSetting(db, 'forward_records_from', '2026-01-05');
+      await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+      const { notifier, sent } = fakeNotifier();
+      const t = translator(language);
+      const base = options(notifier, '2026-01-06');
+      const withdrawn = { ...revision, ticker: 'CASH', kind: 'withdrawn' as const };
+      // Withdrawals only: no "changed ... recomputed with the new ones" line.
+      expect((await sendRevisions(db, { ...base, runId: 'r1', revisions: [withdrawn] })).sent).toBe(
+        1,
+      );
+      const items = 'CASH value@fred 1 (2026-01-05)';
+      expect(sent[0]!.text.split('\n').slice(0, 2)).toEqual([
+        t('alerts.revisions.title', { count: 1 }),
+        t('alerts.revisions.withdrawn', { items }),
+      ]);
+      // Both kinds: each in its own line.
+      const changed = { ...revision, ticker: 'IDX' };
+      await sendRevisions(db, { ...base, runId: 'r2', revisions: [changed, withdrawn] });
+      expect(sent[1]!.text.split('\n').slice(0, 3)).toEqual([
+        t('alerts.revisions.title', { count: 2 }),
+        t('alerts.revisions.body', { items: 'IDX value@fred 1 (2026-01-05)' }),
+        t('alerts.revisions.withdrawn', { items }),
+      ]);
+    },
+  );
+
+  it('says the source no longer has a value, in both languages', () => {
+    expect(translator('en')('alerts.revisions.withdrawn', { items: 'X' })).toMatch(
+      /no longer has a value/,
+    );
+    expect(translator('ja')('alerts.revisions.withdrawn', { items: 'X' })).toMatch(
+      /値がもうありません/,
+    );
   });
 });
 

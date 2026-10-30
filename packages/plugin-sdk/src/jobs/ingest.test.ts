@@ -172,7 +172,7 @@ describe('ingest', () => {
     expect(reports[0]).toMatchObject({ ok: ['USDXXX'], inserted: 1 });
   });
 
-  it('reports a withdrawn series value like a revised one, once, and warns', async () => {
+  it('reports a withdrawn series value as its own kind, once, and warns', async () => {
     const db = await setup();
     const at = (d: string) => `${d}T23:00:00.000Z`;
     let points: SeriesPoint[] = [{ date: '2026-01-14', value: 4, publishedAt: at('2026-01-14') }];
@@ -191,10 +191,16 @@ describe('ingest', () => {
     };
     const plugins = { ...emptyPlugins(), series: [series] };
     expect((await ingest(db, plugins, o))[0]).toMatchObject({ inserted: 1, revised: 0 });
-    // A later vintage withdraws the value: reported with the revisions, and warned.
+    // A later vintage withdraws the value: counted with the revisions, listed as withdrawn (never
+    // as a changed value), and warned.
     points = [...points, { date: '2026-01-14', withdrawn: true, publishedAt: at('2026-01-15') }];
     const [r] = await ingest(db, plugins, o);
-    expect(r).toMatchObject({ inserted: 0, revised: 1, revisedValues: { CASH: ['2026-01-14'] } });
+    expect(r).toMatchObject({
+      inserted: 0,
+      revised: 1,
+      revisedValues: {},
+      withdrawnValues: { CASH: ['2026-01-14'] },
+    });
     expect(warned.filter((w) => w.message.includes('withdrew'))).toEqual([
       {
         message: 'series rates CASH: the source withdrew stored values',
@@ -202,7 +208,11 @@ describe('ingest', () => {
       },
     ]);
     // The same answer again: stored once, nothing reported.
-    expect((await ingest(db, plugins, o))[0]).toMatchObject({ revised: 0, revisedValues: {} });
+    expect((await ingest(db, plugins, o))[0]).toMatchObject({
+      revised: 0,
+      revisedValues: {},
+      withdrawnValues: {},
+    });
     expect(await db.select().from(schema.seriesWithdrawals)).toHaveLength(1);
   });
 

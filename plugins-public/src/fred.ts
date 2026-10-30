@@ -233,15 +233,13 @@ async function observations(
     atPreviousEnd = atEnd;
   }
 
-  // One window keeps FRED's own order (observation date, then real time); several are put in
-  // that order again.
-  if (windows.length > 1) {
-    rows.sort((a, b) =>
-      a.date === b.date
-        ? a.realtime_start.localeCompare(b.realtime_start)
-        : a.date.localeCompare(b.date),
-    );
-  }
+  // Always put in observation-date, then real-time order (FRED's documented order, never relied
+  // on, also with one window): withdrawal detection below reads each date's vintages in time order.
+  rows.sort((a, b) =>
+    a.date === b.date
+      ? a.realtime_start.localeCompare(b.realtime_start)
+      : a.date.localeCompare(b.date),
+  );
   const out: SeriesPoint[] = [];
   /** Per date, whether its latest vintage so far (rows are in real-time order) has a value. */
   const hasValue = new Map<string, boolean>();

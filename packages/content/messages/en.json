@@ -86,7 +86,8 @@
     },
     "revisions": {
       "title": "Saku: the weekly refetch changed {count} stored values",
-      "body": "Changed: {items}. The old values are kept in the revision log; checks and recorded days were recomputed with the new ones (any recorded day now decided differently is sent separately)."
+      "body": "Changed: {items}. The old values are kept in the revision log; checks and recorded days were recomputed with the new ones (any recorded day now decided differently is sent separately).",
+      "withdrawn": "Withdrawn by the source: {items}. The source no longer has a value for these dates. The old values stay in the revision log but are not used from the withdrawal on (those dates read as missing, never as 0); checks and recorded days were recomputed without them (any recorded day now decided differently is sent separately)."
     },
     "integrity": {
       "title": "Saku: a calculation check failed ({check})",

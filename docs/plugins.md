@@ -38,8 +38,12 @@ vintage of the date is empty), return a withdrawal for that date and vintage,
 `{ date, withdrawn: true, publishedAt }` (`SeriesWithdrawal`; for FX `{ pair, date, withdrawn:
 true, publishedAt }`), never a zero. From its publication time (or, without one, the fetch) on,
 point-in-time reads treat the date as having no value; a later value for the date restores it.
-Send one only for a date the source had a value for; a date that never had one is left out. A
-value and a withdrawal with the same date and publication time are refused.
+Send one only for a date the source had a value for; a date that never had one is left out.
+Every series point and FX rate is either a withdrawal (`withdrawn: true`, no value) or a finite
+number; anything else (a null, missing or NaN value without `withdrawn: true`, or a withdrawal
+with a value) refuses the whole response, nothing stored. So do two different vintages (two
+values, or a value and a withdrawal) for the same date and publication moment (the same instant
+in any spelling, `Z` or an offset); the same vintage twice is stored once.
 
 ### `PluginInfo`
 

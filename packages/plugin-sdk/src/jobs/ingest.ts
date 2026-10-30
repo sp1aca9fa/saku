@@ -52,11 +52,17 @@ export interface SourceReport {
   missing: Record<string, TradingDate[]>;
   /**
    * Series and FX: stored dates whose value the source now reports differently, per item (each a
-   * new row known from this fetch; the old one kept), and dates whose value the source withdrew
-   * (no value from the withdrawal on; StoredValues.withdrawn). Counted in `revised` and reported
-   * with the bar revisions.
+   * new row known from this fetch; the old one kept). Counted in `revised` and reported with the
+   * bar revisions. A withdrawn date is in `withdrawnValues` instead (also when the same fetch
+   * restated another vintage of it: the admins are told it was withdrawn).
    */
   revisedValues: Record<string, TradingDate[]>;
+  /**
+   * Series and FX: dates whose value the source withdrew, per item (no value from the withdrawal
+   * on; StoredValues.withdrawn; spec 2026-10-30 withdrawn-values). Counted in `revised` and told
+   * to the admins as their own kind, never as a changed value.
+   */
+  withdrawnValues: Record<string, TradingDate[]>;
   /** Issuer sources: the tickers it supports (all of them when `supports` failed). */
   supported?: string[];
 }
@@ -103,20 +109,26 @@ function report(source: string, kind: SourceReport['kind']): SourceReport {
     readjustments: 0,
     missing: {},
     revisedValues: {},
+    withdrawnValues: {},
   };
 }
 
 /**
- * Adds what storing series values or FX rates did to the source's report. Withdrawals are in
- * `revised` (reported with the revisions) and are also logged as a warning of their own.
+ * Adds what storing series values or FX rates did to the source's report. Withdrawals are counted
+ * in `revised`, listed in `withdrawnValues` (not `revisedValues`), and logged as a warning.
  */
 function noteValues(r: SourceReport, stored: StoredValues, log: Logger): void {
   r.inserted += stored.inserted;
   r.revised += stored.revised.length;
-  for (const { item, date } of stored.revised) (r.revisedValues[item] ??= []).push(date);
   const withdrawn = new Map<string, TradingDate[]>();
-  for (const { item, date } of stored.withdrawn)
+  for (const { item, date } of stored.withdrawn) {
     withdrawn.set(item, [...(withdrawn.get(item) ?? []), date]);
+    (r.withdrawnValues[item] ??= []).push(date);
+  }
+  for (const { item, date } of stored.revised) {
+    if (withdrawn.get(item)?.includes(date)) continue;
+    (r.revisedValues[item] ??= []).push(date);
+  }
   for (const [item, dates] of withdrawn) {
     log.warn(`${r.kind} ${r.source} ${item}: the source withdrew stored values`, { dates });
   }
