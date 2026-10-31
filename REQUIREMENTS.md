@@ -252,10 +252,16 @@ Checks, tolerances and rationale are documented in `docs/data-pipeline.md`.
 3. At most 2 stand-in days in a row per ticker; the 3rd is red.
 4. When the primary's value for D arrives, layer B compares it with the stand-in. A mismatch above tolerance goes to the revision log, annotates the forward record (never edits it) and alerts: "D's signal used a secondary price that was off by X; with the corrected price it would have been Y."
 
+5. A stand-in the primary never replaces (a lasting hole in the primary's history) is closed only by an admin command with a written reason ("primary will not deliver"); it is recorded, the record keeps the stand-in price, and nothing waits on it any more. Never closed automatically.
+6. Unresolved stand-ins inside a signal's lookback (not only on their own day) are moved by the decision-margin test together with the day's own stand-ins.
+
 Stand-in bars are stored as raw data from their source; the canonical bar records which source it came from.
+
+**Closed-day bars:** a bar dated on a day the trading calendar is closed is kept out of the canonical series (signals never read it); the raw bar and its red result stay stored and visible.
 
 ## Fail-closed behavior and safe state
 - **Yellow:** signals are computed; every alert and screen shows the warning and reason.
+- **Red in the lookback:** a strategy is also red on a day when a ticker its signals read had a red day within the last 10 trading days before it (the daily re-check window), so a flagged price inside a lookback never yields a normal signal. It clears by itself when a later run grades that day again as not red.
 - **Red:** no normal signal is presented for strategies depending on the affected data. Each strategy declares a **safe state** (default for leveraged strategies: 1x of the underlying; user can choose cash). The alert says: "Data unreliable today. Your strategy's safe action is X," with exact instructions. The safe state is recorded in the forward record as such.
 - Status appears on the dashboard, in every alert, in every MCP response about signals, and in the audit report.
 
@@ -678,6 +684,7 @@ Market data and testfol daily equity curves are never committed to the public re
 - 2026-10-27: Self-update script moved from A3 to A1 (owner's request; ops only, no data or calculations), so the server stays current during the 20-day run. Until the web app exists it checks a new version by loading the plug-ins, typecheck and tests instead of build, restart and the app answering; failures go to the update log and activity log until A2 alerts exist. It holds the jobs lock while it runs and leaves nvm's default Node alone (shared machine).
 - 2026-10-29: Alert channels are `Notifier` plug-ins (agnostic core): Discord (channel webhook) and Telegram (one bot per install, `TELEGRAM_BOT_TOKEN`) in the public plug-ins. Targets are stored encrypted in `notification_channels`; an admin flags a channel to also receive operational alerts. A state change is judged against what each channel was last told (so caught-up days and new channels are handled); a red day sends the safe-state alert instead of a state change. An undelivered alert leaves the daily run incomplete and is retried at the next hourly check; delivered ones are never repeated. Messages use ICU placeholders in `packages/content` with a small built-in translator until next-intl is approved and the web app arrives (D1).
 - 2026-10-29: Admin alerts (failed runs, failed self-updates, a day whose data is not green overall) go to admin-flagged channels, once per subject and day. Like every alert they wait for the A1 gate (`forward_records_from`), since stage A allows no production alerts during A1's window; until then healthchecks.io and the logs are the watch.
+- 2026-11-01 (owner's answers on stage A open points): A red day of a fund a strategy's signals read keeps that strategy red for the next 10 trading days (the daily re-check window), so a flagged price inside a lookback never yields a normal signal. Unresolved stand-ins inside the lookback join the decision-margin test. A bar dated on a closed market day is excluded from the canonical series (raw bar and red result kept). A stand-in the primary never replaces is closed by an admin command with a reason, never automatically. Old red days in the full history are resolved by fixing their causes; an admin "explained" mark only if that fails after real effort; registration never accepts "clean recently" instead of "clean history". Point-in-time values are never read before they were known, in any computation (no "first known" fallback); an unknown period is shown separately. Admin-only operational alerts (failed run, failed update, disk) are allowed before the A1 gate. Monthly audit report in A3. Issuer data stays advisory; issuer NAV in another currency is "not compared"; issuer plug-ins that read websites are private and stay within each site's terms. Base-currency cash (`CASH_BASE`) in stage D from a public series. Dependencies `yaml`, `fast-check` approved; `next-intl` at D1. Layer C on the underlying's ex-dividend days: the fund's total return is compared (the index and a leveraged fund's target exclude the underlying ETF's distribution), as the "ex-dividend days adjusted" rule intends.
 <!-- split: docs/requirements/15-plugins.md -->
 # 15. Plug-ins
 
@@ -738,7 +745,7 @@ Read for this stage: 04-data-pipeline.md, 15-plugins.md, 03-assets.md, 05-strate
 - **Gate** (pre-registered, not changed after data is seen): the primary succeeds on every trading day (after retries); at least one secondary available on ≥ 95% of days; layer B passes on ≥ 99% of days where a secondary was available; layer C passes on ≥ 99% of days; every failure explained.
 
 ## A2. Thin slice (forward records start)
-- Development may start during A1's observation window on synthetic or stored data, with no registration, no forward records and no production alerts. It goes live only after the A1 gate passes.
+- Development may start during A1's observation window on synthetic or stored data, with no registration, no forward records and no production alerts, except admin-only operational alerts (failed run, failed self-update, disk space), which may go live as soon as an admin channel exists. It goes live only after the A1 gate passes.
 - Universe: SPY, SSO, UPRO, cash. One registered strategy (the owner's Setup 1 with ensemble trend signal, next-day execution, safe state) plus SPY buy and hold as benchmark.
 - Minimal engine for the indicators this strategy needs; layers A-C; severity rules including the stand-in rule (04); safe state; alerts to admins and per-user channels (state change, data health, job failure; texts through the content package).
 - Registration, append-only forward record, hash chain over RFC 8785 canonical JSON (the hashed text stored as is), daily RFC 3161 timestamps.
@@ -747,7 +754,7 @@ Read for this stage: 04-data-pipeline.md, 15-plugins.md, 03-assets.md, 05-strate
 - Later engine changes must reproduce this strategy's recorded signals or annotate differences; recorded entries are never edited.
 
 ## A3. Hardened pipeline
-- Full Tier 0; revision log; weekly refetch and diff; quota guard; CSV fallback; layer D best effort (`IssuerSource`); data-health CLI report; `pnpm verify` on the server.
+- Full Tier 0; revision log; weekly refetch and diff; quota guard; CSV fallback; layer D best effort (`IssuerSource`); data-health CLI report; monthly audit report (on the 1st: the month's days by grade with reasons, revisions and re-adjustments, quota use per provider, chain verification, failed runs; to admin channels once alerts are live); `pnpm verify` on the server.
 - Fault-injection suite (material faults) in CI.
 - Acceptance: injected faults produce yellow/red as specified and never a normal signal on red; a broken run triggers the heartbeat alert.
 

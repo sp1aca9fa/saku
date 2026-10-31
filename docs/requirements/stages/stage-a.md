@@ -14,7 +14,7 @@ Read for this stage: 04-data-pipeline.md, 15-plugins.md, 03-assets.md, 05-strate
 - **Gate** (pre-registered, not changed after data is seen): the primary succeeds on every trading day (after retries); at least one secondary available on ≥ 95% of days; layer B passes on ≥ 99% of days where a secondary was available; layer C passes on ≥ 99% of days; every failure explained.
 
 ## A2. Thin slice (forward records start)
-- Development may start during A1's observation window on synthetic or stored data, with no registration, no forward records and no production alerts. It goes live only after the A1 gate passes.
+- Development may start during A1's observation window on synthetic or stored data, with no registration, no forward records and no production alerts, except admin-only operational alerts (failed run, failed self-update, disk space), which may go live as soon as an admin channel exists. It goes live only after the A1 gate passes.
 - Universe: SPY, SSO, UPRO, cash. One registered strategy (the owner's Setup 1 with ensemble trend signal, next-day execution, safe state) plus SPY buy and hold as benchmark.
 - Minimal engine for the indicators this strategy needs; layers A-C; severity rules including the stand-in rule (04); safe state; alerts to admins and per-user channels (state change, data health, job failure; texts through the content package).
 - Registration, append-only forward record, hash chain over RFC 8785 canonical JSON (the hashed text stored as is), daily RFC 3161 timestamps.
@@ -23,7 +23,7 @@ Read for this stage: 04-data-pipeline.md, 15-plugins.md, 03-assets.md, 05-strate
 - Later engine changes must reproduce this strategy's recorded signals or annotate differences; recorded entries are never edited.
 
 ## A3. Hardened pipeline
-- Full Tier 0; revision log; weekly refetch and diff; quota guard; CSV fallback; layer D best effort (`IssuerSource`); data-health CLI report; `pnpm verify` on the server.
+- Full Tier 0; revision log; weekly refetch and diff; quota guard; CSV fallback; layer D best effort (`IssuerSource`); data-health CLI report; monthly audit report (on the 1st: the month's days by grade with reasons, revisions and re-adjustments, quota use per provider, chain verification, failed runs; to admin channels once alerts are live); `pnpm verify` on the server.
 - Fault-injection suite (material faults) in CI.
 - Acceptance: injected faults produce yellow/red as specified and never a normal signal on red; a broken run triggers the heartbeat alert.
 

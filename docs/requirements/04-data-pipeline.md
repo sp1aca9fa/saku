@@ -88,10 +88,16 @@ Checks, tolerances and rationale are documented in `docs/data-pipeline.md`.
 3. At most 2 stand-in days in a row per ticker; the 3rd is red.
 4. When the primary's value for D arrives, layer B compares it with the stand-in. A mismatch above tolerance goes to the revision log, annotates the forward record (never edits it) and alerts: "D's signal used a secondary price that was off by X; with the corrected price it would have been Y."
 
+5. A stand-in the primary never replaces (a lasting hole in the primary's history) is closed only by an admin command with a written reason ("primary will not deliver"); it is recorded, the record keeps the stand-in price, and nothing waits on it any more. Never closed automatically.
+6. Unresolved stand-ins inside a signal's lookback (not only on their own day) are moved by the decision-margin test together with the day's own stand-ins.
+
 Stand-in bars are stored as raw data from their source; the canonical bar records which source it came from.
+
+**Closed-day bars:** a bar dated on a day the trading calendar is closed is kept out of the canonical series (signals never read it); the raw bar and its red result stay stored and visible.
 
 ## Fail-closed behavior and safe state
 - **Yellow:** signals are computed; every alert and screen shows the warning and reason.
+- **Red in the lookback:** a strategy is also red on a day when a ticker its signals read had a red day within the last 10 trading days before it (the daily re-check window), so a flagged price inside a lookback never yields a normal signal. It clears by itself when a later run grades that day again as not red.
 - **Red:** no normal signal is presented for strategies depending on the affected data. Each strategy declares a **safe state** (default for leveraged strategies: 1x of the underlying; user can choose cash). The alert says: "Data unreliable today. Your strategy's safe action is X," with exact instructions. The safe state is recorded in the forward record as such.
 - Status appears on the dashboard, in every alert, in every MCP response about signals, and in the audit report.
 
