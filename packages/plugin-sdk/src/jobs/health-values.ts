@@ -10,7 +10,7 @@
 // - The inputs are read the way verify.ts feeds the checks: each source's stored raw bars up to the
 //   run's target (`rawBars`), un-split (`unsplit`) for the comparisons; the primary is the bars
 //   primary of `source_roles`; returns use the checks' own functions (`totalReturn`,
-//   `priceReturn`, `totalReturnIndex`) and tolerances (`TOLERANCE`). Series and FX values are read
+//   `totalReturnIndex`) and tolerances (`TOLERANCE`). Series and FX values are read
 //   through `PointInTime` at `now` (withdrawals and restatements applied, as `asOf` does), on the
 //   exact date: a value the source no longer has reads `-`.
 // - Unknown stays unknown: a missing value prints `-` (never 0); a comparison the stored data no
@@ -21,7 +21,6 @@ import {
   type FxKind,
   type RawBar,
   type TradingDate,
-  priceReturn,
   totalReturn,
   totalReturnIndex,
 } from '@saku/core';
@@ -396,8 +395,10 @@ export class ValuesReader {
 
   /**
    * leverage_track (checks.ts `leverageCheck`): the fund's total return against the leverage
-   * times its underlying's price return, both from the un-split primary bars on the fund's
-   * previous date and the date; tolerance base plus a share of the expected move.
+   * times its underlying's total return, both from the un-split primary bars on the fund's
+   * previous date and the date; tolerance base plus a share of the expected move. A result stored
+   * before the check compared total returns (spec 2026-11-01 layer-c-dividends) carries the
+   * underlying's price return in its expected value; the line below reads as the check does now.
    */
   private async leverageLines(r: DateRow): Promise<string[]> {
     const id = r.symbolId!;
@@ -434,12 +435,12 @@ export class ValuesReader {
       );
     } else {
       const leverage = s!.leverageFactor;
-      const expected = leverage * priceReturn(under[j - 1]!, under[j]!);
+      const expected = leverage * totalReturn(under[j - 1]!, under[j]!);
       const observed = totalReturn(fund[i - 1]!, fund[i]!);
       const tol = TOLERANCE.leverageBase + TOLERANCE.leverageShare * Math.abs(expected);
       out.push(
-        `  fund total return ${fmt(observed)}; underlying price return ` +
-          `${fmt(priceReturn(under[j - 1]!, under[j]!))}; leverage ${fmt(leverage)}; ` +
+        `  fund total return ${fmt(observed)}; underlying total return ` +
+          `${fmt(totalReturn(under[j - 1]!, under[j]!))}; leverage ${fmt(leverage)}; ` +
           `expected ${fmt(expected)}; difference ${fmt(Math.abs(observed - expected))}; ` +
           `tolerance ${fmt(tol)}`,
       );
@@ -465,9 +466,11 @@ export class ValuesReader {
   }
 
   /**
-   * index_match / index_unavailable (checks.ts `indexCheck`): the fund's price return from the
+   * index_match / index_unavailable (checks.ts `indexCheck`): the fund's total return from the
    * un-split primary bars against its index series' return over the same two dates (the series
-   * primary's values; every source's shown).
+   * primary's values; every source's shown). A result stored before the check compared total
+   * returns (spec 2026-11-01 layer-c-dividends) carries the fund's price return as observed; the
+   * line below reads as the check does now.
    */
   private async indexLines(r: DateRow): Promise<string[]> {
     const id = r.symbolId!;
@@ -516,7 +519,7 @@ export class ValuesReader {
     else if (i < 1)
       out.push(`  returns: not comparable now (no primary bar on ${r.date} or before it)`);
     else {
-      const observed = priceReturn(fund[i - 1]!, fund[i]!);
+      const observed = totalReturn(fund[i - 1]!, fund[i]!);
       let expected: number | undefined;
       try {
         const a = await this.seriesValue(series, sp, prev!);
@@ -527,7 +530,7 @@ export class ValuesReader {
         expected = undefined;
       }
       out.push(
-        `  fund price return ${fmt(observed)}; index return (${sp}) ${fmt(expected)}; difference ` +
+        `  fund total return ${fmt(observed)}; index return (${sp}) ${fmt(expected)}; difference ` +
           `${fmt(expected === undefined ? undefined : Math.abs(observed - expected))}; tolerance ` +
           `${fmt(TOLERANCE.index)}`,
       );

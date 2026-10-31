@@ -42,6 +42,9 @@ const bars = (closes: number[], extra: (i: number) => Partial<RawBar> = () => ({
     ...extra(i),
   }));
 
+/** AAA's index: its total-return levels (100, 101, 102.01, 100.9899) x 50. */
+const INDEX = [5000, 5050, 5100.5, 5049.495];
+
 async function setup(o: { aaaPrimaryDays?: number } = {}) {
   const db = await testDb();
   await upsertSymbols(db, [
@@ -68,8 +71,9 @@ async function setup(o: { aaaPrimaryDays?: number } = {}) {
       runId: null,
       fetchedAt: 't',
     });
-  // AAA +1%, +1% total (0.5 of it a dividend), -1%; AAA2 tracks 2x its price return; the index
-  // follows its price; the secondary agrees except a wrong close on the last day.
+  // AAA +1%, +1% total (0.5 of it a dividend), -1%; AAA2 tracks 2x the index, which moves with
+  // AAA's total return (layer C, ex-dividend days adjusted); the secondary agrees except a wrong
+  // close on the last day.
   await store(
     'AAA',
     'p',
@@ -83,14 +87,11 @@ async function setup(o: { aaaPrimaryDays?: number } = {}) {
     's',
     bars([100, 101, 101.51, 101.5], (i) => ({ divCash: i === 2 ? 0.5 : 0 })),
   );
-  await store('AAA2', 'p', bars([50, 51, 51.515, 50.4258]));
+  await store('AAA2', 'p', bars([50, 51, 52.02, 50.9796]));
   await storeSeries(db, {
     series: 'IDX',
     source: 'idx',
-    points: [100, 101, 101.51, 100.4949].map((close, i) => ({
-      date: dates[i]!,
-      value: close * 50,
-    })),
+    points: INDEX.map((value, i) => ({ date: dates[i]!, value })),
     // Known before the dates checked (the index freshness is read through asOf).
     fetchedAt: '2026-01-02T00:00:00Z',
   });
@@ -349,8 +350,8 @@ describe('verify', () => {
       series: 'IDX',
       source: 'idx',
       points: [
-        { date: '2026-01-07', value: 101.51 * 50, publishedAt: '2026-01-09T23:00:00Z' },
-        { date: '2026-01-08', value: 100.4949 * 50, publishedAt: '2026-01-09T23:00:00Z' },
+        { date: '2026-01-07', value: INDEX[2]!, publishedAt: '2026-01-09T23:00:00Z' },
+        { date: '2026-01-08', value: INDEX[3]!, publishedAt: '2026-01-09T23:00:00Z' },
       ],
       fetchedAt: '2026-01-09T23:30:00Z',
     });

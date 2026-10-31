@@ -1,4 +1,4 @@
-import type { RawBar } from '@saku/core';
+import { type RawBar, priceReturn, totalReturn } from '@saku/core';
 import { describe, expect, it } from 'vitest';
 import { Sessions } from './calendar';
 import {
@@ -199,21 +199,49 @@ describe('layer B', () => {
 });
 
 describe('layer C', () => {
+  // SPY-like underlying: +2%, then ex-dividend (1 a share): price return -0.98%, total return 0.
   const spy = [
     bar('2026-01-05', 100),
     bar('2026-01-06', 102),
     bar('2026-01-07', 101, { divCash: 1 }),
   ];
+  // The index level excludes dividends but already holds its constituents' ex-dividend drops:
+  // what the fund accrued and paid out on its ex-date, so the index moves with its total return.
+  const index = [
+    { date: '2026-01-05', value: 5000 },
+    { date: '2026-01-06', value: 5100 },
+    { date: '2026-01-07', value: 5100 },
+  ];
+  const dev = (rs: { check: string; date: string; deviation?: number }[], check: string) =>
+    rs.find((r) => r.check === check && r.date === '2026-01-07')!.deviation!;
 
-  it('tracks leverage against the underlying’s price return', () => {
-    // +2% then -0.98% (price, the dividend excluded) at 2x.
-    const sso = [bar('2026-01-05', 50), bar('2026-01-06', 52), bar('2026-01-07', 50.98)];
-    expect(statuses(leverageCheck(sso, spy, 2), 'leverage_track')).toEqual([
-      '2026-01-06 green',
-      '2026-01-07 green',
-    ]);
-    const off = [bar('2026-01-05', 50), bar('2026-01-06', 51), bar('2026-01-07', 50.98)];
+  it('tracks leverage against the underlying’s total return (ex-dividend days adjusted)', () => {
+    // +4%, then 0% on the underlying's ex-date: 2x the index, which moved with SPY's total return.
+    const sso = [bar('2026-01-05', 50), bar('2026-01-06', 52), bar('2026-01-07', 52)];
+    const rs = leverageCheck(sso, spy, 2);
+    expect(statuses(rs, 'leverage_track')).toEqual(['2026-01-06 green', '2026-01-07 green']);
+    expect(rs[1]).toMatchObject({ expected: 0, observed: 0, deviation: 0, tolerance: 0.005 });
+    // The former reading (2x the underlying's price return) fails this correct day: 2x the
+    // dividend off, beyond its own tolerance.
+    const old = 2 * priceReturn(spy[1]!, spy[2]!);
+    expect(Math.abs(totalReturn(sso[1]!, sso[2]!) - old)).toBeGreaterThan(
+      0.005 + 0.1 * Math.abs(old),
+    );
+    const off = [bar('2026-01-05', 50), bar('2026-01-06', 51), bar('2026-01-07', 51)];
     expect(statuses(leverageCheck(off, spy, 2), 'leverage_track')[0]).toBe('2026-01-06 yellow');
+  });
+
+  it('is still red for a wrong close on the underlying’s ex-dividend day', () => {
+    // The fund moved by 2x the underlying's price return, as if it paid the underlying's dividend.
+    const wrong = [bar('2026-01-05', 50), bar('2026-01-06', 52), bar('2026-01-07', 50.98)];
+    expect(statuses(leverageCheck(wrong, spy, 2), 'leverage_track')[1]).toBe('2026-01-07 red');
+    expect(dev(leverageCheck(wrong, spy, 2), 'leverage_track')).toBeCloseTo(1.02 / 52, 12);
+  });
+
+  it('is not green when the underlying’s dividend is missing from the data', () => {
+    const sso = [bar('2026-01-05', 50), bar('2026-01-06', 52), bar('2026-01-07', 52)];
+    const noDiv = spy.map((b) => ({ ...b, divCash: 0 }));
+    expect(statuses(leverageCheck(sso, noDiv, 2), 'leverage_track')[1]).toBe('2026-01-07 yellow');
   });
 
   it('is red after three days in a row outside tolerance', () => {
@@ -227,16 +255,26 @@ describe('layer C', () => {
     ]);
   });
 
-  it('matches a fund’s price return to its index', () => {
-    const index = [
-      { date: '2026-01-05', value: 5000 },
-      { date: '2026-01-06', value: 5100 },
-      { date: '2026-01-07', value: 5050 },
-    ];
-    expect(statuses(indexCheck(spy, index), 'index_match')).toEqual([
-      '2026-01-06 green',
-      '2026-01-07 green',
-    ]);
+  it('matches a fund’s total return to its index (ex-dividend days adjusted)', () => {
+    const rs = indexCheck(spy, index);
+    expect(statuses(rs, 'index_match')).toEqual(['2026-01-06 green', '2026-01-07 green']);
+    expect(rs[1]).toMatchObject({ observed: 0, expected: 0, deviation: 0 });
+    // The former reading (the fund's price return) fails this correct day: the whole dividend off.
+    expect(Math.abs(priceReturn(spy[1]!, spy[2]!) - 0)).toBeGreaterThan(3 * 0.001);
+    // Without a distribution, total and price return are the same: other days read as before.
+    expect(rs[0]).toMatchObject({ observed: priceReturn(spy[0]!, spy[1]!) });
+  });
+
+  it('is still red for a wrong close on the fund’s ex-dividend day', () => {
+    const wrong = [...spy.slice(0, 2), bar('2026-01-07', 99, { divCash: 1 })];
+    expect(statuses(indexCheck(wrong, index), 'index_match')[1]).toBe('2026-01-07 red');
+  });
+
+  it('catches a primary that misses the fund’s dividend (the price return check did not)', () => {
+    // Close right, dividend missing: the total return is the price return, a dividend short.
+    const noDiv = spy.map((b) => ({ ...b, divCash: 0 }));
+    expect(statuses(indexCheck(noDiv, index), 'index_match')[1]).toBe('2026-01-07 red');
+    expect(dev(indexCheck(noDiv, index), 'index_match')).toBeCloseTo(1 / 102, 12);
   });
 
   it('is yellow where the index lacks a value inside its history, never green', () => {
@@ -258,7 +296,7 @@ describe('layer C', () => {
   it('starts where the index history starts (a provider limit is not a gap)', () => {
     const index = [
       { date: '2026-01-06', value: 5100 },
-      { date: '2026-01-07', value: 5050 },
+      { date: '2026-01-07', value: 5100 },
     ];
     expect(statuses(indexCheck(spy, index), 'index_match')).toEqual(['2026-01-07 green']);
     expect(indexCheck(spy, index).some((r) => r.check === 'index_unavailable')).toBe(false);

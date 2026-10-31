@@ -17,7 +17,8 @@ const NOW = '2026-01-10T00:00:00.000Z';
 const FETCHED = '2026-01-08T00:00:00.000Z';
 
 /**
- * A fund LEV (2x its underlying UND, index series IDX) split 2:1 on 2026-01-07; the primary `p`
+ * A fund LEV (2x its underlying UND, index series IDX) split 2:1 on 2026-01-07, where both pay a
+ * dividend (UND 1, LEV 0.25: the layer C blocks read total returns); the primary `p`
  * sends raw closes, the secondary `s2` split-adjusted ones (with provider adjusted closes); `s3`
  * has a role but no bar. Index values from `idx` (primary, two vintages on 01-07) and `idx2`
  * (withdrawn on 01-07); FX rates of two pairs from `fp` (primary) and `fs`.
@@ -51,13 +52,14 @@ async function setup() {
     source: string,
     date: string,
     close: number,
-    o: { split?: number; adjusted?: boolean; adj?: number } = {},
+    o: { split?: number; adjusted?: boolean; adj?: number; div?: number } = {},
   ) => ({
     symbolId: symbol,
     source,
     date,
     close,
     splitFactor: o.split ?? 1,
+    divCash: o.div ?? 0,
     closeIsSplitAdjusted: o.adjusted ?? false,
     providerAdjClose: o.adj ?? null,
     fetchedAt: FETCHED,
@@ -65,10 +67,10 @@ async function setup() {
   await db.insert(schema.barsRaw).values([
     raw(ids.UND, 'p', '2026-01-05', 100),
     raw(ids.UND, 'p', '2026-01-06', 102),
-    raw(ids.UND, 'p', '2026-01-07', 101),
+    raw(ids.UND, 'p', '2026-01-07', 101, { div: 1 }),
     raw(ids.LEV, 'p', '2026-01-05', 100),
     raw(ids.LEV, 'p', '2026-01-06', 104),
-    raw(ids.LEV, 'p', '2026-01-07', 51, { split: 2 }),
+    raw(ids.LEV, 'p', '2026-01-07', 51, { split: 2, div: 0.25 }),
     raw(ids.LEV, 's2', '2026-01-05', 50, { adjusted: true }),
     raw(ids.LEV, 's2', '2026-01-06', 52.05, { adjusted: true, adj: 52.05 }),
     raw(ids.LEV, 's2', '2026-01-07', 51, { adjusted: true, split: 2, adj: 51.2 }),
@@ -382,22 +384,25 @@ describe('ValuesReader', () => {
   it('adj_return_match: our return and the provider return as the check computes them', async () => {
     const { values } = await setup();
     const text = await values('adj_return_match');
-    // Ours: (51 * 2) / 104 - 1; theirs: 51.2 / 52.05 - 1.
+    // Ours: ((51 + 0.25) * 2) / 104 - 1; theirs: 51.2 / 52.05 - 1.
     expect(text).toContain(
-      'returns 2026-01-06 to 2026-01-07: ours -0.01923076923; s2 adjusted 52.05 to 51.2, ' +
-        'return -0.01633045149; difference 0.002900317742; tolerance 0.0002',
+      'returns 2026-01-06 to 2026-01-07: ours -0.01442307692; s2 adjusted 52.05 to 51.2, ' +
+        'return -0.01633045149; difference 0.001907374566; tolerance 0.0002',
     );
   });
 
   it('leverage_track: both symbols on both dates, the returns, expected and tolerance', async () => {
     const { values } = await setup();
     const text = await values('leverage_track');
-    expect(text).toMatch(/LEV\s+2026-01-07\s+51\s+2\s+0/);
+    expect(text).toMatch(/LEV\s+2026-01-07\s+51\s+2\s+0\.25/);
     expect(text).toMatch(/UND\s+2026-01-06\s+102\s+1\s+0/);
-    // Fund (51 * 2) / 104 - 1; expected 2 * (101 / 102 - 1); tolerance 0.005 + 0.1 * |expected|.
+    expect(text).toMatch(/UND\s+2026-01-07\s+101\s+1\s+1/);
+    // As leverageCheck compares now, total returns on both sides (spec layer-c-dividends): fund
+    // ((51 + 0.25) * 2) / 104 - 1; expected 2 * ((101 + 1) / 102 - 1) = 0 (with the underlying's
+    // price return it would be -0.0196); tolerance 0.005 + 0.1 * |expected|.
     expect(text).toContain(
-      'fund total return -0.01923076923; underlying price return -0.009803921569; leverage 2; ' +
-        'expected -0.01960784314; difference 0.0003770739065; tolerance 0.006960784314',
+      'fund total return -0.01442307692; underlying total return 0; leverage 2; ' +
+        'expected 0; difference 0.01442307692; tolerance 0.005',
     );
     expect(text).toMatch(/revised\s+date\s+symbol/);
   });
@@ -412,8 +417,9 @@ describe('ValuesReader', () => {
     // Withdrawn now: no value, never the old one.
     expect(text).toMatch(/2026-01-07\s+idx2\s+- \(withdrawn\)\s+-\s+-\s+2/);
     expect(text).toMatch(/2026-01-06\s+idx2\s+1000\.5\s+2026-01-06T22:00:00\.000Z\s+-\s+1/);
+    // The fund's total return, as indexCheck compares now: ((51 + 0.25) * 2) / 104 - 1.
     expect(text).toContain(
-      'fund price return -0.01923076923; index return (idx) -0.015; difference 0.004230769231; ' +
+      'fund total return -0.01442307692; index return (idx) -0.015; difference 0.0005769230769; ' +
         'tolerance 0.001',
     );
   });

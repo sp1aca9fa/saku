@@ -7,7 +7,6 @@ import {
   type HealthStatus,
   type RawBar,
   type TradingDate,
-  priceReturn,
   totalReturn,
   totalReturnIndex,
 } from '@saku/core';
@@ -43,7 +42,7 @@ export const TOLERANCE = {
   /** Layer C: leveraged fund vs underlying, base plus share of the expected move. */
   leverageBase: 0.005,
   leverageShare: 0.1,
-  /** Layer C: fund price return vs its index's return (absolute, 0.1pp). */
+  /** Layer C: fund total return vs its index's return (absolute, 0.1pp). */
   index: 0.001,
 } as const;
 
@@ -292,9 +291,11 @@ export function adjReturnCheck(
 }
 
 /**
- * Layer C: a leveraged fund's daily total return against `leverage` times its underlying's
- * price return (the fund tracks the index, whose level excludes dividends). A deviation beyond
- * tolerance three days in a row is red.
+ * Layer C: a leveraged fund's daily total return against `leverage` times its underlying's total
+ * return (requirements 04, layer C: "ex-dividend days adjusted (leveraged ETFs track the index, not
+ * SPY)"). The fund tracks the index; the underlying ETF's total return is what matches the index
+ * every day (see `indexCheck`), while its price return falls short by its whole distribution on
+ * its ex-date. A deviation beyond tolerance three days in a row is red.
  */
 export function leverageCheck(
   fund: RawBar[],
@@ -308,7 +309,7 @@ export function leverageCheck(
     const date = fund[i]!.date;
     const j = u.get(date);
     if (j === undefined || j === 0 || underlying[j - 1]!.date !== fund[i - 1]!.date) continue;
-    const expected = leverage * priceReturn(underlying[j - 1]!, underlying[j]!);
+    const expected = leverage * totalReturn(underlying[j - 1]!, underlying[j]!);
     const observed = totalReturn(fund[i - 1]!, fund[i]!);
     const tol = TOLERANCE.leverageBase + TOLERANCE.leverageShare * Math.abs(expected);
     const dev = Math.abs(observed - expected);
@@ -329,8 +330,13 @@ export function leverageCheck(
 }
 
 /**
- * Layer C: a fund's price return against its index's return (`source`: the index's series
- * source). Within the index's history (from its first value on; before that is the provider's
+ * Layer C: a fund's total return against its index's return (`source`: the index's series
+ * source; requirements 04, layer C: "ex-dividend adjusted"). An index level excludes dividends,
+ * but the price drops of its constituents on their own ex-dates are in it; the fund accrues those
+ * dividends and pays them out on its own ex-date, so its price return falls short of the index by
+ * the whole distribution that day, while its total return (price plus distribution) matches the
+ * index every day. The daily accrual (about 0.005% a day for a broad equity index) is left
+ * uncorrected, well inside the tolerance (spec 2026-11-01 layer-c-dividends, assumed). Within the index's history (from its first value on; before that is the provider's
  * history limit, as layer B starts where a secondary starts), a fund date whose return cannot be
  * compared because the index lacks a value is yellow `index_unavailable` (requirements 04: an
  * unexpected gap of a point-in-time series is yellow, a cross-check unavailable is yellow; a check
@@ -361,7 +367,7 @@ export function indexCheck(
       continue;
     }
     const expected = b / a - 1;
-    const observed = priceReturn(fund[i - 1]!, fund[i]!);
+    const observed = totalReturn(fund[i - 1]!, fund[i]!);
     const dev = Math.abs(observed - expected);
     out.push({
       layer: 'C',

@@ -133,6 +133,41 @@ describe('standIns', () => {
     const off = standIns(input({ index, secondaries: [['s1', series([100, 101, 103])]] }));
     expect(off.refused).toEqual([{ date: D[2], reason: 'index' }]);
   });
+
+  // Ex-dividend days adjusted, as in leverageCheck and indexCheck (spec layer-c-dividends).
+  it('on the underlying’s ex-dividend day, compares total returns (layer C)', () => {
+    // The underlying pays 1 and its close stays: total return +1%, price return 0.
+    const underlying = [bar(D[0]!, 100), bar(D[1]!, 100), bar(D[2]!, 100, { divCash: 1 })];
+    const fund = (close: number) =>
+      standIns(
+        input({ leverage: 3, underlying, secondaries: [['s1', series([100, 101, close])]] }),
+      );
+    // +3%, 3x the index (which moved with the underlying's total return): accepted; 3x the price
+    // return (0, tolerance 0.5pp) refused it.
+    const ok = fund(101 * 1.03);
+    expect(ok.standIns).toMatchObject([{ basis: 'layer_c' }]);
+    expect(ok.standIns[0]!.band).toBeCloseTo(0.005 + 0.1 * 0.03, 12);
+    // Nearly unchanged, as if the fund tracked the underlying's price return: refused.
+    expect(fund(101.1).refused).toEqual([{ date: D[2], reason: 'layer_c' }]);
+  });
+
+  it('on the fund’s ex-dividend day, compares its total return with the index', () => {
+    const index = [
+      { date: D[1]!, value: 1000 },
+      { date: D[2]!, value: 1010 },
+    ];
+    const s1 = (close: number, divCash: number) => [
+      bar(D[0]!, 100),
+      bar(D[1]!, 101),
+      bar(D[2]!, close, { divCash }),
+    ];
+    // +1% in total, 0.5 of it paid out: accepted (its price return, +0.5%, was refused).
+    const ok = standIns(input({ index, secondaries: [['s1', s1(101.51, 0.5)]] }));
+    expect(ok.standIns).toMatchObject([{ basis: 'index', band: 0.001 }]);
+    // The same close without its dividend: refused.
+    const noDiv = standIns(input({ index, secondaries: [['s1', s1(101.51, 0)]] }));
+    expect(noDiv.refused).toEqual([{ date: D[2], reason: 'index' }]);
+  });
 });
 
 describe('symbolHealth', () => {

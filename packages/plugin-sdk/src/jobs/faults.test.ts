@@ -46,8 +46,10 @@ const TARGET = '2026-01-16';
 const DATES = sessions.between('2025-12-01', TARGET);
 const SECRET = 'f'.repeat(32);
 
-/** Clean history: SPY rises 0.3-0.7% a day (pays a dividend on the target day); SSO is 2x SPY's
- * price return and splits 2:1 on the target day. Every day moves enough to make a fault material. */
+/** Clean history: SPY rises 0.3-0.7% a day in total return (pays a dividend on the target day, its
+ * close lower by it); SSO is 2x SPY's total return, as 2x the index that moves with it (layer C,
+ * ex-dividend days adjusted), and splits 2:1 on the target day. Every day moves enough to make a
+ * fault material. */
 function clean(): Record<'SPY' | 'SSO', RawBar[]> {
   const spy: RawBar[] = [];
   const sso: RawBar[] = [];
@@ -57,10 +59,9 @@ function clean(): Record<'SPY' | 'SSO', RawBar[]> {
     const r = 0.005 + 0.002 * Math.sin(i);
     const close = prev ? prev.close * (1 + r) - div : 500;
     spy.push(bar(date, close, { divCash: div }));
-    const pr = prev ? close / prev.close - 1 : 0;
     const split = date === TARGET ? 2 : 1;
     const s = sso[i - 1];
-    sso.push(bar(date, s ? (s.close * (1 + 2 * pr)) / split : 80, { splitFactor: split }));
+    sso.push(bar(date, s ? (s.close * (1 + 2 * r)) / split : 80, { splitFactor: split }));
   });
   return { SPY: spy, SSO: sso };
 }
@@ -136,8 +137,12 @@ const withdrawalsSeen = (w: Withdrawal | undefined, from: string, to: string, no
 
 /**
  * The series source: the USD cash rate (`cashUntil`: the first date it no longer has;
- * `cashWithdrawn`: dates the source later withdraws) and SPY's price index `IDX` (SPY's close
- * x10, published 18:00 New York the next session); the index has nothing after `indexUntil` and
+ * `cashWithdrawn`: dates the source later withdraws) and SPY's index `IDX` (SPY's total-return
+ * levels from 5000, i.e. its close x10 until its dividend on the target day: the index level
+ * excludes dividends but holds its constituents' ex-dividend drops, which SPY accrues and pays
+ * out on its own ex-date), published 18:00 New York the next session (`indexSameDay`: 17:00 New
+ * York the same day, before the daily run, so the target day is index-checked by its own run);
+ * the index has nothing after `indexUntil` and
  * fails every call once `to` reaches `indexDownFrom`. `indexCurrent`: the index served as
  * current values only (no publication time, as FRED's SP500; each value from its publication on)
  * and declared complete for its span; `vanished` dates no longer served from its `at` on (spec
@@ -150,10 +155,12 @@ function seriesSource(
     indexUntil?: string;
     indexDownFrom?: string;
     indexCurrent?: { vanished?: Withdrawal };
+    indexSameDay?: boolean;
   } = {},
 ): SeriesSource {
   const cash = cashRates(sessions, DATES, o.cashUntil ?? TARGET);
   const spy = clean().SPY;
+  const level = new Map(totalReturnIndex(spy, 5000).map((v, i) => [spy[i]!.date, v]));
   return {
     info: {
       ...cash.info,
@@ -170,7 +177,9 @@ function seriesSource(
       }
       if (o.indexDownFrom && to >= o.indexDownFrom) throw new Error('idx: HTTP 503');
       const publishedAt = (date: string) =>
-        zonedInstant(sessions.after(date), '18:00', 'America/New_York');
+        o.indexSameDay
+          ? zonedInstant(date, '17:00', 'America/New_York')
+          : zonedInstant(sessions.after(date), '18:00', 'America/New_York');
       if (o.indexCurrent) {
         const gone = withdrawalsSeen(o.indexCurrent.vanished, from, to, ctx.now).map((g) => g.date);
         const points = spy
@@ -181,14 +190,14 @@ function seriesSource(
               Date.parse(publishedAt(b.date)) <= ctx.now.getTime() &&
               !gone.includes(b.date),
           )
-          .map((b) => ({ date: b.date, value: b.close * 10 }));
+          .map((b) => ({ date: b.date, value: level.get(b.date)! }));
         return { points, completeSpan: true };
       }
       return spy
         .filter((b) => b.date >= from && b.date <= to && (!o.indexUntil || b.date <= o.indexUntil))
         .map((b) => ({
           date: b.date,
-          value: b.close * 10,
+          value: level.get(b.date)!,
           publishedAt: publishedAt(b.date),
         }));
     },
@@ -552,6 +561,64 @@ describe('fault injection (layer F)', () => {
       expect(alert).toMatch(new RegExp(`^Trend 2x: safe state for ${TARGET}`));
     });
   }
+
+  // The target is SPY's ex-dividend day (spec 2026-11-01 layer-c-dividends). With the index
+  // published the same day, SPY's index check runs on it in its own run. A fault every bar source
+  // shares (an upstream error) leaves layer B nothing to compare, and these sources send no
+  // provider adjusted closes: layer C is the only check that can catch it.
+  describe('on the ex-dividend day, a fault in every bar source (layer C)', () => {
+    const sameDay = seriesSource({ indexSameDay: true });
+    const everywhere = (fault?: Fault) =>
+      ['p', 's1', 's2'].map((key) => source(key, fault ? { fault } : {}));
+    const moved = (ticker: Ticker, by: number) =>
+      onTarget(ticker, (b) => ({
+        ...b,
+        open: b.open! * by,
+        high: b.high! * by,
+        low: b.low! * by,
+        close: b.close * by,
+      }));
+    const layerC = async (db: Db) =>
+      (await db.select().from(schema.checkResults).where(eq(schema.checkResults.date, TARGET)))
+        .filter((r) => r.layer === 'C')
+        .map((r) => `${r.checkName} ${r.status}`)
+        .sort();
+
+    it('clean data: green, both layer C checks run on the day (the control)', async () => {
+      // Compared by price return, SPY's ex-dividend day was yellow here (0.25pp off its index).
+      const { result, today, db } = await run(everywhere(), sameDay);
+      expect(result.ok).toBe(true);
+      expect(today).toMatchObject({
+        dataStatus: 'green',
+        safeStateApplied: false,
+        allocation: 'Risk on',
+      });
+      expect(await layerC(db)).toEqual(['index_match green', 'leverage_track green']);
+    });
+
+    for (const c of [
+      { name: "SPY's close 1% low", fault: moved('SPY', 0.99), caught: 'SPY:C.index_match@rates' },
+      { name: "SSO's close 3% high", fault: moved('SSO', 1.03), caught: 'SSO:C.leverage_track' },
+    ]) {
+      it(`${c.name}: red, safe state`, async () => {
+        const { today, reasons, alert } = await run(everywhere(c.fault), sameDay);
+        expect(today.dataStatus).toBe('red');
+        expect(reasons).toContain(c.caught);
+        expect(today).toMatchObject({ safeStateApplied: true, allocation: 'Safe state' });
+        expect(alert).toMatch(new RegExp(`^Trend 2x: safe state for ${TARGET}`));
+      });
+    }
+
+    it("SPY's dividend missing (its close right): never green, caught by the index check", async () => {
+      // A gain of comparing total returns: the correct ex-dividend day is green (the control), so
+      // a missing dividend stands out; by price return both days read alike. A dividend of 0.25%
+      // is within 3x the index tolerance: yellow (04 severity rules), with the warning.
+      const { today, reasons, alert } = await run(everywhere(missedDividend), sameDay);
+      expect(today.dataStatus).toBe('yellow');
+      expect(reasons).toContain('SPY:C.index_match@rates');
+      expect(alert).toContain('Data health: yellow (computed with a warning).');
+    });
+  });
 
   // The primary has no usable bar: the stand-in rule grades it (two agreeing secondaries, and the
   // signal is far from flipping within the band, so yellow "secondary source only").
