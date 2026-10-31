@@ -4,6 +4,7 @@ import {
   addChannel,
   annotate,
   annotationsOf,
+  closeStandIn,
   createUser,
   finishRun,
   forwardRecord,
@@ -23,14 +24,17 @@ import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
 import { sendRecomputeDiffers, sendStrategyAlerts } from './alerts';
 import {
+  type ClosedStandIn,
   type ResolvedStandIn,
   type Rows,
   annotateStandInCorrections,
   forward,
   instantOf,
+  isOpenStandIn,
   reader,
   recompute,
   signalsDiffer,
+  standInClosures,
   standInCorrections,
   upTo,
 } from './forward';
@@ -549,6 +553,68 @@ describe('forward', () => {
     }
   });
 
+  it('stand-in closes: the entries that used it while open, once; unknown is never guessed', () => {
+    const closed: ClosedStandIn = {
+      ticker: 'AAA',
+      date: '2026-01-07',
+      runId: 'r1',
+      createdAt: '2026-01-07T21:30:00.000Z',
+      closedAt: '2026-01-09T12:00:00.000Z',
+      closeReason: 'primary will not deliver',
+    };
+    const e = (date: string, createdAt: string, runId: string | null = 'r0') => ({
+      date,
+      allocation: 'Risk on',
+      createdAt,
+      runId,
+    });
+    const record = [
+      // Before the stand-in's date; appended before it existed (another run).
+      e('2026-01-06', '2026-01-06T21:30:00.000Z'),
+      // The recording run: used it whatever the time.
+      e('2026-01-07', '2026-01-01T00:00:00.000Z', 'r1'),
+      // While open (by time), then after the close (decided knowing it was closed).
+      e('2026-01-08', '2026-01-08T21:30:00.000Z'),
+      e('2026-01-09', '2026-01-09T21:30:00.000Z'),
+    ];
+    const run = (
+      c: ClosedStandIn[],
+      annotated: { date: string; ticker: unknown; standInDate: unknown }[] = [],
+      deps = ['AAA', 'AAA2'],
+    ) => standInClosures({ version: 'Trend (v1)', deps, record, closed: c, annotated });
+    expect(run([closed]).annotate.map((a) => [a.recorded.date, a.standIn.closeReason])).toEqual([
+      ['2026-01-07', 'primary will not deliver'],
+      ['2026-01-08', 'primary will not deliver'],
+    ]);
+    expect(run([closed]).errors).toEqual([]);
+    // Idempotent per entry date, ticker and stand-in date; only the version's tickers.
+    expect(
+      run(
+        [closed],
+        [{ date: '2026-01-07', ticker: 'AAA', standInDate: '2026-01-07' }],
+      ).annotate.map((a) => a.recorded.date),
+    ).toEqual(['2026-01-08']);
+    expect(run([closed], [], ['AAA2']).annotate).toEqual([]);
+    // A timestamp that is not an instant: the recording run's entry still is, the rest unknown.
+    const bad = run([{ ...closed, closedAt: '2026-01-09 12:00:00' }]);
+    expect(bad.annotate.map((a) => a.recorded.date)).toEqual(['2026-01-07']);
+    expect(bad.errors).toEqual([
+      expect.stringContaining("AAA 2026-01-07: the stand-in's timestamps"),
+    ]);
+    // A close without its reason (the database refuses one): an error, nothing annotated.
+    const noReason = run([{ ...closed, closeReason: ' ' }]);
+    expect(noReason).toEqual({
+      annotate: [],
+      errors: ['AAA 2026-01-07: closed without a reason; its close is not annotated'],
+    });
+  });
+
+  it('a closed stand-in is settled: not open, not moved', () => {
+    expect(isOpenStandIn({ resolvedAt: null, closedAt: null })).toBe(true);
+    expect(isOpenStandIn({ resolvedAt: null, closedAt: '2026-01-09T12:00:00.000Z' })).toBe(false);
+    expect(isOpenStandIn({ resolvedAt: '2026-01-09T12:00:00.000Z', closedAt: null })).toBe(false);
+  });
+
   it('reads only ISO 8601 instants with a zone', () => {
     expect(instantOf('2026-01-08T21:30:00.000Z')).toBe(Date.UTC(2026, 0, 8, 21, 30));
     expect(instantOf('2026-01-08T16:30:00-05:00')).toBe(Date.UTC(2026, 0, 8, 21, 30));
@@ -856,7 +922,7 @@ describe('forward: red and stand-ins in the lookback', () => {
   it('an older unresolved stand-in: yellow when no signal can flip, red when one could; resolved: green', async () => {
     // T reads AAA's S[19] close (119) in its 2-day SMA against T's 120: a band of 0.84% or
     // more could flip it.
-    const standIn = async (band: number, resolved = false) => {
+    const standIn = async (band: number, resolved = false, closed = false) => {
       const g = await graded();
       await g.db
         .update(schema.bars)
@@ -875,6 +941,15 @@ describe('forward: red and stand-ins in the lookback', () => {
           resolvedAt: '2026-02-03T21:30:00.000Z',
         }),
       });
+      if (closed) {
+        const r = await closeStandIn(g.db, {
+          ticker: 'AAA',
+          date: S[19]!,
+          username: 'alex',
+          reason: 'primary will not deliver',
+        });
+        expect(r.ok).toBe(true);
+      }
       return (await g.record())[0]!;
     };
     expect(await standIn(0.001)).toMatchObject({
@@ -889,6 +964,12 @@ describe('forward: red and stand-ins in the lookback', () => {
     });
     // Resolved (the primary arrived): no longer moved, nothing to say.
     expect(await standIn(0.05, true)).toMatchObject({
+      allocation: 'Risk on',
+      dataStatus: 'green',
+      reasons: [],
+    });
+    // Closed by an admin (rule 5): settled the same way; its price stays and is read as it is.
+    expect(await standIn(0.05, false, true)).toMatchObject({
       allocation: 'Risk on',
       dataStatus: 'green',
       reasons: [],

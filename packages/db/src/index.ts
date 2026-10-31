@@ -4,6 +4,7 @@ export * from './env';
 export * from './market';
 export * from './runs';
 export * from './settings';
+export * from './stand-ins';
 export * as schema from './schema';
 export * from './strategies';
 export * from './usage';

@@ -30,7 +30,7 @@ import {
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { Logger, Notifier, PluginContext } from '../types';
 import { type DiskUsage, formatBytes } from './disk';
-import { parseVersion } from './forward';
+import { instantOf, parseVersion } from './forward';
 
 export type AlertType =
   | 'state_change'
@@ -43,6 +43,7 @@ export type AlertType =
   | 'revisions'
   | 'integrity'
   | 'stand_in_corrected'
+  | 'stand_in_closed'
   | 'disk_space';
 const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red'];
 
@@ -621,6 +622,8 @@ export interface StandInCorrectedDetail {
   recordedAllocation: string;
   correctedAllocation: string;
   differs: boolean;
+  /** Set when the primary arrived after an admin had closed the stand-in (rule 5). */
+  closedAt?: string;
 }
 
 /**
@@ -640,6 +643,9 @@ export function standInDetail(detail: unknown, date: TradingDate): StandInCorrec
   if (typeof differs !== 'boolean' || differs !== (rec !== cor)) return null;
   if (typeof standInDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(standInDate)) return null;
   if (standInDate > date) return null;
+  const { closedAt } = d;
+  if (closedAt !== undefined && (typeof closedAt !== 'string' || Number.isNaN(instantOf(closedAt))))
+    return null;
   return {
     ticker,
     standInDate,
@@ -647,6 +653,7 @@ export function standInDetail(detail: unknown, date: TradingDate): StandInCorrec
     recordedAllocation: rec,
     correctedAllocation: cor,
     differs,
+    ...(closedAt !== undefined && { closedAt }),
   };
 }
 
@@ -720,6 +727,8 @@ export function standInCorrectedText(
           })
         : t('alerts.standInCorrected.same', { recorded: name(d.recordedAllocation) }),
     },
+    // The primary delivered after an admin had closed the stand-in (rule 5): said so.
+    ...(d.closedAt ? [{ keep: t('alerts.standInCorrected.afterClose') }] : []),
     ...(changed.length > 0 ? [t('alerts.standInCorrected.otherChanged')] : []),
   ];
   const list = parts.length;
@@ -862,6 +871,149 @@ export async function sendStandInCorrections(
   return summary;
 }
 
+/** A `stand_in_closed` annotation's detail, as `annotateStandInClosures` writes it. */
+export interface StandInClosedDetail {
+  ticker: string;
+  /** The closed stand-in's date: the entry's own or an earlier one. */
+  standInDate: TradingDate;
+  /** The admin's written reason. */
+  reason: string;
+  /** When it was closed (ISO 8601 instant). */
+  closedAt: string;
+  recordedAllocation: string;
+}
+
+/**
+ * The detail of a close annotation on `date` read back, or null when it is not one
+ * `annotateStandInClosures` writes (a missing ticker, reason or allocation, a stand-in date that is
+ * not a date on or before the entry's, a close time that is not an instant): reported, never told
+ * with a guessed value.
+ */
+export function standInClosedDetail(
+  detail: unknown,
+  date: TradingDate,
+): StandInClosedDetail | null {
+  const d = detail as Partial<Record<keyof StandInClosedDetail, unknown>> | null;
+  if (!d || typeof d !== 'object') return null;
+  const { ticker, standInDate, reason, closedAt, recordedAllocation: rec } = d;
+  if (typeof ticker !== 'string' || ticker === '') return null;
+  if (typeof reason !== 'string' || reason.trim() === '') return null;
+  if (typeof rec !== 'string' || rec === '') return null;
+  if (typeof closedAt !== 'string' || Number.isNaN(instantOf(closedAt))) return null;
+  if (typeof standInDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(standInDate)) return null;
+  if (standInDate > date) return null;
+  return { ticker, standInDate, reason, closedAt, recordedAllocation: rec };
+}
+
+/**
+ * The close alert's text (requirements 04 stand-in rule 5): the stand-in's price stays and no
+ * primary price will check it, the admin's reason, how many recorded days used it (first to last
+ * entry date) and that their signals stay as recorded (annotated, not changed), that from now on
+ * the price is read as it is, and that it is not a new signal; with the data health of the
+ * version's latest recorded day. Fitted to `max` (`fitMessage`): only the reason, the admin's own
+ * text, may be cut; the rest is told whole or not at all (`needed`).
+ */
+export function standInClosedText(
+  t: Translate,
+  o: {
+    name: string;
+    detail: Pick<StandInClosedDetail, 'ticker' | 'standInDate' | 'reason'>;
+    /** The entry dates annotated, oldest first (at least one). */
+    days: TradingDate[];
+    /** The data health of the version's latest recorded day, or undefined without one. */
+    health?: { status: string; date: TradingDate };
+  },
+  max: number,
+): Pick<Alert, 'text' | 'needed'> {
+  const d = o.detail;
+  const values = { strategy: o.name, ticker: d.ticker, standInDate: d.standInDate };
+  // Unknown stays unknown: without a recorded day the status is `unknown`, never green.
+  const healthLine = o.health
+    ? `${t(`alerts.health.${o.health.status}`)} ${t('alerts.standInCorrected.healthDate', { date: o.health.date })}`
+    : t('alerts.health.unknown');
+  const parts: Part[] = [
+    { keep: t('alerts.standInClosed.title', values) },
+    { keep: t('alerts.standInClosed.body', values) },
+    t('alerts.standInClosed.reason', { reason: d.reason }),
+    {
+      keep: t('alerts.standInClosed.days', {
+        count: o.days.length,
+        first: o.days[0]!,
+        last: o.days.at(-1)!,
+      }),
+    },
+    { keep: t('alerts.standInClosed.from') },
+    { keep: t('alerts.standInClosed.pastDay') },
+    { keep: healthLine },
+  ];
+  return fitted(fitMessage(parts, max));
+}
+
+/**
+ * Every closed stand-in not yet told, per version (requirements 04 stand-in rule 5; 11: every
+ * alert states the data health, in the recipient's language, idempotent): one message per
+ * channel, version and closed stand-in (`alerts_sent` subject `stand_in_closed:<version>:<ticker>@
+ * <stand-in date>`), told once even when a later run annotates more of its days. Recipients as
+ * for corrections: the version's owner's channels, the admins' for a library version. Driven by
+ * the `stand_in_closed` annotations and `alerts_sent`, so a failed delivery or a channel added
+ * later is caught up at the next run. An annotation that does not read back is told to the admins
+ * once (keyed by its id), never with a guessed value. Not sent in a drill.
+ */
+export async function sendStandInClosures(db: Db, o: AlertOptions): Promise<StandInAlertSummary> {
+  const summary: StandInAlertSummary = { sent: 0, failed: [], errors: [] };
+  if (o.drill) return summary;
+  const owners: Owners = new Map();
+  for (const version of await allVersions(db)) {
+    const notes = await annotationsOf(db, version.id, 'stand_in_closed');
+    if (notes.length === 0) continue;
+    const last = await lastEntry(db, version.id);
+    const health = last && { status: last.dataStatus, date: last.date };
+    const groups = new Map<string, { detail: StandInClosedDetail; days: TradingDate[] }>();
+    for (const a of notes) {
+      const detail = standInClosedDetail(a.detail, a.date);
+      if (!detail) {
+        await reportUnreadable(
+          db,
+          o,
+          summary,
+          { version, id: a.id, date: a.date },
+          'stand_in_closed',
+        );
+        continue;
+      }
+      const k = `${detail.ticker}@${detail.standInDate}`;
+      const g = groups.get(k) ?? { detail, days: [] };
+      if (!g.days.includes(a.date)) g.days.push(a.date);
+      groups.set(k, g);
+    }
+    for (const [k, g] of groups) {
+      g.days.sort();
+      const key = {
+        subject: `stand_in_closed:${version.id}:${k}`,
+        date: g.detail.standInDate,
+        type: 'stand_in_closed' as const,
+      };
+      const tell = async (t: Translate, channel: Target) => {
+        const message = standInClosedText(
+          t,
+          { name: version.name, detail: g.detail, days: g.days, ...(health && { health }) },
+          roomOn(o, channel, t),
+        );
+        await deliver(db, o, channel, { key, ...message }, summary, t);
+      };
+      if (!version.ownerId) {
+        await eachAdminChannel(db, o, 'stand_in_closed', 'unknown', (t, channel) =>
+          tell(t, channel),
+        );
+        continue;
+      }
+      const owner = await ownerOf(db, o, owners, version.ownerId);
+      for (const channel of owner.targets) await tell(owner.t, channel);
+    }
+  }
+  return summary;
+}
+
 /**
  * An annotation that does not read back, told to the admins once (keyed by its id). The run is
  * incomplete until that alert is on record for some admin channel (none yet, or every delivery
@@ -872,17 +1024,21 @@ async function reportUnreadable(
   o: AlertOptions,
   summary: StandInAlertSummary,
   a: { version: { id: string; name: string }; id: number; date: TradingDate },
+  /** Which annotation: a correction (`stand_in_corrected`) or a close (`stand_in_closed`). */
+  kind: 'stand_in_corrected' | 'stand_in_closed' = 'stand_in_corrected',
 ) {
-  const subject = `stand_in_unreadable:${a.id}`;
+  const closed = kind === 'stand_in_closed';
+  const subject = `${closed ? 'stand_in_closed_unreadable' : 'stand_in_unreadable'}:${a.id}`;
+  const text = closed ? 'alerts.standInClosedUnreadable' : 'alerts.standInUnreadable';
   const sent = await sendAdminAlert(db, {
     ...o,
     date: a.date,
     subject,
-    type: 'stand_in_corrected',
+    type: kind,
     lines: (t) => [
-      { keep: t('alerts.standInUnreadable.title') },
+      { keep: t(`${text}.title`) },
       {
-        keep: t('alerts.standInUnreadable.body', {
+        keep: t(`${text}.body`, {
           version: `${a.version.name} (${a.version.id})`,
           date: a.date,
           id: String(a.id),
@@ -895,14 +1051,12 @@ async function reportUnreadable(
   const [told] = await db
     .select({ id: schema.alertsSent.id })
     .from(schema.alertsSent)
-    .where(
-      and(eq(schema.alertsSent.subject, subject), eq(schema.alertsSent.type, 'stand_in_corrected')),
-    )
+    .where(and(eq(schema.alertsSent.subject, subject), eq(schema.alertsSent.type, kind)))
     .limit(1);
   if (!told) {
     summary.errors.push(
-      `${a.version.name} (${a.version.id}) ${a.date}: stand-in correction annotation ${a.id} ` +
-        'does not read back; not told, and the admins not told yet',
+      `${a.version.name} (${a.version.id}) ${a.date}: stand-in ${closed ? 'close' : 'correction'} ` +
+        `annotation ${a.id} does not read back; not told, and the admins not told yet`,
     );
   }
 }

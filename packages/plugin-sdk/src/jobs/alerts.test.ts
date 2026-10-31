@@ -34,9 +34,12 @@ import {
   sendParityFailed,
   sendRecomputeDiffers,
   sendRevisions,
+  sendStandInClosures,
   sendStandInCorrections,
   sendStrategyAlerts,
   sendUpdateFailed,
+  standInClosedDetail,
+  standInClosedText,
   standInDetail,
   strategyAlert,
 } from './alerts';
@@ -1652,5 +1655,155 @@ describe('every alert fits a small channel: title and health line whole, the cou
         expect(once).toHaveLength(1);
       }
     });
+  });
+});
+
+describe('stand-in close alerts (requirements 04, the stand-in rule 5)', () => {
+  const DAY = '2026-01-05';
+  const CLOSED_AT = '2026-02-01T10:00:00.000Z';
+  type TestDb = Awaited<ReturnType<typeof setup>>['db'];
+  const note = (
+    db: TestDb,
+    versionId: string,
+    date: string,
+    detail: Record<string, unknown> = {},
+  ) =>
+    annotate(db, {
+      versionId,
+      date,
+      kind: 'stand_in_closed',
+      detail: {
+        ticker: 'AAA',
+        standInDate: DAY,
+        reason: 'primary will not deliver',
+        closedAt: CLOSED_AT,
+        recordedAllocation: 'Calm',
+        ...detail,
+      } as never,
+      runId: null,
+    });
+
+  it('one message per version and closed stand-in, to the owner, once (EN and JA)', async () => {
+    for (const language of [null, 'ja']) {
+      const { db, version, day } = await setup(language);
+      await day(DAY, 'Calm', { status: 'yellow', reasons: ['AAA:stand_in@s'] });
+      await day('2026-01-06', 'Calm');
+      await note(db, version.id, DAY);
+      await note(db, version.id, '2026-01-06');
+      const { notifier, sent } = fakeNotifier();
+      expect(await sendStandInClosures(db, options(notifier, '2026-01-06'))).toEqual({
+        sent: 1,
+        failed: [],
+        errors: [],
+      });
+      expect(sent[0]!.text.split('\n')).toEqual(
+        language === 'ja'
+          ? [
+              `Trend: AAA の ${DAY} の価格は代替価格のままです`,
+              `主ソースは AAA の ${DAY} の価格を提供しないため、管理者がその代替価格を確定しました。副ソースの価格がそのまま残り、主ソースの価格で確認されることはありません。`,
+              '理由: primary will not deliver',
+              `これを使った記録日: 2 日(${DAY} から 2026-01-06)。そのシグナルは記録どおりで、記録は変更せず、注記を付けました。`,
+              '今後のシグナルはこの価格をそのまま読み、未確認の価格として日を黄色や赤にすることはありません。',
+              '新しいシグナルではありません。現在の配分は最新のシグナルのとおりです。',
+              expect.stringContaining('(最新の記録日 2026-01-06)'),
+            ]
+          : [
+              `Trend: AAA's price for ${DAY} stays a secondary price`,
+              `The primary source will not deliver AAA's price for ${DAY}, so an admin closed its stand-in: the secondary source's price stays, and no primary price will check it.`,
+              'Reason given: primary will not deliver',
+              `Recorded days that used it: 2 (${DAY} to 2026-01-06). Their signals stay as recorded; the record is annotated, not changed.`,
+              'From now on, signals read this price as it is: it no longer makes a day yellow or red as an unconfirmed price.',
+              'This is not a new signal: the latest signal gives the current allocation.',
+              'Data health: green. (Latest recorded day, 2026-01-06.)',
+            ],
+      );
+      // Told once, also when a later run annotates another of its days.
+      await day('2026-01-07', 'Calm');
+      await note(db, version.id, '2026-01-07');
+      expect((await sendStandInClosures(db, options(notifier, '2026-01-07'))).sent).toBe(0);
+      const [row] = await db.select().from(schema.alertsSent);
+      expect(row).toMatchObject({
+        subject: `stand_in_closed:${version.id}:AAA@${DAY}`,
+        date: DAY,
+        type: 'stand_in_closed',
+      });
+    }
+  });
+
+  it('reads a detail back only when it is one the closing step writes', () => {
+    const ok = {
+      ticker: 'A',
+      standInDate: DAY,
+      reason: 'primary will not deliver',
+      closedAt: CLOSED_AT,
+      recordedAllocation: 'Calm',
+    };
+    expect(standInClosedDetail(ok, '2026-01-06')).toEqual(ok);
+    for (const bad of [
+      { ...ok, reason: ' ' },
+      { ...ok, reason: undefined },
+      { ...ok, closedAt: '2026-02-01 10:00:00' },
+      { ...ok, standInDate: '2026-01-07' },
+      { ...ok, recordedAllocation: '' },
+      { ...ok, ticker: '' },
+      null,
+    ]) {
+      expect(standInClosedDetail(bad, '2026-01-06')).toBeNull();
+    }
+    // A correction after the close carries its time; one that is not an instant is not read.
+    const corrected = {
+      ticker: 'A',
+      deviation: 0.01,
+      recordedAllocation: 'x',
+      correctedAllocation: 'y',
+      differs: true,
+    };
+    expect(standInDetail({ ...corrected, closedAt: CLOSED_AT }, DAY)?.closedAt).toBe(CLOSED_AT);
+    expect(standInDetail({ ...corrected, closedAt: 'x' }, DAY)).toBeNull();
+  });
+
+  it("only the admin's reason may be cut; too small a channel gets nothing", () => {
+    const t = translator('en');
+    const o = {
+      name: 'Trend',
+      detail: { ticker: 'AAA', standInDate: DAY, reason: 'x'.repeat(400) },
+      days: [DAY],
+    };
+    const whole = standInClosedText(t, o, 10_000);
+    expect(whole.needed).toBeUndefined();
+    const lines = whole.text.split('\n');
+    const room = whole.text.length - 300;
+    const cut = standInClosedText(t, o, room);
+    expect(cut.needed).toBeUndefined();
+    expect(cut.text.length).toBeLessThanOrEqual(room);
+    expect(cut.text.split('\n').filter((l) => !l.startsWith('Reason given'))).toEqual(
+      lines.filter((l) => !l.startsWith('Reason given')),
+    );
+    expect(standInClosedText(t, o, 100).needed).toBeGreaterThan(100);
+  });
+
+  it('an unreadable detail is told to the admins once, never with a guessed value', async () => {
+    const { db, owner, version, day } = await setup();
+    await day(DAY, 'Calm');
+    await note(db, version.id, DAY, { reason: '' });
+    const bad = (await db.select().from(schema.forwardAnnotations)).at(-1)!.id;
+    await setSetting(db, 'forward_records_from', DAY);
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const { notifier, sent } = fakeNotifier();
+    expect(await sendStandInClosures(db, options(notifier, DAY))).toEqual({
+      sent: 1,
+      failed: [],
+      errors: [],
+    });
+    expect(sent.map((m) => [m.target, m.text.split('\n').slice(0, 2)])).toEqual([
+      [
+        'ops',
+        [
+          'Saku: a stand-in close annotation cannot be read',
+          `Trend (${version.id}), ${DAY}: annotation ${bad} does not read back, so its close is not told. The record is unchanged; find the cause.`,
+        ],
+      ],
+    ]);
+    expect((await sendStandInClosures(db, options(notifier, DAY))).sent).toBe(0);
   });
 });

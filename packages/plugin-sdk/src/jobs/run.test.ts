@@ -9,6 +9,7 @@ import {
   addChannel,
   annotationsOf,
   appendForward,
+  closeStandIn,
   createUser,
   forwardRecord,
   registerVersion,
@@ -965,6 +966,185 @@ describe('a stand-in the primary later corrects', () => {
     expect(await notes(db, 'stand_in_corrected')).toEqual([]);
     expect((await forwardRecord(db, version.id)).map((e) => e.date)).toEqual([DAY, '2026-01-16']);
   });
+
+  it('closed by an admin (rule 5): corrections proceed, the weekly run completes, the owner told once; a late primary is still compared', async () => {
+    const { db, version } = await setup();
+    await upsertSymbols(db, [{ ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    // Reads AAA's last two returns (so D+1 reads D), holds BBB.
+    const quiet = await registerVersion(db, {
+      ownerId: version.ownerId,
+      name: 'Quiet',
+      at: new Date('2026-01-12T22:00:00Z'),
+      strategy: {
+        name: 'Quiet',
+        account: 'taxable',
+        safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [
+          {
+            id: 'V',
+            type: 'compare',
+            left: { indicator: 'volatility', ticker: 'AAA', length: 2 },
+            op: '<',
+            right: { threshold: 0.005 },
+          },
+        ],
+        allocations: [
+          { name: 'Still', when: { all: ['V'] }, holdings: [{ ticker: 'BBB', weight: 100 }] },
+          { name: 'Calm', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        ],
+      },
+    });
+    const [D, D1, D2] = ['2026-01-13', '2026-01-14', '2026-01-15'];
+    const source = (key: string, omit: string[] = [], scale: Record<string, number> = {}) => {
+      const base = barSource(key);
+      const out: BarSource = {
+        info: base.info,
+        async fetchBars(ticker, from, to, ctx) {
+          return (await base.fetchBars(ticker, from, to, ctx))
+            .filter((b) => !omit.includes(`${ticker} ${b.date}`))
+            .map((b) => {
+              const close = b.close * (scale[`${ticker} ${b.date}`] ?? 1);
+              return { ...b, open: close, high: close, low: close, close };
+            });
+        },
+      };
+      return out;
+    };
+    const at = (notifier: Notifier, target: string, now: string, over: Partial<RunOptions> = {}) =>
+      options(notifier, {
+        target,
+        now: new Date(now),
+        clock: () => new Date(now),
+        alerting: { ...options(notifier).alerting, date: target },
+        ...over,
+      });
+    // The secondary is 1% low on AAA's D and BBB's D+1, the days the primary lacks.
+    const off = source('s', [], { [`AAA ${D}`]: 0.99, [`BBB ${D1}`]: 0.99 });
+    const { notifier, sent } = fakeNotifier();
+    await runJob(
+      db,
+      plugins([source('p', [`AAA ${D}`]), off]),
+      at(notifier, D, '2026-01-14T01:30:00Z'),
+    );
+    await runJob(
+      db,
+      plugins([source('p', [`AAA ${D}`, `BBB ${D1}`]), off]),
+      at(notifier, D1, '2026-01-15T01:30:00Z'),
+    );
+    // D+2: AAA's primary arrives (the secondary agrees with it on D now); BBB's D+1 never will.
+    const offB = source('s', [], { [`BBB ${D1}`]: 0.99 });
+    const lacking = () => plugins([source('p', [`BBB ${D1}`]), offB]);
+    await runJob(db, lacking(), at(notifier, D2, '2026-01-16T01:30:00Z'));
+    const weekly = (now: string) => runJob(db, lacking(), at(notifier, D2, now, { job: 'weekly' }));
+    const w = await weekly('2026-01-16T02:30:00Z');
+    expect(w.ok).toBe(false);
+    expect(w.error).toContain('stand-in corrections waiting');
+    const corrections = async () =>
+      (await annotationsOf(db, quiet.id, 'stand_in_corrected')).map((n) => [
+        n.date,
+        (n.detail as { ticker: string }).ticker,
+        (n.detail as { closedAt?: string }).closedAt,
+      ]);
+    expect(await corrections()).toEqual([[D, 'AAA', undefined]]);
+    const [bbb] = await db.select().from(schema.symbols).where(eq(schema.symbols.ticker, 'BBB'));
+    const canonical = () =>
+      db
+        .select()
+        .from(schema.bars)
+        .where(and(eq(schema.bars.symbolId, bbb!.id), eq(schema.bars.date, D1)));
+    const [barBefore] = await canonical();
+    expect(barBefore).toMatchObject({ standIn: true, source: 's' });
+
+    // A non-admin cannot close it; the admin can.
+    await createUser(db, {
+      username: 'bo',
+      passwordHash: 'x',
+      totpSecretEnc: 'x',
+      totpLastStep: 1,
+      backupCodeHashes: ['b'],
+      isAdmin: false,
+    });
+    const args = { ticker: 'BBB', date: D1, reason: 'primary will not deliver' };
+    expect(await closeStandIn(db, { ...args, username: 'bo' })).toMatchObject({ ok: false });
+    const closed = await closeStandIn(db, { ...args, username: 'alex' });
+    expect(closed).toMatchObject({ ok: true });
+    const closedAt = (closed as { closedAt: string }).closedAt;
+
+    // The weekly run completes: D+1's correction proceeds; nothing is edited.
+    const w2 = await weekly('2026-01-16T03:30:00Z');
+    expect(w2).toMatchObject({ ok: true });
+    expect(await corrections()).toEqual([
+      [D, 'AAA', undefined],
+      [D1, 'AAA', undefined],
+    ]);
+    expect(await canonical()).toEqual([barBefore]);
+    // The entries that used it while it was open are annotated once, with the reason.
+    const closes = async () =>
+      (await annotationsOf(db, quiet.id, 'stand_in_closed')).map((n) => [n.date, n.detail]);
+    const detail = (recorded: string) => ({
+      ticker: 'BBB',
+      standInDate: D1,
+      reason: 'primary will not deliver',
+      closedAt,
+      recordedAllocation: recorded,
+    });
+    const recorded = await forwardRecord(db, quiet.id);
+    expect(recorded.map((e) => [e.date, e.allocation])).toEqual([
+      [D, 'Calm'],
+      [D1, 'Calm'],
+      [D2, 'Still'],
+    ]);
+    expect(await closes()).toEqual([
+      [D1, detail(recorded[1]!.allocation)],
+      [D2, detail(recorded[2]!.allocation)],
+    ]);
+    expect(await annotationsOf(db, version.id, 'stand_in_closed')).toEqual([]);
+    // The owner is told once on each channel.
+    const told = () => sent.filter((m) => m.text.startsWith(`Quiet: BBB's price for ${D1}`));
+    expect(told().map((m) => m.target)).toEqual(['me', 'ops']);
+    expect(told()[0]!.text.split('\n')).toEqual([
+      `Quiet: BBB's price for ${D1} stays a secondary price`,
+      `The primary source will not deliver BBB's price for ${D1}, so an admin closed its stand-in: the secondary source's price stays, and no primary price will check it.`,
+      'Reason given: primary will not deliver',
+      `Recorded days that used it: 2 (${D1} to ${D2}). Their signals stay as recorded; the record is annotated, not changed.`,
+      'From now on, signals read this price as it is: it no longer makes a day yellow or red as an unconfirmed price.',
+      'This is not a new signal: the latest signal gives the current allocation.',
+      expect.stringContaining(`(Latest recorded day, ${D2}.)`),
+    ]);
+    expect(await weekly('2026-01-16T04:30:00Z')).toMatchObject({ ok: true });
+    expect(await closes()).toHaveLength(2);
+    expect(told()).toHaveLength(2);
+
+    // The primary delivers it after all: compared and recorded (resolution after the close),
+    // the close row unchanged; the correction says so.
+    const late = await runJob(
+      db,
+      plugins([source('p'), offB]),
+      at(notifier, D2, '2026-01-16T05:30:00Z'),
+    );
+    expect(late).toMatchObject({ ok: true });
+    const [row] = await db
+      .select()
+      .from(schema.standIns)
+      .where(and(eq(schema.standIns.symbolId, bbb!.id), eq(schema.standIns.date, D1)));
+    expect(row).toMatchObject({
+      closedAt,
+      closeReason: 'primary will not deliver',
+      resolvedAt: expect.any(String),
+    });
+    expect(row!.deviation).toBeCloseTo(1 / 0.99 - 1, 9);
+    const bbbCorrections = (await corrections()).filter((c) => c[1] === 'BBB');
+    expect(bbbCorrections).toEqual([
+      [D1, 'BBB', closedAt],
+      [D2, 'BBB', closedAt],
+    ]);
+    const lateTold = sent.filter((m) =>
+      m.text.includes('closed this stand-in as never to be replaced'),
+    );
+    expect(lateTold.map((m) => m.target)).toEqual(['me', 'ops']);
+    expect(await notes(db, 'recomputed')).toEqual([]);
+  });
 });
 
 describe('an issuer source declaring what it publishes', () => {
@@ -1036,8 +1216,8 @@ describe('an issuer source declaring what it publishes', () => {
     );
     expect(r.ok).toBe(true);
     expect(warnings).toContain(
-      "AAA iss: 1 issuer record in XXX, not the fund's currency: NAV and distributions not " +
-        'compared (no conversion; layer D has no result for them)',
+      "AAA iss: 1 NAV in XXX, not the fund's currency, not compared (no conversion; layer D " +
+        'has no result for them)',
     );
     const premium = await db
       .select()

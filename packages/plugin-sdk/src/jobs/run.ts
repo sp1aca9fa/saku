@@ -30,11 +30,12 @@ import {
   sendParityFailed,
   sendRecomputeDiffers,
   sendRevisions,
+  sendStandInClosures,
   sendStandInCorrections,
   sendStrategyAlerts,
 } from './alerts';
 import { anchor } from './anchor';
-import { annotateStandInCorrections, forward, recompute } from './forward';
+import { annotateStandInClosures, annotateStandInCorrections, forward, recompute } from './forward';
 import {
   DAILY_OVERLAP,
   countsForRun,
@@ -163,6 +164,26 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     let valueRevisions: Parameters<typeof sendRevisions>[1]['revisions'] = [];
     /** The current engine must reproduce the record, or each difference is annotated and told. */
     const recomputeAndTell = async () => {
+      // Stand-ins an admin closed (requirements 04 stand-in rule 5): the entries that used one
+      // are annotated (never edited) and their owners told once, caught up like corrections.
+      const k = await annotateStandInClosures(db, runId);
+      if (k.annotations > 0) log.info(`Stand-in closes: ${k.annotations} new annotations`);
+      if (k.errors.length > 0) {
+        log.warn('Stand-in closes not annotated', { errors: k.errors });
+        markIncomplete('stand-in closes');
+        failures.push(...k.errors);
+      }
+      const ks = await sendStandInClosures(db, alerting);
+      if (ks.sent > 0) log.info(`Stand-in close alerts: ${ks.sent} sent`);
+      if (ks.failed.length > 0) {
+        log.warn('Stand-in close alerts not delivered', { failed: ks.failed });
+        markIncomplete('alerts');
+      }
+      if (ks.errors.length > 0) {
+        log.warn('Stand-in close annotations not told', { errors: ks.errors });
+        markIncomplete('stand-in alerts');
+        failures.push(...ks.errors);
+      }
       // First the corrected stand-ins (a day one explains is not a recompute difference, so a
       // stand-in this run resolved never reads as "the engine decides differently").
       const c = await annotateStandInCorrections(db, runId, sessions);

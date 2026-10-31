@@ -118,7 +118,13 @@ export type SeriesPoint = SeriesValue | SeriesWithdrawal;
 export interface IssuerRecord {
   date: TradingDate;
   nav?: number;
-  /** The NAV's currency (ISO 4217), required with a NAV; compared with the fund's currency. */
+  /**
+   * The currency (ISO 4217) of the record's NAV and distribution, as the issuer states it
+   * (plug-in contract); required with a NAV. Layer D compares it with the fund's currency: in
+   * another one, the NAV and a distribution both sides report are not compared (decisions log
+   * 2026-11-01, C15 (a)). A record without one (no NAV) has its distribution compared as
+   * published.
+   */
   currency?: string;
   distribution?: number;
   split?: number;

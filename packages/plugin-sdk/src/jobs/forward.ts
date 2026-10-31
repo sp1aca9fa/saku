@@ -29,6 +29,7 @@ import {
   annotationsOf,
   appendForward,
   canonicalBars,
+  closedStandIns,
   forwardRecord,
   getSetting,
   lastEntry,
@@ -282,6 +283,8 @@ export async function annotateStandInCorrections(
           // Against the stand-in's last stored close: a later run may have replaced the close
           // an entry used while the stand-in was unresolved (docs/data-pipeline.md).
           deviation: standIn.deviation,
+          // The primary arrived after an admin had closed it (rule 5): said so.
+          ...(standIn.closedAt && { closedAt: standIn.closedAt }),
           recordedAllocation: recorded.allocation,
           correctedAllocation: now.allocation,
           differs: now.allocation !== recorded.allocation,
@@ -295,6 +298,146 @@ export async function annotateStandInCorrections(
   return summary;
 }
 
+export interface StandInClosureSummary {
+  /** Annotations added by this call. */
+  annotations: number;
+  /** As `StandInCorrectionSummary.errors`: nothing annotated on a guess; the caller reports. */
+  errors: string[];
+}
+
+/**
+ * The closing step (requirements 04 stand-in rule 5: a stand-in the primary never replaces is
+ * closed by an admin with a reason; the record keeps the stand-in price; 05: forward records are
+ * append-only). For every registered version that parses, each closed stand-in on a ticker it
+ * depends on gives one `stand_in_closed` annotation (ticker, stand-in date, the reason and when
+ * it was closed, the recorded allocation) on every recorded entry that used it while it was open
+ * (`standInClosures`). Nothing is recomputed: the price the entries used stays the price. Caught
+ * up from `stand_ins`, idempotent; the owner is told by `sendStandInClosures`.
+ */
+export async function annotateStandInClosures(
+  db: Db,
+  runId: string | null,
+): Promise<StandInClosureSummary> {
+  const summary: StandInClosureSummary = { annotations: 0, errors: [] };
+  const closed = await closedStandIns(db);
+  if (closed.length === 0) return summary;
+  const errors = new Set<string>();
+  for (const version of await allVersions(db)) {
+    const parsed = parseVersion(version);
+    if ('error' in parsed) continue;
+    const pending = standInClosures({
+      version: `${version.name} (${version.id})`,
+      deps: dependencies(parsed.strategy),
+      record: await forwardRecord(db, version.id),
+      closed,
+      annotated: (await annotationsOf(db, version.id, 'stand_in_closed')).map((a) => {
+        const d = a.detail as { ticker?: unknown; standInDate?: unknown };
+        return { date: a.date, ticker: d.ticker, standInDate: d.standInDate };
+      }),
+    });
+    for (const e of pending.errors) errors.add(e);
+    for (const { standIn, recorded } of pending.annotate) {
+      await annotate(db, {
+        versionId: version.id,
+        date: recorded.date,
+        kind: 'stand_in_closed',
+        detail: {
+          ticker: standIn.ticker,
+          standInDate: standIn.date,
+          reason: standIn.closeReason,
+          closedAt: standIn.closedAt,
+          recordedAllocation: recorded.allocation,
+        },
+        runId,
+      });
+      summary.annotations++;
+    }
+  }
+  summary.errors = [...errors];
+  return summary;
+}
+
+/** A closed stand-in as `closedStandIns` reads it. */
+export interface ClosedStandIn {
+  ticker: string;
+  date: TradingDate;
+  /** The run that first recorded it (null for rows stored outside a run). */
+  runId: string | null;
+  createdAt: string;
+  closedAt: string | null;
+  closeReason: string | null;
+}
+
+/**
+ * The closure annotations still to write for one version (rule 5 with 05's append-only record):
+ * for each closed stand-in on a ticker the version depends on, every recorded entry dated on or
+ * after its date that used it while it was open, not annotated yet for that entry date, ticker
+ * and stand-in date. "Used it" is decided as for corrections (`standInCorrections`): appended in
+ * the run that first recorded it, it did; otherwise by time, appended at or after it was first
+ * recorded and before it was closed (instants). Entries appended after the close were decided
+ * knowing it was closed and are not annotated (a primary arriving later still annotates them as a
+ * correction, through the resolution). A timestamp that is not an instant leaves that unknown: an
+ * error, nothing annotated on a guess.
+ */
+export function standInClosures(o: {
+  version: string;
+  deps: string[];
+  record: Pick<ForwardEntry, 'date' | 'allocation' | 'createdAt' | 'runId'>[];
+  closed: ClosedStandIn[];
+  annotated: { date: string; ticker: unknown; standInDate: unknown }[];
+}): {
+  annotate: {
+    standIn: ClosedStandIn & { closedAt: string; closeReason: string };
+    recorded: Pick<ForwardEntry, 'date' | 'allocation'>;
+  }[];
+  errors: string[];
+} {
+  const done = new Set(
+    o.annotated.map((a) => `${a.date} ${String(a.ticker)} ${String(a.standInDate)}`),
+  );
+  const out: ReturnType<typeof standInClosures> = { annotate: [], errors: [] };
+  for (const s of o.closed) {
+    if (!o.deps.includes(s.ticker)) continue;
+    // The triggers of migration 0011 refuse a close without its reason; checked all the same.
+    if (s.closedAt === null || s.closeReason === null || s.closeReason.trim() === '') {
+      out.errors.push(`${s.ticker} ${s.date}: closed without a reason; its close is not annotated`);
+      continue;
+    }
+    const standIn = { ...s, closedAt: s.closedAt, closeReason: s.closeReason };
+    const from = instantOf(s.createdAt);
+    const until = instantOf(s.closedAt);
+    let unplaced = false;
+    for (const recorded of o.record) {
+      if (recorded.date < s.date) continue;
+      if (done.has(`${recorded.date} ${s.ticker} ${s.date}`)) continue;
+      let used: boolean;
+      if (recorded.runId !== null && recorded.runId === s.runId) used = true;
+      else if (Number.isNaN(from) || Number.isNaN(until)) {
+        if (!unplaced) {
+          out.errors.push(
+            `${s.ticker} ${s.date}: the stand-in's timestamps are not instants ` +
+              `(created ${s.createdAt}, closed ${s.closedAt}); its close is not annotated`,
+          );
+        }
+        unplaced = true;
+        continue;
+      } else {
+        const at = instantOf(recorded.createdAt);
+        if (Number.isNaN(at)) {
+          out.errors.push(
+            `${o.version} ${recorded.date}: the entry's created_at (${recorded.createdAt}) is ` +
+              `not an instant; the ${s.ticker} ${s.date} stand-in close is not annotated`,
+          );
+          continue;
+        }
+        used = at >= from && at < until;
+      }
+      if (used) out.annotate.push({ standIn, recorded });
+    }
+  }
+  return out;
+}
+
 /** A resolved stand-in as `resolvedStandIns` reads it. */
 export interface ResolvedStandIn {
   ticker: string;
@@ -306,6 +449,8 @@ export interface ResolvedStandIn {
   /** The run in which the primary replaced it. */
   resolvedRunId: string | null;
   resolvedAt: string | null;
+  /** Set when an admin had closed it before the primary arrived after all (rule 5). */
+  closedAt?: string | null;
 }
 
 /** ISO 8601 with a `Z` or an offset, as `toISOString` writes `created_at` and `resolved_at`. */
@@ -522,9 +667,11 @@ export async function lookbackFlags(
 /**
  * Whether a stored stand-in still waits for the primary (requirements 04 stand-in rule): only
  * those are moved by the decision-margin test. A resolved one (the primary's bar replaced it) is
- * not. Rule 5's closing by an admin command (not built yet) is to count as resolved here too.
+ * not, nor one an admin closed (rule 5: the primary will not replace it; its price stays and is
+ * read as it is).
  */
-export const isOpenStandIn = (row: { resolvedAt: string | null }) => row.resolvedAt === null;
+export const isOpenStandIn = (row: { resolvedAt: string | null; closedAt: string | null }) =>
+  row.resolvedAt === null && row.closedAt === null;
 
 /**
  * The ticker's unresolved stand-in prices up to the last of `rows` (requirements 04 stand-in rule

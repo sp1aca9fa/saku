@@ -5,7 +5,7 @@ import {
   LAYER_D_MAX_STATUS,
   layerD,
   navPremiums,
-  notComparedByCurrency,
+  notComparedOf,
   otherCurrency,
   premiumStats,
   quantile,
@@ -45,6 +45,8 @@ const navs = (premium = 0): IssuerRecord[] =>
     ...(b.splitFactor !== 1 && { split: b.splitFactor }),
   }));
 const opts = { source: 'iss', currency: 'USD', sessions, to: TO };
+/** The options `notComparedOf` takes (no calendar: comparisons only). */
+const no = { source: 'iss', currency: 'USD', to: TO };
 const of = (rs: ReturnType<typeof layerD>, check: string) => rs.filter((r) => r.check === check);
 
 describe('layer D (issuer reconciliation)', () => {
@@ -108,7 +110,7 @@ describe('layer D (issuer reconciliation)', () => {
     expect(otherCurrency(records[0]!, 'USD')).toBe(true);
     expect(otherCurrency(records[1]!, 'USD')).toBe(false);
     expect(otherCurrency(records[2]!, 'USD')).toBe(false);
-    // A record without a NAV is in its stated currency too (its distribution is not compared).
+    // A record without a NAV is in its stated currency too.
     expect(otherCurrency({ date: dates[0]!, currency: 'XXX' }, 'USD')).toBe(true);
   });
 
@@ -119,58 +121,86 @@ describe('layer D (issuer reconciliation)', () => {
       status: 'yellow',
       message: 'issuer NAV not positive',
     });
-    // Its NAV was compared (a mismatch): only a distribution would go uncounted, and this source
-    // declares NAV only.
-    expect(
-      notComparedByCurrency(records, { currency: 'USD', to: TO, publishes: { nav: true } }),
-    ).toEqual({});
-    expect(notComparedByCurrency(records, { currency: 'USD', to: TO })).toEqual({ XXX: 1 });
+    // Its NAV was compared (a mismatch), and it has no distribution: nothing counted.
+    expect(notComparedOf(primary, records, no)).toEqual({});
   });
 
-  it('a distribution on a record in another currency is not compared; a split is', () => {
+  it('a distribution both sides report on a record in another currency is not compared', () => {
     // The issuer's records of the dividend's day (7th) and the split's day (8th) are in XXX.
     const records = navs().map((r, i) => (i === 2 || i === 3 ? { ...r, currency: 'XXX' } : r));
     const rs = layerD(primary, records, opts);
     expect(of(rs, 'distribution_match')).toEqual([]);
+    // A split ratio has no currency: compared.
     expect(of(rs, 'split_match')).toEqual([
       expect.objectContaining({ date: dates[3], status: 'green' }),
     ]);
-    // Events-only, declared: the same.
+    expect(notComparedOf(primary, records, no)).toEqual({ XXX: { navs: 2, distributions: 1 } });
+    // Events-only, declared: the same; the split is not counted.
     const events = records.map(({ nav: _n, ...r }) => r).filter((r) => r.date >= dates[2]!);
-    const declared = layerD(primary, events, {
-      ...opts,
-      publishes: { distributions: true, splits: true },
-    });
+    const publishes = { distributions: true, splits: true } as const;
+    const declared = layerD(primary, events, { ...opts, publishes });
     expect(of(declared, 'distribution_match')).toEqual([]);
     expect(of(declared, 'split_match')).toHaveLength(1);
-    expect(
-      notComparedByCurrency(events, {
-        currency: 'USD',
-        to: TO,
-        publishes: { distributions: true, splits: true },
-      }),
-    ).toEqual({ XXX: 2 });
+    expect(notComparedOf(primary, events, { ...no, publishes })).toEqual({
+      XXX: { navs: 0, distributions: 1 },
+    });
   });
 
-  it('counts the records not compared for another currency, in the window', () => {
+  it('a distribution on one side only is a mismatch in any currency (no rate needed)', () => {
+    // The issuer (XXX) pays 0.3 on the 6th, where the primary pays nothing.
+    const extra = navs().map((r, i) =>
+      i === 1 ? { ...r, currency: 'XXX', distribution: 0.3 } : r,
+    );
+    expect(of(layerD(primary, extra, opts), 'distribution_match')).toEqual([
+      expect.objectContaining({
+        date: dates[1],
+        status: 'yellow',
+        message: 'event only in issuer data',
+      }),
+      expect.objectContaining({ date: dates[2], status: 'green' }),
+    ]);
+    // The reverse: the issuer's record of the 7th (XXX) has no distribution, the primary pays.
+    const missing = navs().map((r, i) =>
+      i === 2 ? { ...r, currency: 'XXX', distribution: undefined } : r,
+    );
+    expect(of(layerD(primary, missing, opts), 'distribution_match')).toEqual([
+      expect.objectContaining({
+        date: dates[2],
+        status: 'yellow',
+        message: 'event missing in issuer data',
+      }),
+    ]);
+    // Only their NAVs were not compared.
+    expect(notComparedOf(primary, extra, no)).toEqual({ XXX: { navs: 1, distributions: 0 } });
+    expect(notComparedOf(primary, missing, no)).toEqual({ XXX: { navs: 1, distributions: 0 } });
+  });
+
+  it('counts exactly what layer D did not compare, in the window', () => {
     const records = navs().map((r, i) =>
       i === 0 ? { ...r, currency: 'YYY' } : i >= 2 ? { ...r, currency: 'XXX' } : r,
     );
-    const o = { currency: 'USD', to: TO };
-    expect(notComparedByCurrency(records, o)).toEqual({ XXX: 3, YYY: 1 });
-    expect(Object.keys(notComparedByCurrency(records, o))).toEqual(['XXX', 'YYY']);
-    expect(notComparedByCurrency(records, { ...o, from: dates[1]!, to: dates[3]! })).toEqual({
-      XXX: 2,
+    const all = { XXX: { navs: 3, distributions: 1 }, YYY: { navs: 1, distributions: 0 } };
+    expect(notComparedOf(primary, records, no)).toEqual(all);
+    expect(Object.keys(notComparedOf(primary, records, no))).toEqual(['XXX', 'YYY']);
+    expect(notComparedOf(primary, records, { ...no, from: dates[1]!, to: dates[3]! })).toEqual({
+      XXX: { navs: 2, distributions: 1 },
+    });
+    // A NAV on a date the primary has no bar is not compared in any currency: not counted.
+    const gap = primary.filter((b) => b.date !== dates[4]);
+    expect(notComparedOf(gap, records, no)).toEqual({
+      XXX: { navs: 2, distributions: 1 },
+      YYY: { navs: 1, distributions: 0 },
     });
     // Nothing compared, nothing counted: splits only declared, or not loaded with no declaration.
-    expect(notComparedByCurrency(records, { ...o, publishes: { splits: true } })).toEqual({});
-    expect(notComparedByCurrency(records, { ...o, notLoaded: true })).toEqual({});
+    expect(notComparedOf(primary, records, { ...no, publishes: { splits: true } })).toEqual({});
+    expect(notComparedOf(primary, records, { ...no, notLoaded: true })).toEqual({});
     expect(
-      notComparedByCurrency(records, { ...o, notLoaded: true, publishes: { nav: true } }),
-    ).toEqual({ XXX: 3, YYY: 1 });
+      notComparedOf(primary, records, { ...no, notLoaded: true, publishes: { nav: true } }),
+    ).toEqual({ XXX: { navs: 3, distributions: 0 }, YYY: { navs: 1, distributions: 0 } });
     // No currency is unknown (a mismatch), never "another currency"; empty input counts nothing.
-    expect(notComparedByCurrency([{ date: dates[0]!, nav: 1 }], o)).toEqual({});
-    expect(notComparedByCurrency([], o)).toEqual({});
+    expect(notComparedOf(primary, [{ date: dates[0]!, nav: 1 }], no)).toEqual({});
+    expect(notComparedOf(primary, [], no)).toEqual({});
+    expect(notComparedOf([], records, no)).toEqual({});
   });
 
   it('an invalid tolerance setting is told only when some NAV would be compared', () => {

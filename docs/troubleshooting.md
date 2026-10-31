@@ -100,6 +100,20 @@ healthchecks.io (a rerun would replace the day's run in the A1 gate count), and 
 tried again at the next daily run. After the gate it leaves the run incomplete, as any
 undelivered alert does.
 
+## "Stand-in still unresolved after the full refetch"
+
+The weekly run is incomplete because a correction waits for a stand-in the primary has not
+replaced (the alert names the ticker, the date and the days it holds back). See the open ones with
+`pnpm sources stand-in list --open` (age in sessions, and whether a canonical bar still uses it;
+"refused, no canonical bar" means a later run refused it, yet it still holds corrections back).
+If the primary is only late, wait: the next runs resolve it. If it will never deliver that day
+(the provider confirms, or several weekly refetches still lack it), close it with the reason:
+`pnpm sources stand-in close <TICKER> <YYYY-MM-DD> --reason "primary will not deliver" --user <admin>`.
+Only an admin can; the stand-in's price stays, the corrections behind it proceed at the next run,
+the recorded days that used it are annotated (not changed) and their owners told once. Closing is
+never automatic and cannot be undone; if the primary delivers the day later anyway, it is still
+compared and any difference annotated and told.
+
 ## A failed run and catch-up
 
 The run did not complete (a source down, an alert not delivered, a backup failed). No stamp is

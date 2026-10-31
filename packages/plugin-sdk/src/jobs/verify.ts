@@ -26,7 +26,7 @@ import {
   layerB,
   layerD,
   leverageCheck,
-  notComparedByCurrency,
+  notComparedOf,
   seriesHealth,
   standIns,
   symbolHealth,
@@ -347,7 +347,9 @@ async function markCanonical(db: Db, symbolId: number, dates: TradingDate[], sta
 
 /**
  * Records new stand-ins (a later run may still change an unresolved one) and resolves those the
- * primary has now replaced. Returns the resolved ones off by more than the close tolerance.
+ * primary has now replaced, closed ones too (rule 5: a primary that arrives after the close is
+ * still compared and recorded; the close stays). Returns the resolved ones off by more than the
+ * close tolerance.
  */
 async function recordStandIns(
   db: Db,
@@ -371,7 +373,9 @@ async function recordStandIns(
       .onConflictDoUpdate({
         target: [schema.standIns.symbolId, schema.standIns.date],
         set: { source: s.source, close: s.bar.close, band: s.band, basis: s.basis },
-        setWhere: isNull(schema.standIns.resolvedAt),
+        // A closed stand-in keeps the values it was closed with (requirements 04 stand-in
+        // rule 5; a trigger refuses the change): only an open one is replaced.
+        setWhere: and(isNull(schema.standIns.resolvedAt), isNull(schema.standIns.closedAt)),
       });
   }
   const open = await db
@@ -513,15 +517,16 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       for (const source of issuerSources) {
         const a = availability.get(source);
         const publishes = o.issuerPublishes?.[source];
-        const notCompared = notComparedByCurrency(stored.get(source) ?? [], {
+        const notCompared = notComparedOf(primary, stored.get(source) ?? [], {
+          source,
           currency: s.currency,
           to: o.to,
           ...(o.from && { from: o.from }),
           ...(publishes && { publishes }),
           ...(notLoaded(source) && { notLoaded: true }),
         });
-        for (const [currency, count] of Object.entries(notCompared)) {
-          navNotCompared.push({ ticker: s.ticker, source, currency, count });
+        for (const [currency, c] of Object.entries(notCompared)) {
+          navNotCompared.push({ ticker: s.ticker, source, currency, ...c });
         }
         add(
           layerD(primary, stored.get(source) ?? [], {

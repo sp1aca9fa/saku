@@ -25,7 +25,7 @@ Types are in `packages/plugin-sdk/src/types.ts`. A package exports `bars`, `seri
 | `bars` | `BarSource` | `fetchBars(ticker, from, to, ctx)` returns raw daily bars (`RawBar[]`); optional `fetchMeta(ticker, ctx)` returns `TickerMeta` |
 | `series` | `SeriesSource` | `fetchSeries(id, from, to, ctx)` returns dated points (`SeriesPoint[]`, or `SeriesFetch` `{ points, completeSpan }`): cash rates, index levels |
 | `fx` | `FxSource` | `supports(pair)`; `fetchRates(pair, from, to, ctx)` returns `FxRate[]` |
-| `issuers` | `IssuerSource` | `supports(ticker)`; `fetchRecords(ticker, from, to, ctx)` returns NAV, distributions and splits (checks only, never a value used) |
+| `issuers` | `IssuerSource` | `supports(ticker)`; `fetchRecords(ticker, from, to, ctx)` returns NAV, distributions and splits, each record with the currency (ISO 4217) of its NAV and distribution (required with a NAV) (checks only, never a value used) |
 | `calendars` | `CalendarSource` | a `calendars` array of exchange or series holiday tables |
 | `notifiers` | `Notifier` | `validTarget(target)`; `send(target, text, ctx)`. Errors must not contain the target or the key |
 

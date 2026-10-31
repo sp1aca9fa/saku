@@ -48,43 +48,47 @@ export function navPremiums(
 
 /**
  * The record is in a known currency other than the fund's (decisions log 2026-11-01, C15 (a)):
- * its NAV (when positive) and distribution are not compared, without an FX conversion. A record
- * without a currency is not this (unknown).
+ * its positive NAV, and its distribution when the primary has one too, are not compared (no FX
+ * conversion). A record without a currency is not this (unknown).
  */
 export function otherCurrency(r: IssuerRecord, currency: string): boolean {
   return r.currency !== undefined && r.currency !== currency;
 }
 
+/** A value layer D left out for being in another known currency than the fund's (C15 (a)). */
+export interface NotComparedSkip {
+  date: TradingDate;
+  currency: string;
+  /** A positive NAV on a date the primary has a bar, or a distribution both sides report. */
+  kind: 'nav' | 'distribution';
+}
+
+/** Per currency (sorted), how many NAVs and distributions were not compared. */
+export type NotComparedCounts = Record<string, { navs: number; distributions: number }>;
+
 /**
- * Per currency, the issuer records dated `from` to `to` that layer D does not compare because
- * they are in another known currency than the fund's (C15 (a): "not compared", told in the run's
- * log, `pnpm health` and `pnpm sources issuer-stats`). Counted when the source's NAV or
- * distributions are compared (declared, or no declaration); a source whose plug-in is not loaded
- * and whose declaration is unknown compares nothing, so none is counted. A record whose only
- * compared value is a NAV not positive is not counted (that NAV is a mismatch).
+ * Per currency, the NAVs and distributions dated `from` to `to` that layer D does not compare
+ * because their record is in another known currency than the fund's (decisions log 2026-11-01,
+ * C15 (a): "not compared", told in the run's log, `pnpm health` and `pnpm sources issuer-stats`).
+ * It runs layer D's own comparisons (`compareD`) on the same inputs, so it counts exactly what
+ * was skipped: never a NAV not positive (a mismatch), an event on one side only (compared without
+ * a rate), a split, or anything of a kind not compared (undeclared; a plug-in not loaded with no
+ * known declaration).
  */
-export function notComparedByCurrency(
+export function notComparedOf(
+  primary: RawBar[],
   records: IssuerRecord[],
-  o: {
-    currency: string;
-    publishes?: IssuerPublishes;
-    notLoaded?: boolean;
-    from?: TradingDate;
-    to: TradingDate;
-  },
-): Record<string, number> {
-  const d = o.publishes;
-  if (o.notLoaded && d === undefined) return {};
-  const navOn = d === undefined || d.nav === true;
-  const distributionsOn = d === undefined || d.distributions === true;
-  const counts = new Map<string, number>();
-  for (const r of records) {
-    if (r.date > o.to || (o.from !== undefined && r.date < o.from)) continue;
-    if (!otherCurrency(r, o.currency)) continue;
-    // A NAV not positive is compared (a mismatch); the date's distribution is not.
-    const navSkipped = navOn && r.nav !== undefined && r.nav > 0;
-    if (!navSkipped && !distributionsOn) continue;
-    counts.set(r.currency!, (counts.get(r.currency!) ?? 0) + 1);
+  o: Omit<LayerDOptions, 'sessions'> & { from?: TradingDate },
+): NotComparedCounts {
+  const skipped: NotComparedSkip[] = [];
+  compareD(primary, records, o, skipped);
+  const counts = new Map<string, { navs: number; distributions: number }>();
+  for (const x of skipped) {
+    if (o.from !== undefined && x.date < o.from) continue;
+    const c = counts.get(x.currency) ?? { navs: 0, distributions: 0 };
+    if (x.kind === 'nav') c.navs++;
+    else c.distributions++;
+    counts.set(x.currency, c);
   }
   return Object.fromEntries([...counts].sort(([a], [b]) => a.localeCompare(b)));
 }
@@ -138,11 +142,12 @@ export interface LayerDOptions {
  * - `nav_premium`: |close / NAV - 1| against the fund's tolerance (no tolerance: green, the
  *   deviation recorded). A NAV that is not positive (whatever its currency), or without a
  *   currency, is a mismatch and never a premium. A NAV in another known currency has no result
- *   (not compared, C15 (a); it still counts for `issuer_stale`).
+ *   (not compared, C15 (a); it still counts for `issuer_stale`; `notComparedOf` counts it).
  * - `distribution_match`, `split_match`: the issuer's events against the primary's on the same
  *   dates (an event on one side only is a mismatch; amounts within the layer B event tolerance,
- *   1%), within the dates both cover. A distribution on a date whose issuer record is in
- *   another known currency has no result (not compared, C15 (a)); a split is compared. A source that publishes NAV is compared on the dates it
+ *   1%), within the dates both cover. A distribution both sides report on a date whose issuer
+ *   record is in another known currency has no result (not compared, C15 (a)); one on one side
+ *   only is a mismatch as usual (no rate needed); a split is compared. A source that publishes NAV is compared on the dates it
  *   has a record; a primary event on a date it has none is yellow "not compared" (issuer data
  *   unavailable, 04 severity rules), never a mismatch. A source without NAV (events only)
  *   reports every event in its range, so a date without its record reads as no event. A source
@@ -168,12 +173,8 @@ export function layerD(
 ): CheckResult[] {
   const out: CheckResult[] = [];
   const base = { layer: 'D' as const, source: o.source };
-  const bars = primary.filter((b) => b.date <= o.to);
   const recs = records.filter((r) => r.date <= o.to).sort((a, b) => a.date.localeCompare(b.date));
-  const mine = new Map(bars.map((b) => [b.date, b]));
-  const tolerance = o.toleranceInvalid ? undefined : o.tolerance;
   const later = (a: TradingDate, b: TradingDate) => (a > b ? a : b);
-  const earlier = (a: TradingDate, b: TradingDate) => (a < b ? a : b);
   const d = o.publishes;
   if (o.notLoaded && d === undefined) {
     // Plug-in not loaded and no declaration known: what its records hold is unknown, and
@@ -192,133 +193,9 @@ export function layerD(
     }
     return out;
   }
-  // Compared kinds: the declared ones; without a declaration, all (NAV where records have it).
+  out.push(...compareD(primary, records, o, []));
   const navOn = d === undefined || d.nav === true;
-  const eventsOn: Record<string, boolean> = {
-    distribution_match: d === undefined || d.distributions === true,
-    split_match: d === undefined || d.splits === true,
-  };
   const navs = navOn ? recs.filter((r) => r.nav !== undefined) : [];
-  // A NAV source has a record per date it publishes (a date without one is unknown); an
-  // events-only source has records on event dates only (a date without one has no event).
-  const publishesNav = d === undefined ? navs.length > 0 : d.nav === true;
-
-  for (const r of navs) {
-    const b = mine.get(r.date);
-    if (!b || r.nav === undefined) continue;
-    // A NAV that is not positive is a mismatch whatever its currency (no exchange rate makes it
-    // a NAV). One in another known currency is not compared (decisions log 2026-11-01, C15 (a)):
-    // no result, never a green one; the run's log, `pnpm health` and `pnpm sources issuer-stats`
-    // count it (`notComparedByCurrency`). It is still a NAV the issuer published, so it counts
-    // for `issuer_stale` below. A NAV without a currency is unknown, not "another currency": a
-    // mismatch.
-    if (r.nav > 0 && otherCurrency(r, o.currency)) continue;
-    const bad = !(r.nav > 0)
-      ? 'issuer NAV not positive'
-      : r.currency === undefined
-        ? `NAV currency missing (the fund trades in ${o.currency})`
-        : undefined;
-    const dev = bad === undefined ? Math.abs(b.close / r.nav - 1) : undefined;
-    const message =
-      bad ?? (tolerance === undefined ? 'no tolerance set (observed only)' : undefined);
-    out.push({
-      ...base,
-      check: 'nav_premium',
-      date: r.date,
-      status:
-        dev === undefined
-          ? cap('red')
-          : tolerance === undefined
-            ? 'green'
-            : statusD(dev, tolerance),
-      ...(dev !== undefined && { deviation: dev }),
-      observed: b.close,
-      expected: r.nav,
-      ...(tolerance !== undefined && { tolerance }),
-      ...(message !== undefined && { message }),
-    });
-  }
-
-  // Events on any date either side reports, within the dates both cover (after the issuer's last
-  // record, its staleness speaks instead).
-  const first = bars[0] && recs[0] && later(recs[0].date, bars[0].date);
-  const last = bars[0] && recs[0] && earlier(recs.at(-1)!.date, bars.at(-1)!.date);
-  if (first && last && first <= last) {
-    const theirs = new Map(recs.map((r) => [r.date, r]));
-    const dates = [...new Set([...mine.keys(), ...theirs.keys()])]
-      .filter((d) => d >= first && d <= last)
-      .sort();
-    for (const date of dates) {
-      const p = mine.get(date);
-      const s = theirs.get(date);
-      for (const ev of [
-        { check: 'distribution_match', a: p?.divCash ?? 0, b: s?.distribution ?? 0, none: 0 },
-        { check: 'split_match', a: p?.splitFactor ?? 1, b: s?.split ?? 1, none: 1 },
-      ]) {
-        if (!eventsOn[ev.check]) continue;
-        if (ev.a === ev.none && ev.b === ev.none) continue;
-        // The issuer's record that day is in another known currency: its distribution amount is
-        // not compared (C15 (a), as its NAV; counted by `notComparedByCurrency`). A split ratio
-        // has no currency and is compared.
-        if (ev.check === 'distribution_match' && s && otherCurrency(s, o.currency)) continue;
-        if (!s && publishesNav) {
-          // A NAV source without a record that day: the event cannot be compared (unknown).
-          out.push({
-            ...base,
-            check: ev.check,
-            date,
-            status: cap('yellow'),
-            expected: ev.a,
-            message: 'not compared: the issuer has no record on this date',
-          });
-          continue;
-        }
-        // An event on one side only is a mismatch on the event's date.
-        const oneSide = ev.a === ev.none || ev.b === ev.none;
-        const dev = oneSide ? Infinity : Math.abs(ev.b / ev.a - 1);
-        out.push({
-          ...base,
-          check: ev.check,
-          date,
-          status: statusD(dev, TOLERANCE.event),
-          ...(Number.isFinite(dev) && { deviation: dev }),
-          observed: ev.b,
-          expected: ev.a,
-          tolerance: TOLERANCE.event,
-          ...(oneSide && {
-            message:
-              ev.a === ev.none ? 'event only in issuer data' : 'event missing in issuer data',
-          }),
-        });
-      }
-    }
-  }
-
-  // A declared events-only source covers no date after its last record (none at all: no date,
-  // when it supports the fund): a primary event there is unknown, never no result. A fetch that
-  // failed or a plug-in not loaded is graded by `issuer_stale` below instead.
-  if (d !== undefined && !publishesNav && !o.unavailable && !o.notLoaded) {
-    const lastRec = recs.at(-1)?.date;
-    if (lastRec !== undefined || o.supported) {
-      for (const b of bars) {
-        if (lastRec !== undefined && b.date <= lastRec) continue;
-        for (const ev of [
-          { check: 'distribution_match', a: b.divCash, none: 0 },
-          { check: 'split_match', a: b.splitFactor, none: 1 },
-        ]) {
-          if (!eventsOn[ev.check] || ev.a === ev.none) continue;
-          out.push({
-            ...base,
-            check: ev.check,
-            date: b.date,
-            status: cap('yellow'),
-            expected: ev.a,
-            message: 'not compared: no issuer record covers this date',
-          });
-        }
-      }
-    }
-  }
 
   // Freshness on the run's date.
   const lastNav = navs.at(-1)?.date;
@@ -385,6 +262,172 @@ export function layerD(
       status: cap('yellow'),
       message: 'the issuer_nav_tolerance setting is invalid: premiums observed only',
     });
+  }
+  return out;
+}
+
+/**
+ * Layer D's comparisons (`nav_premium`, `distribution_match`, `split_match`; everything but the
+ * freshness and the setting's result), as `layerD` documents them. What it leaves out for being
+ * in another known currency (C15 (a)) is pushed to `skipped`: the one place that decides it, so
+ * the "not compared" counts (`notComparedOf`) are exactly what layer D did not compare.
+ */
+function compareD(
+  primary: RawBar[],
+  records: IssuerRecord[],
+  o: Omit<LayerDOptions, 'sessions'>,
+  skipped: NotComparedSkip[],
+): CheckResult[] {
+  const out: CheckResult[] = [];
+  const base = { layer: 'D' as const, source: o.source };
+  const bars = primary.filter((b) => b.date <= o.to);
+  const recs = records.filter((r) => r.date <= o.to).sort((a, b) => a.date.localeCompare(b.date));
+  const mine = new Map(bars.map((b) => [b.date, b]));
+  const tolerance = o.toleranceInvalid ? undefined : o.tolerance;
+  const later = (a: TradingDate, b: TradingDate) => (a > b ? a : b);
+  const earlier = (a: TradingDate, b: TradingDate) => (a < b ? a : b);
+  const d = o.publishes;
+  // Plug-in not loaded and no declaration known: no comparisons (`layerD`).
+  if (o.notLoaded && d === undefined) return out;
+  // Compared kinds: the declared ones; without a declaration, all (NAV where records have it).
+  const navOn = d === undefined || d.nav === true;
+  const eventsOn: Record<string, boolean> = {
+    distribution_match: d === undefined || d.distributions === true,
+    split_match: d === undefined || d.splits === true,
+  };
+  const navs = navOn ? recs.filter((r) => r.nav !== undefined) : [];
+  // A NAV source has a record per date it publishes (a date without one is unknown); an
+  // events-only source has records on event dates only (a date without one has no event).
+  const publishesNav = d === undefined ? navs.length > 0 : d.nav === true;
+
+  for (const r of navs) {
+    const b = mine.get(r.date);
+    if (!b || r.nav === undefined) continue;
+    // A NAV that is not positive is a mismatch whatever its currency (no exchange rate makes it
+    // a NAV). One in another known currency is not compared (decisions log 2026-11-01, C15 (a)):
+    // no result, never a green one; recorded in `skipped` (the run's log, `pnpm health` and
+    // `pnpm sources issuer-stats` count it). It is still a NAV the issuer published, so it counts
+    // for `issuer_stale` (`layerD`). A NAV without a currency is unknown, not "another currency":
+    // a mismatch.
+    if (r.nav > 0 && otherCurrency(r, o.currency)) {
+      skipped.push({ date: r.date, currency: r.currency!, kind: 'nav' });
+      continue;
+    }
+    const bad = !(r.nav > 0)
+      ? 'issuer NAV not positive'
+      : r.currency === undefined
+        ? `NAV currency missing (the fund trades in ${o.currency})`
+        : undefined;
+    const dev = bad === undefined ? Math.abs(b.close / r.nav - 1) : undefined;
+    const message =
+      bad ?? (tolerance === undefined ? 'no tolerance set (observed only)' : undefined);
+    out.push({
+      ...base,
+      check: 'nav_premium',
+      date: r.date,
+      status:
+        dev === undefined
+          ? cap('red')
+          : tolerance === undefined
+            ? 'green'
+            : statusD(dev, tolerance),
+      ...(dev !== undefined && { deviation: dev }),
+      observed: b.close,
+      expected: r.nav,
+      ...(tolerance !== undefined && { tolerance }),
+      ...(message !== undefined && { message }),
+    });
+  }
+
+  // Events on any date either side reports, within the dates both cover (after the issuer's last
+  // record, its staleness speaks instead).
+  const first = bars[0] && recs[0] && later(recs[0].date, bars[0].date);
+  const last = bars[0] && recs[0] && earlier(recs.at(-1)!.date, bars.at(-1)!.date);
+  if (first && last && first <= last) {
+    const theirs = new Map(recs.map((r) => [r.date, r]));
+    const dates = [...new Set([...mine.keys(), ...theirs.keys()])]
+      .filter((d) => d >= first && d <= last)
+      .sort();
+    for (const date of dates) {
+      const p = mine.get(date);
+      const s = theirs.get(date);
+      for (const ev of [
+        { check: 'distribution_match', a: p?.divCash ?? 0, b: s?.distribution ?? 0, none: 0 },
+        { check: 'split_match', a: p?.splitFactor ?? 1, b: s?.split ?? 1, none: 1 },
+      ]) {
+        if (!eventsOn[ev.check]) continue;
+        if (ev.a === ev.none && ev.b === ev.none) continue;
+        // Both sides report a distribution and the issuer's record is in another known currency:
+        // the amounts are not compared (C15 (a), as its NAV; recorded in `skipped`). An event on
+        // one side only needs no rate and is compared below (it catches a missing dividend); a
+        // split ratio has no currency and is compared.
+        if (
+          ev.check === 'distribution_match' &&
+          s &&
+          ev.a !== ev.none &&
+          ev.b !== ev.none &&
+          otherCurrency(s, o.currency)
+        ) {
+          skipped.push({ date, currency: s.currency!, kind: 'distribution' });
+          continue;
+        }
+        if (!s && publishesNav) {
+          // A NAV source without a record that day: the event cannot be compared (unknown).
+          out.push({
+            ...base,
+            check: ev.check,
+            date,
+            status: cap('yellow'),
+            expected: ev.a,
+            message: 'not compared: the issuer has no record on this date',
+          });
+          continue;
+        }
+        // An event on one side only is a mismatch on the event's date.
+        const oneSide = ev.a === ev.none || ev.b === ev.none;
+        const dev = oneSide ? Infinity : Math.abs(ev.b / ev.a - 1);
+        out.push({
+          ...base,
+          check: ev.check,
+          date,
+          status: statusD(dev, TOLERANCE.event),
+          ...(Number.isFinite(dev) && { deviation: dev }),
+          observed: ev.b,
+          expected: ev.a,
+          tolerance: TOLERANCE.event,
+          ...(oneSide && {
+            message:
+              ev.a === ev.none ? 'event only in issuer data' : 'event missing in issuer data',
+          }),
+        });
+      }
+    }
+  }
+
+  // A declared events-only source covers no date after its last record (none at all: no date,
+  // when it supports the fund): a primary event there is unknown, never no result. A fetch that
+  // failed or a plug-in not loaded is graded by `issuer_stale` below instead.
+  if (d !== undefined && !publishesNav && !o.unavailable && !o.notLoaded) {
+    const lastRec = recs.at(-1)?.date;
+    if (lastRec !== undefined || o.supported) {
+      for (const b of bars) {
+        if (lastRec !== undefined && b.date <= lastRec) continue;
+        for (const ev of [
+          { check: 'distribution_match', a: b.divCash, none: 0 },
+          { check: 'split_match', a: b.splitFactor, none: 1 },
+        ]) {
+          if (!eventsOn[ev.check] || ev.a === ev.none) continue;
+          out.push({
+            ...base,
+            check: ev.check,
+            date: b.date,
+            status: cap('yellow'),
+            expected: ev.a,
+            message: 'not compared: no issuer record covers this date',
+          });
+        }
+      }
+    }
   }
   return out;
 }

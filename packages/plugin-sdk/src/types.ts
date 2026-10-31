@@ -193,6 +193,10 @@ export interface IssuerSource {
   info: PluginInfo;
   /** Whether the source publishes records for this fund. */
   supports(ticker: string): boolean;
+  /**
+   * One record per date as published that day; `currency` is the currency of the record's NAV
+   * and distribution (required with a NAV; see `IssuerRecord`).
+   */
   fetchRecords(
     ticker: string,
     from: TradingDate,

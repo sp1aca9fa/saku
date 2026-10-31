@@ -109,12 +109,25 @@
       "otherChanged": "Other days the corrected price would have changed:",
       "otherDay": "{date} {ticker}: {recorded} → {corrected}",
       "more": "Other corrections of this strategy that would not have changed the signal: {count} (each is annotated in the record).",
+      "afterClose": "The primary's price arrived after an admin had closed this stand-in as never to be replaced; it is compared all the same.",
       "pastDay": "This is about a past day, not a new signal: the latest signal gives the current allocation.",
       "healthDate": "(Latest recorded day, {date}.)"
     },
     "standInUnreadable": {
       "title": "Saku: a stand-in correction annotation cannot be read",
       "body": "{version}, {date}: annotation {id} does not read back, so its correction is not told. The record is unchanged; find the cause."
+    },
+    "standInClosed": {
+      "title": "{strategy}: {ticker}'s price for {standInDate} stays a secondary price",
+      "body": "The primary source will not deliver {ticker}'s price for {standInDate}, so an admin closed its stand-in: the secondary source's price stays, and no primary price will check it.",
+      "reason": "Reason given: {reason}",
+      "days": "Recorded days that used it: {count} ({first} to {last}). Their signals stay as recorded; the record is annotated, not changed.",
+      "from": "From now on, signals read this price as it is: it no longer makes a day yellow or red as an unconfirmed price.",
+      "pastDay": "This is not a new signal: the latest signal gives the current allocation."
+    },
+    "standInClosedUnreadable": {
+      "title": "Saku: a stand-in close annotation cannot be read",
+      "body": "{version}, {date}: annotation {id} does not read back, so its close is not told. The record is unchanged; find the cause."
     },
     "revisions": {
       "title": "Saku: the weekly refetch changed {count} stored values",

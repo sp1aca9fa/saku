@@ -737,7 +737,7 @@ describe('verify', () => {
     });
     // Told for the run's window (the run's log says it).
     expect(summary.navNotCompared).toEqual([
-      { ticker: 'AAA', source: 'iss', currency: 'XXX', count: 1 },
+      { ticker: 'AAA', source: 'iss', currency: 'XXX', navs: 1, distributions: 0 },
     ]);
     // Read from the stored records for a window (`pnpm health`): none before the 6th.
     expect(await issuerNotCompared(db, { from: '2026-01-06', to: '2026-01-08' })).toEqual(
@@ -755,9 +755,9 @@ describe('verify', () => {
     expect(premium.map((r) => r.date)).toEqual(['2026-01-07', '2026-01-08']);
     expect(premium[0]!.observed! / premium[0]!.expected! - 1).toBeCloseTo(0.1, 12);
     const row = (await issuerStats(db, { from: '2026-01-01', to: '2026-01-08' })).rows[0]!;
-    expect(row.otherCurrency).toEqual({ XXX: 1 });
+    expect(row.otherCurrency).toEqual({ XXX: { navs: 1, distributions: 0 } });
     // The 5th and 7th compared, the 8th graded red (a secondary's close is off) left out; the XXX
-    // NAV is neither a premium nor a day left out.
+    // NAV (a day kept) is neither a premium nor a day left out.
     expect(row).toMatchObject({ days: 2, leftOut: { standIn: 0, red: 1 } });
     expect(row.max).toBeCloseTo(0.1, 12);
   });

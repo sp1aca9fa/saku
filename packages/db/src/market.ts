@@ -1017,7 +1017,8 @@ export async function standInOn(db: Db, symbolId: number, date: TradingDate) {
  * stand-in correction step checks for corrections still to annotate (requirements 04, the
  * stand-in rule). `runId` and `createdAt` are the run and time it was first recorded (a later run
  * may replace its close while unresolved, not these), `resolvedRunId` and `resolvedAt` the run and
- * time the primary replaced it (ISO 8601 instants, written by the process clock).
+ * time the primary replaced it (ISO 8601 instants, written by the process clock). `closedAt` is
+ * set when an admin had closed it before the primary arrived after all (rule 5).
  */
 export async function resolvedStandIns(db: Db) {
   return db
@@ -1029,6 +1030,7 @@ export async function resolvedStandIns(db: Db) {
       createdAt: standIns.createdAt,
       resolvedRunId: standIns.resolvedRunId,
       resolvedAt: standIns.resolvedAt,
+      closedAt: standIns.closedAt,
     })
     .from(standIns)
     .innerJoin(symbols, eq(symbols.id, standIns.symbolId))
@@ -1037,15 +1039,17 @@ export async function resolvedStandIns(db: Db) {
 }
 
 /**
- * Every stand-in the primary has not replaced yet (its ticker and date), oldest date first: a
- * correction that would decide on such a price waits (the stand-in correction step).
+ * Every stand-in still open (its ticker and date), oldest date first: the primary has not
+ * replaced it and no admin has closed it (requirements 04 stand-in rule 5: nothing waits on a
+ * closed one). A correction that would decide on such a price waits (the stand-in correction
+ * step).
  */
 export async function unresolvedStandIns(db: Db) {
   return db
     .select({ ticker: symbols.ticker, date: standIns.date })
     .from(standIns)
     .innerJoin(symbols, eq(symbols.id, standIns.symbolId))
-    .where(isNull(standIns.resolvedAt))
+    .where(and(isNull(standIns.resolvedAt), isNull(standIns.closedAt)))
     .orderBy(asc(standIns.date), asc(symbols.ticker));
 }
 

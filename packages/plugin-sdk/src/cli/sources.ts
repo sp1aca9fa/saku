@@ -16,6 +16,16 @@
 //                                                         adjusted-close level), to confirm a
 //                                                         declared adjCloseRounding; default the
 //                                                         latest bootstrap or weekly run with any
+//   pnpm sources stand-in list [--open]                   stored stand-ins (or the open ones:
+//                                                         neither resolved nor closed), oldest
+//                                                         first: ticker, date, source, close,
+//                                                         band, age in sessions, state, and
+//                                                         whether a canonical bar uses it
+//   pnpm sources stand-in close <TICKER> <YYYY-MM-DD> --reason "<text>" --user <admin>
+//                                                         an admin closes one the primary will
+//                                                         never replace (requirements 04
+//                                                         stand-in rule 5): nothing waits on it
+//                                                         any more; its price stays
 //   pnpm csv import <file> --ticker <TICKER> --prices raw|split-adjusted [--source csv-<name>]
 //                                                         validated daily bars, stored as their
 //                                                         own source (default `csv`); give it a
@@ -24,11 +34,13 @@ import { SOURCE_ROLES, type SourceRole, tradingDateOf } from '@saku/core';
 import { Sessions, parseBarsCsv } from '@saku/data';
 import {
   activeSymbols,
+  closeStandIn,
   createDb,
   removeSourceRole,
   schema,
   setSourceRole,
   sourceRolesOf,
+  standInList,
   storeRawBars,
 } from '@saku/db';
 import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
@@ -38,6 +50,7 @@ import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { describeCounts, issuerStats } from '../jobs/issuer';
 import { lock } from '../jobs/lock';
+import { ageInSessions, standInListText } from '../jobs/stand-ins';
 import {
   defaultReadjustmentRun,
   parseReadjustmentArgs,
@@ -61,6 +74,12 @@ const fail = (message: string): never => {
   process.exit(1);
 };
 const KINDS = Object.values(DATA_KIND) as string[];
+/** The xnys sessions (stand-in ages, CSV dates). */
+const xnys = () =>
+  new Sessions(
+    plugins.calendars.flatMap((c) => c.calendars).find((c) => c.id === 'xnys') ??
+      fail('No xnys calendar plug-in is loaded.'),
+  );
 
 /** Role changes and imports are refused while a job runs (it reads roles throughout). */
 function withJobsLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -188,6 +207,39 @@ if (tool === 'sources' && command === 'list') {
       plugins.bars.find((b) => b.info.key === key)?.info.adjCloseRounding;
     console.log(readjustmentText(run, stats, declared));
   }
+} else if (tool === 'sources' && command === 'stand-in' && rest[0] === 'list') {
+  const open = rest.includes('--open');
+  const today = tradingDateOf(new Date());
+  for (const line of standInListText(await standInList(db, { open }), {
+    sessions: xnys(),
+    today,
+    open,
+  })) {
+    console.log(line);
+  }
+} else if (tool === 'sources' && command === 'stand-in' && rest[0] === 'close') {
+  // Requirements 04 stand-in rule 5: an admin closes it with a written reason, never automatic.
+  // The admin is checked by closeStandIn itself, before anything is read or written.
+  const [, ticker, date] = rest;
+  if (!ticker || ticker.startsWith('--') || !date || date.startsWith('--')) {
+    fail(
+      'Usage: pnpm sources stand-in close <TICKER> <YYYY-MM-DD> --reason "<text>" --user <admin>',
+    );
+  }
+  const username = flag('user');
+  if (!username || username.startsWith('--')) fail('Name the admin: --user <username>.');
+  const reasonArg = flag('reason');
+  const reason = reasonArg && !reasonArg.startsWith('--') ? reasonArg : '';
+  const r = await withJobsLock(() =>
+    closeStandIn(db, { ticker: ticker!, date: date!, username: username!, reason }),
+  );
+  if (!r.ok) fail(r.error);
+  const age = ageInSessions(xnys(), date!, tradingDateOf(new Date()));
+  console.log(
+    `Closed the ${ticker} stand-in of ${date}${age === undefined ? '' : ` (${age} sessions ago)`}: ` +
+      'its price stays and nothing waits on it any more. The next run annotates the recorded ' +
+      'days that used it and tells their owners once.',
+  );
 } else if (tool === 'csv' && command === 'import') {
   const file = rest[0] && !rest[0].startsWith('--') ? rest[0] : fail('Name the CSV file.');
   const ticker = flag('ticker') ?? fail('Name the ticker: --ticker <TICKER>.');
@@ -202,11 +254,8 @@ if (tool === 'sources' && command === 'list') {
   const symbol =
     (await activeSymbols(db)).find((s) => s.ticker === ticker) ??
     fail(`${ticker} is not in the universe (pnpm symbols import).`);
-  const calendar =
-    plugins.calendars.flatMap((c) => c.calendars).find((c) => c.id === 'xnys') ??
-    fail('No xnys calendar plug-in is loaded.');
   const path = resolve(process.env.INIT_CWD ?? findRepoRoot(), file!);
-  const parsed = parseBarsCsv(readFileSync(path, 'utf8'), new Sessions(calendar), {
+  const parsed = parseBarsCsv(readFileSync(path, 'utf8'), xnys(), {
     splitAdjusted: prices === 'split-adjusted',
   });
   if (parsed.errors.length) {
@@ -257,6 +306,8 @@ if (tool === 'sources' && command === 'list') {
   fail(
     'Usage: pnpm sources list | set <kind> <key> <role> | remove <kind> <key> | ' +
       'issuer-stats [--years N] | readjustments [--source <key>] [--run <id>] | ' +
+      'stand-in list [--open] | ' +
+      'stand-in close <TICKER> <YYYY-MM-DD> --reason "<text>" --user <admin> | ' +
       'pnpm csv import <file> --ticker <TICKER> --prices raw|split-adjusted [--source csv-<name>]',
   );
 }

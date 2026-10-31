@@ -395,7 +395,10 @@ export const issuerRecords = sqliteTable(
     source: text('source').notNull(),
     date: text('date').notNull(),
     nav: real('nav'),
-    /** The NAV's currency (ISO 4217), as the issuer states it; added in 0007. */
+    /**
+     * The currency (ISO 4217) of the record's NAV and distribution, as the issuer states it
+     * (`IssuerRecord.currency`); added in 0007.
+     */
     currency: text('currency'),
     distribution: real('distribution'),
     split: real('split'),
@@ -478,6 +481,16 @@ export const standIns = sqliteTable(
     deviation: real('deviation'),
     resolvedAt: text('resolved_at'),
     resolvedRunId: text('resolved_run_id').references(() => jobRuns.id),
+    /**
+     * Closed by an admin (requirements 04 stand-in rule 5, `pnpm sources stand-in close`): the
+     * primary will not replace it, so nothing waits on it any more. When (ISO 8601 instant), by
+     * whom (the admin's user id) and why. Set once with all three, never changed, and the row's
+     * stand-in values are frozen from then on (triggers, migration 0011); a primary that arrives
+     * later still resolves it (the `resolved_*` columns).
+     */
+    closedAt: text('closed_at'),
+    closedBy: text('closed_by').references(() => users.id),
+    closeReason: text('close_reason'),
   },
   (t) => [primaryKey({ columns: [t.symbolId, t.date] })],
 );
