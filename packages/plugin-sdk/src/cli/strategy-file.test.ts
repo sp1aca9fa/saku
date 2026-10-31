@@ -273,7 +273,7 @@ describe('strategy files', () => {
   it('a comment right after unquoted text is refused; after numbers, quotes, brackets it is fine', () => {
     expect(yamlError('name: Setup #1\n')).toBe(
       'A comment follows the unquoted text "Setup" at line 1, column 7: if the # belongs to it, ' +
-        'quote it ("Setup #..."); else put the comment on its own line',
+        'quote it ("Setup #..."); else put the comment on its own line, not indented under the value',
     );
     expect(yamlError('items:\n  - SPY # the fund\n')).toMatch(/unquoted text "SPY" at line 2/);
     expect(value('name: "Setup #1"\n')).toEqual({ name: 'Setup #1' });
@@ -311,5 +311,34 @@ describe('strategy files', () => {
       'Allocation "In" when {"all":["up"]}: AAA?L=3 100%',
       'Allocation "Out" otherwise: CASH_USD 100%',
     ]);
+  });
+
+  it("a comment line indented under unquoted text is refused; one at the key's level is not", () => {
+    // YAML ends the text at the comment: this would silently be "Setup".
+    expect(yamlError('name: Setup\n  #1 version\naccount: taxable\n')).toMatch(
+      /^A comment follows the unquoted text "Setup" at line 1, column 7: /,
+    );
+    // Blank lines in between change nothing; a sequence item counts from its dash.
+    expect(yamlError('name: Setup\n\n   # one\n')).toMatch(/unquoted text "Setup"/);
+    expect(yamlError('items:\n  - SPY\n    # the fund\n')).toMatch(/unquoted text "SPY" at line 2/);
+    // Controls: a comment line at the key's (or dash's) indentation or less is its own line.
+    expect(value('name: Setup\n# a note\naccount: taxable\n')).toEqual({
+      name: 'Setup',
+      account: 'taxable',
+    });
+    expect(value('a:\n  name: Setup\n  # a note\nb: 1\n')).toEqual({ a: { name: 'Setup' }, b: 1 });
+    expect(value('a:\n  name: Setup\n# a note\n')).toEqual({ a: { name: 'Setup' } });
+    expect(value('items:\n  - SPY\n  # the next\n  - QQQ\n')).toEqual({ items: ['SPY', 'QQQ'] });
+    // Quoted text and numbers may have a comment under them at any indentation.
+    expect(value('name: "Setup"\n  # a note\nn: 3\n  # a note\n')).toEqual({ name: 'Setup', n: 3 });
+    // A plain value on several lines stays one text (YAML folds it), no comment involved.
+    expect(value('name: Setup\n  one\n')).toEqual({ name: 'Setup one' });
+  });
+
+  it('an issue about the whole file has no leading path or colon', () => {
+    expect(error('x.json', JSON_TEXT.replace('{"name"', '{"extra":1,"name"'))).toMatch(
+      /^Unrecognized key: "extra" at line 1, column 2$/,
+    );
+    expect(error('x.yaml', '[1, 2]\n')).toMatch(/^Invalid input: expected object, received array/);
   });
 });

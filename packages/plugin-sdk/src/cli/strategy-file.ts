@@ -14,8 +14,9 @@
 // - Anchors and aliases (`&a`, `*a`) and merge keys (`<<`, a YAML 1.1 feature that 1.2 reads as
 //   an ordinary key) are refused: write the values out.
 // - A comment right after an unquoted text value on its line (`name: Setup #1` reads as
-//   "Setup"): quote the value, or put the comment on its own line. After numbers, booleans,
-//   quoted values and brackets a trailing comment is fine.
+//   "Setup"), or on the next non-blank line indented further than the value's key or dash:
+//   quote the value, or put the comment on its own line at the key's indentation. After numbers,
+//   booleans, quoted values and brackets a comment is fine.
 // - One document per file; a `%YAML` directive other than 1.2 is refused; any parser warning
 //   (an unknown directive or tag) is refused like an error.
 // Every refusal names its line and column; so do the schema's, where the path is in the file.
@@ -28,7 +29,9 @@ import {
   type Node,
   isMap,
   isNode,
+  isPair,
   isScalar,
+  isSeq,
   parseDocument,
   visit,
 } from 'yaml';
@@ -53,6 +56,31 @@ const position = (lineCounter: LineCounter, node: Node | null | undefined) => {
 
 /** The first line of a parser message (it ends with "at line N, column M:" and an excerpt). */
 const firstLine = (message: string) => message.split('\n')[0]!.replace(/:$/, '');
+
+/**
+ * The 0-based column of what owns a scalar in block style: its key (a block mapping's value) or
+ * its dash (a block sequence's item). Undefined elsewhere (a key itself, flow collections, the
+ * document's only value).
+ */
+function blockColumn(
+  node: Node,
+  parent: unknown,
+  grandparent: unknown,
+  start: number,
+  lineCounter: LineCounter,
+  text: string,
+): number | undefined {
+  if (isPair(parent) && parent.value === node && isNode(parent.key)) {
+    if (!isMap(grandparent) || grandparent.flow) return undefined;
+    const keyStart = parent.key.range?.[0];
+    return keyStart === undefined ? undefined : lineCounter.linePos(keyStart).col - 1;
+  }
+  if (isSeq(parent) && !parent.flow) {
+    const dash = text.lastIndexOf('-', start);
+    return dash < 0 ? undefined : lineCounter.linePos(dash).col - 1;
+  }
+  return undefined;
+}
 
 function readYaml(text: string): Located | { error: string } {
   const lineCounter = new LineCounter();
@@ -86,19 +114,38 @@ function readYaml(text: string): Located | { error: string } {
     Alias(_, node) {
       problems.push(`Aliases (*${node.source}) are not allowed; write the value out${at(node)}`);
     },
-    Scalar(_, node) {
+    Scalar(_, node, path) {
       if (node.anchor) problems.push(`Anchors (&${node.anchor}) are not allowed${at(node)}`);
       if (node.tag) problems.push(`Tags (${node.tag}) are not allowed${at(node)}`);
-      // An unquoted text value followed on its line by a comment: the `#` may have been meant
-      // as part of the text (`name: Setup #1`). Numbers, booleans and null are not text.
+      // An unquoted text value followed by a comment, on its line (`name: Setup #1`) or on the
+      // next non-blank line indented further than its key or dash (`name: Setup` then
+      // `  #1 version`, which YAML reads as the end of the text): the `#` may have been meant
+      // as part of the text, so the value would silently be "Setup". Numbers, booleans and null
+      // are not text. A comment line at the key's indentation or less is clearly its own.
+      const start = node.range?.[0];
       const end = node.range?.[1];
-      if (node.type === 'PLAIN' && typeof node.value === 'string' && end !== undefined) {
-        if (/^[ \t]+#/.test(text.slice(end).split('\n')[0]!)) {
-          problems.push(
-            `A comment follows the unquoted text "${node.value}"${at(node)}: if the # belongs ` +
-              `to it, quote it ("${node.value} #..."); else put the comment on its own line`,
-          );
-        }
+      if (
+        node.type !== 'PLAIN' ||
+        typeof node.value !== 'string' ||
+        start === undefined ||
+        end === undefined
+      ) {
+        return;
+      }
+      const [sameLine, ...below] = text.slice(end).split('\n');
+      let commented = /^[ \t]+#/.test(sameLine!);
+      const owner = blockColumn(node, path.at(-1), path.at(-2), start, lineCounter, text);
+      const next = below.find((line) => line.trim() !== '');
+      if (!commented && owner !== undefined && next !== undefined) {
+        const comment = /^([ \t]*)#/.exec(next);
+        commented = comment !== null && comment[1]!.length > owner;
+      }
+      if (commented) {
+        problems.push(
+          `A comment follows the unquoted text "${node.value}"${at(node)}: if the # belongs ` +
+            `to it, quote it ("${node.value} #..."); else put the comment on its own line, ` +
+            `not indented under the value`,
+        );
       }
     },
     Collection(_, node) {
@@ -217,7 +264,12 @@ export function parseStrategyFile(fileName: string, text: string): StrategyFileR
     return {
       error: parsed.error.issues
         .flatMap(readable)
-        .map((i) => `${i.path.map(String).join('.')}: ${i.message}${issueAt(file, i)}`)
+        // A top-level issue has no path: its message alone (as forward.ts parseVersion prints).
+        .map(
+          (i) =>
+            `${i.path.length ? `${i.path.map(String).join('.')}: ` : ''}${i.message}` +
+            issueAt(file, i),
+        )
         .join('\n'),
     };
   }
