@@ -242,6 +242,12 @@ export const bars = sqliteTable(
     source: text('source').notNull(),
     standIn: integer('stand_in', { mode: 'boolean' }).notNull().default(false),
     status: text('status', { enum: HEALTH_STATUSES }),
+    /**
+     * A stand-in bar's band and basis as this build computed them (0012): the decision-margin
+     * test reads them for a closed stand-in whose price changed (its `stand_ins` row is frozen).
+     */
+    standInBand: real('stand_in_band'),
+    standInBasis: text('stand_in_basis'),
   },
   (t) => [
     primaryKey({ columns: [t.symbolId, t.date] }),
@@ -493,6 +499,34 @@ export const standIns = sqliteTable(
     closeReason: text('close_reason'),
   },
   (t) => [primaryKey({ columns: [t.symbolId, t.date] })],
+);
+
+/**
+ * Every admin close of a stand-in (requirements 04 stand-in rule 5; 0012), append-only
+ * (triggers): the price closed (source, close, band and basis of the canonical stand-in bar then),
+ * by whom and why. A stand-in is settled while its latest close (the latest row here, else the
+ * `stand_ins` close columns of a close made before 0012) matches its canonical bar; a later
+ * price on that day reopens it, and an admin may close it again (a new row).
+ */
+export const standInCloses = sqliteTable(
+  'stand_in_closes',
+  {
+    id: serial(),
+    symbolId: integer('symbol_id')
+      .notNull()
+      .references(() => symbols.id),
+    date: text('date').notNull(),
+    source: text('source').notNull(),
+    close: real('close').notNull(),
+    band: real('band').notNull(),
+    basis: text('basis').notNull(),
+    closedBy: text('closed_by')
+      .notNull()
+      .references(() => users.id),
+    reason: text('reason').notNull(),
+    closedAt: text('closed_at').notNull(),
+  },
+  (t) => [index('stand_in_closes_key_idx').on(t.symbolId, t.date)],
 );
 
 export const dataHealth = sqliteTable(

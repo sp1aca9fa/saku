@@ -11,10 +11,13 @@
 //   holdings of its declared safe state, which it holds on red days) must be an active symbol.
 // - Each such symbol must have passed the data checks over its full history (03 intro: "usable
 //   only after passing the data quality checks (04) over its full history"). Read as:
-//   - no stored canonical bar of the symbol on a day the market was closed (or the calendar does
-//     not cover), graded red, or not graded at all (`bars.status`, the per-date grade the forward
-//     record reads, rewritten by every run that grades the date, daily runs included; NULL is
-//     unknown, never green);
+//   - no stored canonical bar of the symbol on a day the calendar does not cover, graded red, or
+//     not graded at all (`bars.status`, the per-date grade the forward record reads, rewritten by
+//     every run that grades the date, daily runs included; NULL is unknown, never green);
+//   - bars on days the market was closed are not refused (requirements 04 "Closed-day bars":
+//     verify builds no canonical bar for them and `canonicalBars` leaves any stored one out, so
+//     no signal reads them): listed as information (`notes`), the primary's raw bars and any
+//     stored canonical row on such days;
 //   - the latest full-history run (bootstrap, weekly or checks, by start, whatever its status)
 //     succeeded (one that failed may have stopped on a calculation or data fault; one still
 //     marked running was interrupted, since registration holds the jobs lock; an older pass is
@@ -27,6 +30,10 @@
 //     - graded through `through` (the latest session whose data is final at registration, the
 //       daily target: the conservative bound) and through the symbol's last stored canonical bar,
 //     - and graded no day of the symbol red. Yellow is allowed (computed with a warning, 04).
+//       A red day the calendar says was closed does not refuse when every red finding on it is a
+//       closed-day bar and nothing else (`closedDayOnly`): layer A `bar_valid` with the single
+//       problem "not a trading day", and no other red reason. Anything else red on it refuses
+//       (a closed-day bar with a dividend or split among them: its event is in no bar read).
 // Unknown stays unknown: no pass, a stale pass or a pass that cannot be read refuses.
 //
 // Not checked here: the cash rate. Series (the cash rate, index series, FX) are graded for
@@ -40,9 +47,10 @@ import {
   isTradingDate,
   parseTicker,
 } from '@saku/core';
-import type { Sessions } from '@saku/data';
+import { NOT_A_SESSION, type Sessions } from '@saku/data';
 import { type Db, activeSymbols, getSetting, schema } from '@saku/db';
-import { and, desc, eq, inArray, isNull, max, min } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { roles } from './verify';
 
 /** Full-history passes (they store `health_coverage`). */
 const FULL = ['bootstrap', 'weekly', 'checks'] as const;
@@ -61,7 +69,22 @@ export function registrationTickers(strategy: Strategy): string[] {
   return [...new Set([...dependencies(strategy), ...safe])].sort();
 }
 
+/** What registration says: every reason to refuse, and information that does not refuse. */
+export interface RegistrationReport {
+  problems: string[];
+  notes: string[];
+}
+
+/** The reasons to refuse only (`registrationReport`). */
 export async function registrationProblems(
+  db: Db,
+  strategy: Strategy,
+  o: { through: TradingDate; sessions: Sessions },
+): Promise<string[]> {
+  return (await registrationReport(db, strategy, o)).problems;
+}
+
+export async function registrationReport(
   db: Db,
   strategy: Strategy,
   o: {
@@ -70,8 +93,9 @@ export async function registrationProblems(
     /** The market calendar (bars on days that are not sessions are named apart). */
     sessions: Sessions;
   },
-): Promise<string[]> {
+): Promise<RegistrationReport> {
   const problems: string[] = [];
+  const notes: string[] = [];
   if (!(await getSetting(db, 'forward_records_from'))) {
     problems.push(
       'Registration starts a forward record, which opens after the A1 gate: ' +
@@ -107,12 +131,13 @@ export async function registrationProblems(
         'fix what it reported, then run pnpm verify (full) again.',
     );
   }
+  const primary = (await roles(db, 'bars')).primary;
   for (const ticker of used) {
-    problems.push(
-      ...(await symbolProblems(db, ticker, known.get(ticker)!, o.through, o.sessions, pass)),
-    );
+    const r = await symbolProblems(db, ticker, known.get(ticker)!, o, primary, pass);
+    problems.push(...r.problems);
+    notes.push(...r.notes);
   }
-  return problems;
+  return { problems, notes };
 }
 
 interface Pass {
@@ -134,30 +159,27 @@ async function symbolProblems(
   db: Db,
   ticker: string,
   symbolId: number,
-  through: TradingDate,
-  sessions: Sessions,
+  o: { through: TradingDate; sessions: Sessions },
+  primarySource: string | undefined,
   pass: Pass | undefined,
-): Promise<string[]> {
+): Promise<RegistrationReport> {
+  const { through, sessions } = o;
   const b = schema.bars;
-  const [bars] = await db
-    .select({ first: min(b.date), last: max(b.date) })
-    .from(b)
-    .where(eq(b.symbolId, symbolId));
-  if (!bars?.first || !bars.last) {
-    return [`${ticker}: no stored bars; run pnpm bootstrap, then pnpm verify.`];
-  }
   const problems: string[] = [];
+  const notes: string[] = [];
+  const done = () => ({ problems, notes });
 
   // Each stored bar's grade as the latest run that graded it set it (what the forward record
   // reads; a daily run after the pass rewrites it), whatever the pass found:
-  // - a bar on a day the market was closed is wrong data no check run can fix (verify grades it
-  //   red, layer A `bar_valid`): named apart, with what removes it;
+  // - a bar on a day the market was closed is not read (`canonicalBars` leaves it out): noted;
   // - a bar on a day the calendar does not cover cannot be judged: unknown;
   // - otherwise no red bar, and no bar no run has graded (NULL is unknown, never green).
-  const closed: string[] = [];
+  // The symbol's first and last stored bars are those the signals read (closed days left out).
+  const closed = new Set<TradingDate>();
   const outside: string[] = [];
   const redBars: string[] = [];
   const ungraded: string[] = [];
+  const read: TradingDate[] = [];
   for (const x of await db
     .select({ date: b.date, status: b.status })
     .from(b)
@@ -168,20 +190,43 @@ async function symbolProblems(
       session = sessions.isSession(x.date);
     } catch {
       outside.push(x.date);
+      read.push(x.date);
       continue;
     }
-    if (!session) closed.push(x.date);
-    else if (x.status === 'red') redBars.push(x.date);
+    if (!session) {
+      closed.add(x.date);
+      continue;
+    }
+    read.push(x.date);
+    if (x.status === 'red') redBars.push(x.date);
     else if (x.status === null) ungraded.push(x.date);
   }
-  const barsAre = (n: number) => `${n} stored ${n === 1 ? 'bar is' : 'bars are'}`;
-  if (closed.length > 0) {
-    problems.push(
-      `${ticker}: ${closed.length} stored ${closed.length === 1 ? 'bar' : 'bars'} on days the market was ` +
-        `closed: ${listed(closed)}. No command removes such a bar yet; tell the admin (an open ` +
-        'decision: keep closed-day bars out of the canonical series, or an admin withdrawal).',
+  // The primary's raw bars on closed days: verify builds no canonical bar for them.
+  if (primarySource) {
+    for (const x of await db
+      .select({ date: schema.barsRaw.date })
+      .from(schema.barsRaw)
+      .where(
+        and(eq(schema.barsRaw.symbolId, symbolId), eq(schema.barsRaw.source, primarySource)),
+      )) {
+      if (sessions.closedOn(x.date)) closed.add(x.date);
+    }
+  }
+  if (closed.size > 0) {
+    const days = [...closed].sort();
+    notes.push(
+      `${ticker}: ${days.length} ${days.length === 1 ? 'bar' : 'bars'} on days the market was ` +
+        `closed, excluded (no signal reads them): ${listed(days)}.`,
     );
   }
+  const first = read[0];
+  const last = read.at(-1);
+  if (!first || !last) {
+    problems.push(`${ticker}: no stored bars; run pnpm bootstrap, then pnpm verify.`);
+    return done();
+  }
+  const bars = { first, last };
+  const barsAre = (n: number) => `${n} stored ${n === 1 ? 'bar is' : 'bars are'}`;
   if (outside.length > 0) {
     problems.push(
       `${ticker}: ${barsAre(outside.length)} on days the market calendar does not cover: ` +
@@ -204,9 +249,9 @@ async function symbolProblems(
     problems.push(
       `${ticker}: its full history has not been checked; run pnpm verify (full) first.`,
     );
-    return problems;
+    return done();
   }
-  if (pass.status !== 'success') return problems; // Said once for every ticker.
+  if (pass.status !== 'success') return done(); // Said once for every ticker.
 
   const c = schema.healthCoverage;
   const [coverage] = await db
@@ -215,7 +260,7 @@ async function symbolProblems(
     .where(and(eq(c.runId, pass.id), eq(c.symbolId, symbolId)));
   if (!coverage) {
     problems.push(`${ticker}: ${pass.which} did not grade it; run pnpm verify (full) again.`);
-    return problems;
+    return done();
   }
   const [overall] = await db
     .select({ id: schema.dataHealth.id })
@@ -231,7 +276,7 @@ async function symbolProblems(
     problems.push(
       `${ticker}: ${pass.which} cannot be read (its grades are incomplete); run pnpm verify (full) again.`,
     );
-    return problems;
+    return done();
   }
 
   if (coverage.from > bars.first) {
@@ -255,7 +300,7 @@ async function symbolProblems(
         'run pnpm verify (full) again.',
     );
   }
-  const red = await db
+  const redRows = await db
     .select({ date: schema.dataHealth.date, reasons: schema.dataHealth.reasons })
     .from(schema.dataHealth)
     .where(
@@ -266,6 +311,11 @@ async function symbolProblems(
       ),
     )
     .orderBy(schema.dataHealth.date);
+  const red: typeof redRows = [];
+  for (const d of redRows) {
+    if (sessions.closedOn(d.date) && (await closedDayOnly(db, pass.id, symbolId, d))) continue;
+    red.push(d);
+  }
   if (red.length > 0) {
     problems.push(
       `${ticker}: ${red.length} red ${red.length === 1 ? 'day' : 'days'} in its history ` +
@@ -273,5 +323,38 @@ async function symbolProblems(
         'Its data has not passed the checks (pnpm health --date <date> explains a day).',
     );
   }
-  return problems;
+  return done();
+}
+
+/** A health reason code of a check result: `<layer>.<check>` with `@<source>` when it has one. */
+const CHECK_REASON = /^[A-F]\.[a-z_]+(@\S+)?$/;
+/** The reasons a symbol's grade carries that are never red on their own (`symbolHealth`). */
+const YELLOW_ONLY = /^(single_source|stand_in@\S+|stand_in_closed_changed@\S+)$/;
+
+/**
+ * Whether a red day of a symbol, on a day the market was closed, is red only because a source
+ * dated a bar on it (requirements 04 "Closed-day bars": the bar is in no series the signals
+ * read, so it does not refuse). True only when every red result the pass stored for the symbol
+ * on that date is layer A `bar_valid` with the single problem `NOT_A_SESSION` (a closed-day bar
+ * with a dividend or split, or any other problem with it, is not), and every reason of the day is
+ * either a check result's or one that is never red on its own. Anything not known: false.
+ */
+async function closedDayOnly(
+  db: Db,
+  runId: string,
+  symbolId: number,
+  day: { date: TradingDate; reasons: string[] },
+): Promise<boolean> {
+  if (!day.reasons.every((r) => CHECK_REASON.test(r) || YELLOW_ONLY.test(r))) return false;
+  const r = schema.checkResults;
+  const results = await db
+    .select({ layer: r.layer, check: r.checkName, message: r.message })
+    .from(r)
+    .where(
+      and(eq(r.runId, runId), eq(r.symbolId, symbolId), eq(r.date, day.date), eq(r.status, 'red')),
+    );
+  return (
+    results.length > 0 &&
+    results.every((x) => x.layer === 'A' && x.check === 'bar_valid' && x.message === NOT_A_SESSION)
+  );
 }

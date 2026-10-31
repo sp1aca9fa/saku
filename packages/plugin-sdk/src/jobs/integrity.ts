@@ -13,7 +13,7 @@ import {
   dependencies,
   evaluate,
 } from '@saku/core';
-import type { CheckResult } from '@saku/data';
+import type { CheckResult, Sessions } from '@saku/data';
 import { type Db, allVersions } from '@saku/db';
 import { type RefStrategy, refBacktest, refEvaluate } from '@saku/reference';
 import { cashRateReader } from './cash';
@@ -32,9 +32,12 @@ export const INTEGRITY_CHECKS = ['core_vs_reference', 'incremental_vs_full'] as 
 /** A layer E result, for one registered version. */
 export type IntegrityResult = CheckResult & { versionId: string };
 
-export async function integrity(db: Db, o: { to: TradingDate }): Promise<IntegrityResult[]> {
+export async function integrity(
+  db: Db,
+  o: { to: TradingDate; sessions: Sessions },
+): Promise<IntegrityResult[]> {
   const out: IntegrityResult[] = [];
-  const { loadRows, barsOf } = await reader(db);
+  const { loadRows, barsOf } = await reader(db, o.sessions);
   const cashRate = await cashRateReader(db);
 
   for (const version of await allVersions(db)) {

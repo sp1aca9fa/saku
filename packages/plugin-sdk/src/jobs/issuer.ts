@@ -7,6 +7,7 @@ import {
   type IssuerPublishes,
   type NotComparedCounts,
   type PremiumStats,
+  type Sessions,
   navPremiums,
   notComparedOf,
   premiumStats,
@@ -152,7 +153,13 @@ export interface IssuerStats {
  */
 export async function issuerStats(
   db: Db,
-  o: { from: TradingDate; to: TradingDate; publishes?: Record<string, IssuerPublishes> },
+  o: {
+    from: TradingDate;
+    to: TradingDate;
+    publishes?: Record<string, IssuerPublishes>;
+    /** The market calendar (closed-day rows are not in the canonical series, `canonicalBars`). */
+    sessions: Sessions;
+  },
 ): Promise<IssuerStats> {
   const nav = await navTolerances(db);
   const symbols = await activeSymbols(db);
@@ -160,7 +167,9 @@ export async function issuerStats(
   for (const s of symbols) {
     const records = await issuerRecordsOf(db, s.id);
     if (records.size === 0) continue;
-    const canonical = (await canonicalBars(db, s.id, o.to)).filter((b) => b.date >= o.from);
+    const canonical = (await canonicalBars(db, s.id, o.to, o.sessions)).filter(
+      (b) => b.date >= o.from,
+    );
     const excluded = new Map<TradingDate, 'standIn' | 'red'>();
     for (const b of canonical) {
       if (b.standIn) excluded.set(b.date, 'standIn');

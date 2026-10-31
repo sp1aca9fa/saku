@@ -74,6 +74,29 @@ describe('registerStrategy', () => {
     expect(existsSync(join(dir, 'jobs.lock'))).toBe(false);
   });
 
+  it('prints closed-day bars as a note, registered or refused', async () => {
+    const db = await passed();
+    const id = (await symbolId(db, 'AAA'))!;
+    // A canonical row on a Saturday (left from before): no signal reads it.
+    await db
+      .insert(schema.bars)
+      .values({ symbolId: id, date: '2026-01-03', close: 1, source: 'p', status: 'red' });
+    const note = [
+      'Note:',
+      '- AAA: 1 bar on days the market was closed, excluded (no signal reads them): 2026-01-03.',
+    ];
+    const o = { ownerId: null, through: D[3], sessions };
+    const refused = await registerStrategy(db, {
+      ...o,
+      strategy: strategy('same_close'),
+      lockDir: lockDir(),
+    });
+    expect(refused).toMatchObject({ exitCode: 1, stdout: note });
+    const out = await registerStrategy(db, { ...o, strategy: strategy(), lockDir: lockDir() });
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout.slice(-2)).toEqual(note);
+  });
+
   it('refuses with a non-zero exit and registers nothing when there is a problem', async () => {
     const db = await passed();
     const out = await registerStrategy(db, {

@@ -41,6 +41,7 @@ import {
   issuerRecordsOf,
   navTolerances,
   schema,
+  latestCloseOf,
   standInMatchesBar,
   unmatchedTolerances,
   seriesPointInTime,
@@ -109,7 +110,8 @@ export interface VerifySummary {
   closedChanged: {
     ticker: string;
     date: TradingDate;
-    closed: { source: string; close: number };
+    /** The latest close (`latestCloseOf`). */
+    closed: { source: string; close: number; closedAt: string };
     now: { source: string; close: number } | null;
   }[];
   /** The stored `issuer_nav_tolerance` does not parse (layer D observes only; yellow). */
@@ -123,7 +125,8 @@ export interface VerifySummary {
   navNotCompared: NotCompared[];
 }
 
-type CanonicalBar = RawBar & { source: string; standIn: boolean };
+/** A stand-in bar carries the band and basis this build computed (stored for the margin test). */
+type CanonicalBar = RawBar & { source: string; standIn: boolean; band?: number; basis?: string };
 
 type Stored = CheckResult & { symbolId: number | null };
 
@@ -286,6 +289,8 @@ async function writeCanonical(
     adjClose: adj[i]!,
     source: b.source,
     standIn: b.standIn,
+    standInBand: b.standIn ? (b.band ?? null) : null,
+    standInBasis: b.standIn ? (b.basis ?? null) : null,
     status: health.get(b.date)?.status ?? null,
   }));
   await db.transaction(async (tx) => {
@@ -330,6 +335,8 @@ async function writeCanonical(
             adjClose: sqlExcluded('adj_close'),
             source: sqlExcluded('source'),
             standIn: sqlExcluded('stand_in'),
+            standInBand: sqlExcluded('stand_in_band'),
+            standInBasis: sqlExcluded('stand_in_basis'),
             status: sqlExcluded('status'),
           },
         });
@@ -468,7 +475,15 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   for (const s of symbols) {
     const bySource = raw.get(s.id)!;
     // A primary that delivers split-adjusted closes is put back on the raw basis too.
-    const primary = unsplit((bySource.get(bars.primary) ?? []).filter((b) => b.date <= o.to));
+    const primaryAll = unsplit((bySource.get(bars.primary) ?? []).filter((b) => b.date <= o.to));
+    // Requirements 04 "Closed-day bars": a primary bar dated on a day the calendar says was
+    // closed is kept out of the canonical series and of every comparison across days (layer B,
+    // C and D, stand-ins), so the sessions around it are compared with the real session before;
+    // layer A still checks it (red, `bar_valid` "not a trading day") and its date is graded.
+    // Un-split over every bar first, so the restated closes are as before. A date the calendar
+    // does not cover is unknown, never closed: kept (and refused by layer A as before).
+    const closedDays = primaryAll.filter((b) => o.sessions.closedOn(b.date));
+    const primary = primaryAll.filter((b) => !o.sessions.closedOn(b.date));
     const own: CheckResult[] = [];
     const add = (rs: CheckResult[]) => own.push(...rs);
     // The fund's index (layer C), from the series primary, as known at the run (point in time:
@@ -515,7 +530,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     if (s.underlyingSymbolId !== null) {
       const u = unsplit(
         (raw.get(s.underlyingSymbolId)?.get(bars.primary) ?? []).filter((b) => b.date <= o.to),
-      );
+      ).filter((b) => !o.sessions.closedOn(b.date)); // as the fund's: its canonical series
       add(leverageCheck(primary, u, s.leverageFactor));
     }
     if (index) {
@@ -563,7 +578,8 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     }
     results.push(...own.map((r) => ({ ...r, symbolId: s.id })));
     if (primary.length === 0) {
-      // No primary bar at all (a new primary without this symbol's history, or none fetched yet):
+      // No primary bar at all, or only on closed days (a new primary without this symbol's
+      // history, or none fetched yet):
       // red on its dates, never left out (left out, the day would read green without it).
       const missing = missingPrimaryDates(
         o.sessions,
@@ -596,24 +612,33 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     });
     const merged: CanonicalBar[] = [
       ...primary.map((b) => ({ ...b, source: bars.primary!, standIn: false })),
-      ...si.standIns.map((x) => ({ ...x.bar, source: x.source, standIn: true })),
+      ...si.standIns.map((x) => ({
+        ...x.bar,
+        source: x.source,
+        standIn: true,
+        band: x.band,
+        basis: x.basis,
+      })),
     ].sort((a, b) => (a.date < b.date ? -1 : 1));
     canonical.set(s.id, merged);
 
-    // The sessions from the primary's first bar, and every canonical bar's day that is not a
-    // session (layer A flags it red, `bar_valid` "not a trading day"): graded with the sessions,
-    // so such a bar is stored red with its reason, never left ungraded.
-    const closed = merged.filter((b) => !o.sessions.isSession(b.date)).map((b) => b.date);
-    const dates = [...new Set([...o.sessions.between(primary[0]!.date, o.to), ...closed])].sort();
+    // The sessions from the primary's first bar (on a closed day too, as layer A's gaps), and the
+    // day of every primary bar on a closed day (layer A flags it red, `bar_valid` "not a trading
+    // day"): graded with the sessions, so its red result and grade are stored and shown, while no
+    // canonical bar is built for it (requirements 04 "Closed-day bars").
+    const closed = closedDays.map((b) => b.date);
+    const dates = [
+      ...new Set([...o.sessions.between(primaryAll[0]!.date, o.to), ...closed]),
+    ].sort();
     const sources = new Map<TradingDate, number>();
-    for (const list of [primary, ...secondaries.map(([, l]) => l)]) {
+    for (const list of [primaryAll, ...secondaries.map(([, l]) => l)]) {
       for (const b of list) sources.set(b.date, (sources.get(b.date) ?? 0) + 1);
     }
     const health = symbolHealth({
       dates,
       results: own,
       primary: bars.primary,
-      primaryDates: new Set(primary.map((b) => b.date)),
+      primaryDates: new Set(primaryAll.map((b) => b.date)),
       sources,
       standIns: si.standIns,
       refused: si.refused,
@@ -627,6 +652,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
         date: schema.standIns.date,
         source: schema.standIns.source,
         close: schema.standIns.close,
+        closedAt: schema.standIns.closedAt,
       })
       .from(schema.standIns)
       .where(
@@ -637,22 +663,25 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
         ),
       );
     const lastUsed = new Map<TradingDate, number>();
-    for (const c of closedRows) {
+    for (const row of closedRows) {
+      // The latest close counts (an admin may close the new price again, `stand_in_closes`).
+      const c = (await latestCloseOf(db, s.id, row.date)) ?? row;
+      const date = row.date;
       const [stored] = await db
         .select({ standIn: schema.bars.standIn, close: schema.bars.close })
         .from(schema.bars)
-        .where(and(eq(schema.bars.symbolId, s.id), eq(schema.bars.date, c.date)));
-      if (stored?.standIn) lastUsed.set(c.date, stored.close);
-      const built = merged.find((b) => b.date === c.date);
+        .where(and(eq(schema.bars.symbolId, s.id), eq(schema.bars.date, date)));
+      if (stored?.standIn) lastUsed.set(date, stored.close);
+      const built = merged.find((b) => b.date === date);
       if (built && !built.standIn) continue; // the primary's bar: resolved below
       if (built && standInMatchesBar(c, built)) continue;
       closedChanged.push({
         ticker: s.ticker,
-        date: c.date,
-        closed: { source: c.source, close: c.close },
+        date,
+        closed: { source: c.source, close: c.close, closedAt: c.closedAt! },
         now: built ? { source: built.source, close: built.close } : null,
       });
-      const h = built && health.get(c.date);
+      const h = built && health.get(date);
       if (h) {
         h.status = worst(h.status, 'yellow');
         const reason = `stand_in_closed_changed@${built.source}`;
@@ -660,7 +689,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       }
     }
     const removed = await writeCanonical(db, s.id, merged, health, {
-      from: primary[0]!.date,
+      from: primaryAll[0]!.date,
       to: o.to,
     });
     removedCanonical.push(...removed.map((r) => ({ ticker: s.ticker, ...r })));

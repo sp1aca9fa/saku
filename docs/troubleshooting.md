@@ -117,8 +117,10 @@ whose canonical bar is not that stand-in. The stand-in's price stays, the correc
 proceed at the next run, the recorded days that used it are annotated (not changed) and their
 owners told once. Closing is never automatic and cannot be undone; if the primary delivers the
 day later anyway, it is still compared and any difference annotated and told. If a later run
-builds the day from another price, the close no longer holds: the day reads `stand_in_closed_changed`
-and the stand-in is open again (see `docs/data-pipeline.md`).
+builds the day from another price, the close no longer holds: the day reads `stand_in_closed_changed`,
+the stand-in is open again, and the admins get a "has another price" alert. Check the new price
+(the list shows it), then close it again with the same command; every close stays on record (see
+`docs/data-pipeline.md`).
 
 "Refused, no canonical bar": a later run refused that stand-in, so nothing reads its price (the
 day is missing). It cannot be closed; it keeps the corrections behind it waiting until the primary

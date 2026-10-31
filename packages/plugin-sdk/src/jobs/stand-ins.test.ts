@@ -9,6 +9,7 @@ import {
   finishRun,
   schema,
   startRun,
+  unsettledStandIns,
   upsertSymbols,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
@@ -111,6 +112,8 @@ async function setup() {
 
 const closes = async (db: Awaited<ReturnType<typeof setup>>['db']) =>
   db.select().from(schema.activityLog).where(eq(schema.activityLog.action, 'stand_in.close'));
+const history = async (db: Awaited<ReturnType<typeof setup>>['db']) =>
+  db.select().from(schema.standInCloses).orderBy(schema.standInCloses.id);
 
 describe('closing a stand-in', () => {
   it('refuses, writing nothing: the wrong user, no reason, inside the refetch window, a stand-in it does not apply to', async () => {
@@ -183,9 +186,77 @@ describe('closing a stand-in', () => {
         },
       },
     ]);
+    expect(await history(db)).toMatchObject([
+      {
+        source: 's',
+        close: 100,
+        band: 0.001,
+        basis: 'index',
+        closedBy: admin,
+        reason: 'primary will not deliver',
+      },
+    ]);
     const again = await close({ reason: 'other' });
     expect(!again.ok && again.error).toMatch(/already closed at 2026-02-01T10:00:00.000Z/);
     expect(await closes(db)).toHaveLength(1);
+    expect(await history(db)).toHaveLength(1);
+  });
+
+  it('a closed stand-in whose price changed is closed again at the new price, appended', async () => {
+    const { db, ids, admin, daily, close } = await setup();
+    await daily(PAST);
+    expect((await close()).ok).toBe(true);
+    // A later full verify builds the day from a revised value, with its own band: open again.
+    const where = and(eq(schema.bars.symbolId, ids.AAA!), eq(schema.bars.date, D));
+    await db.update(schema.bars).set({ close: 100.4 }).where(where);
+    expect((await unsettledStandIns(db)).map((r) => `${r.ticker} ${r.date}`)).toContain(`AAA ${D}`);
+    // A bar written before 0012 (no band): refused, nothing written.
+    const noBand = await close({ reason: 'revised value checked' });
+    expect(!noBand.ok && noBand.error).toMatch(/without its band/);
+    await db.update(schema.bars).set({ standInBand: 0.005, standInBasis: 'layer_c' }).where(where);
+    const later = new Date('2026-02-03T10:00:00Z');
+    expect(await close({ reason: 'revised value checked', now: later })).toMatchObject({
+      ok: true,
+    });
+    expect(await history(db)).toMatchObject([
+      { close: 100, band: 0.001, reason: 'primary will not deliver' },
+      {
+        source: 's',
+        close: 100.4,
+        band: 0.005,
+        basis: 'layer_c',
+        closedBy: admin,
+        reason: 'revised value checked',
+        closedAt: later.toISOString(),
+      },
+    ]);
+    expect((await closes(db)).at(-1)!.detail).toMatchObject({
+      close: 100.4,
+      reclose: { source: 's', close: 100, closedAt: '2026-02-01T10:00:00.000Z' },
+    });
+    // The first close's columns stay as they were; the latest close settles it.
+    expect(
+      (
+        await db
+          .select()
+          .from(schema.standIns)
+          .where(and(eq(schema.standIns.symbolId, ids.AAA!), eq(schema.standIns.date, D)))
+      )[0],
+    ).toMatchObject({
+      close: 100,
+      closeReason: 'primary will not deliver',
+    });
+    expect((await unsettledStandIns(db)).map((r) => `${r.ticker} ${r.date}`)).not.toContain(
+      `AAA ${D}`,
+    );
+    const again = await close({ reason: 'other', now: later });
+    expect(!again.ok && again.error).toMatch(/already closed at 2026-02-03T10:00:00.000Z/);
+    // Refused the next day (no canonical bar): open, and not closable.
+    await db.delete(schema.bars).where(where);
+    expect((await unsettledStandIns(db)).map((r) => `${r.ticker} ${r.date}`)).toContain(`AAA ${D}`);
+    const refused = await close({ reason: 'other' });
+    expect(!refused.ok && refused.error).toMatch(/no canonical bar/);
+    expect(await history(db)).toHaveLength(2);
   });
 
   it('the refetch window: more than DAILY_OVERLAP sessions after the date', () => {
@@ -197,6 +268,8 @@ describe('closing a stand-in', () => {
 });
 
 const row = (over: Partial<StandInListRow> = {}): StandInListRow => ({
+  symbolId: 1,
+  runId: 'r1',
   ticker: 'AAA',
   date: D,
   source: 's',
@@ -210,9 +283,40 @@ const row = (over: Partial<StandInListRow> = {}): StandInListRow => ({
   closedAt: null,
   closedBy: null,
   closeReason: null,
-  canonical: { source: 's', standIn: true, close: 100.5, divCash: 0 },
+  closes: [],
+  latestClose: null,
+  canonical: bar(),
   ...over,
 });
+const bar = (over: Partial<NonNullable<StandInListRow['canonical']>> = {}) => ({
+  source: 's',
+  standIn: true,
+  close: 100.5,
+  divCash: 0,
+  band: 0.001,
+  basis: 'index',
+  ...over,
+});
+/** A row closed once at its own price (close 1). */
+const closedOnce = (): Partial<StandInListRow> => {
+  const c = {
+    source: 's',
+    close: 100.5,
+    band: 0.001,
+    basis: 'index',
+    closedBy: 'u1',
+    reason: 'primary will not deliver',
+    closedAt: '2026-02-01T10:00:00.000Z',
+    legacy: false,
+  };
+  return {
+    closes: [c],
+    latestClose: c,
+    closedAt: c.closedAt,
+    closedBy: 'ada',
+    closeReason: c.reason,
+  };
+};
 
 describe('pnpm sources stand-in list', () => {
   it('ages in sessions, unknown outside the calendar', () => {
@@ -224,23 +328,19 @@ describe('pnpm sources stand-in list', () => {
   });
 
   it('says whether a canonical bar uses it, whether it can be closed, and what a refused one means', () => {
-    const closed = {
-      closedAt: '2026-02-01T10:00:00.000Z',
-      closedBy: 'ada',
-      closeReason: 'primary will not deliver',
-    };
+    const closed = closedOnce();
     const lines = standInListText(
       [
         row(),
         row({
           ticker: 'BBB',
-          canonical: { source: 's', standIn: true, close: 100.5, divCash: 0.25 },
+          canonical: bar({ divCash: 0.25 }),
         }),
         row({ ticker: 'CCC', canonical: null }),
         row({ ticker: 'DDD', ...closed }),
         row({
           ticker: 'EEE',
-          canonical: { source: 'p', standIn: false, close: 100.6, divCash: 0 },
+          canonical: bar({ source: 'p', standIn: false, close: 100.6 }),
           resolvedAt: '2026-01-08T21:30:00.000Z',
           deviation: 0.0012,
         }),
@@ -248,7 +348,7 @@ describe('pnpm sources stand-in list', () => {
         row({
           ticker: 'GGG',
           ...closed,
-          canonical: { source: 's2', standIn: true, close: 100.7, divCash: 0 },
+          canonical: bar({ source: 's2', close: 100.7 }),
         }),
       ],
       { sessions, today: '2026-01-23', open: false, latestDaily: PAST },
@@ -269,9 +369,36 @@ describe('pnpm sources stand-in list', () => {
         'uses it (from s); not closable yet: its age at the latest complete daily run ' +
         `(${PAST}) is unknown (outside the calendar)`,
       'GGG  2026-01-07  s  100.5  0.100%  11  closed 2026-02-01T10:00:00.000Z by ada: primary ' +
-        'will not deliver; open again: its canonical bar is no longer this stand-in  canonical ' +
-        'bar has another price (100.7 from s2)',
+        'will not deliver; open again: the closed price changed (closed 100.5 from s)  canonical ' +
+        'bar has another price (100.7 from s2): closed price changed, check the new price, then ' +
+        'close again (closable)',
     ]);
+    // Closed again at the new price: settled, the close counted.
+    const second = {
+      ...closedOnce().latestClose!,
+      source: 's2',
+      close: 100.7,
+      reason: 'revised value checked',
+      closedAt: '2026-02-03T10:00:00.000Z',
+    };
+    expect(
+      standInListText(
+        [
+          row({
+            ...closed,
+            closes: [closedOnce().latestClose!, second],
+            latestClose: second,
+            closedAt: second.closedAt,
+            closeReason: second.reason,
+            canonical: bar({ source: 's2', close: 100.7 }),
+          }),
+        ],
+        { sessions, today: '2026-01-23', open: false, latestDaily: PAST },
+      )[1],
+    ).toBe(
+      'AAA  2026-01-07  s  100.5  0.100%  11  closed 2026-02-03T10:00:00.000Z (close 2) by ada: ' +
+        'revised value checked  canonical bar uses it (from s2)',
+    );
     // Inside the refetch window: not yet.
     expect(
       standInListText([row()], { sessions, today: D, open: false, latestDaily: '2026-01-22' })[1],

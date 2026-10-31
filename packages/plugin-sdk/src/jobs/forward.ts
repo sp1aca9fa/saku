@@ -34,6 +34,7 @@ import {
   getSetting,
   isOpenStandIn,
   lastEntry,
+  latestCloseOf,
   latestHealth,
   resolvedStandIns,
   sha256,
@@ -110,7 +111,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   const from = await getSetting(db, 'forward_records_from');
   if (!from) return { ...summary, skipped: 'forward records not started (forward_records_from)' };
 
-  const { symbolIds, loadRows, barsOf } = await reader(db);
+  const { symbolIds, loadRows, barsOf } = await reader(db, o.sessions);
   const cashRate = await cashRateReader(db);
 
   const healthOn = (rows: Rows, date: TradingDate) =>
@@ -240,7 +241,7 @@ export async function annotateStandInCorrections(
   );
   if (corrected.length === 0) return summary;
   const unresolved = await unresolvedStandIns(db);
-  const { symbolIds, loadRows, barsOf } = await reader(db);
+  const { symbolIds, loadRows, barsOf } = await reader(db, sessions);
   const errors = new Set<string>();
   for (const version of await allVersions(db)) {
     const parsed = parseVersion(version);
@@ -332,8 +333,8 @@ export async function annotateStandInClosures(
       record: await forwardRecord(db, version.id),
       closed,
       annotated: (await annotationsOf(db, version.id, 'stand_in_closed')).map((a) => {
-        const d = a.detail as { ticker?: unknown; standInDate?: unknown };
-        return { date: a.date, ticker: d.ticker, standInDate: d.standInDate };
+        const d = a.detail as { ticker?: unknown; standInDate?: unknown; closedAt?: unknown };
+        return { date: a.date, ticker: d.ticker, standInDate: d.standInDate, closedAt: d.closedAt };
       }),
     });
     for (const e of pending.errors) errors.add(e);
@@ -367,25 +368,29 @@ export interface ClosedStandIn {
   createdAt: string;
   closedAt: string | null;
   closeReason: string | null;
+  /** The close before this one (a re-close after its price changed), null for the first. */
+  previousClosedAt?: string | null;
 }
 
 /**
  * The closure annotations still to write for one version (rule 5 with 05's append-only record):
- * for each closed stand-in on a ticker the version depends on, every recorded entry dated on or
- * after its date that used it while it was open, not annotated yet for that entry date, ticker
- * and stand-in date. "Used it" is decided as for corrections (`standInCorrections`): appended in
- * the run that first recorded it, it did; otherwise by time, appended at or after it was first
- * recorded and before it was closed (instants). Entries appended after the close were decided
- * knowing it was closed and are not annotated (a primary arriving later still annotates them as a
- * correction, through the resolution). A timestamp that is not an instant leaves that unknown: an
- * error, nothing annotated on a guess.
+ * for each close of a stand-in on a ticker the version depends on, every recorded entry dated on
+ * or after its date that used it while it was open, not annotated yet for that entry date,
+ * ticker, stand-in date and close. "Used it" is decided as for corrections (`standInCorrections`):
+ * appended in the run that first recorded it, it did; otherwise by time, appended at or after it
+ * was first recorded and before it was closed (instants). A re-close (its price changed after an
+ * earlier close, `previousClosedAt`) covers the entries appended from the earlier close up to it,
+ * by time only: those read the stand-in since, at the closed or the changed price. Entries
+ * appended after a close were decided knowing it was closed and are not annotated for it (a
+ * primary arriving later still annotates them as a correction, through the resolution). A
+ * timestamp that is not an instant leaves that unknown: an error, nothing annotated on a guess.
  */
 export function standInClosures(o: {
   version: string;
   deps: string[];
   record: Pick<ForwardEntry, 'date' | 'allocation' | 'createdAt' | 'runId'>[];
   closed: ClosedStandIn[];
-  annotated: { date: string; ticker: unknown; standInDate: unknown }[];
+  annotated: { date: string; ticker: unknown; standInDate: unknown; closedAt: unknown }[];
 }): {
   annotate: {
     standIn: ClosedStandIn & { closedAt: string; closeReason: string };
@@ -394,7 +399,9 @@ export function standInClosures(o: {
   errors: string[];
 } {
   const done = new Set(
-    o.annotated.map((a) => `${a.date} ${String(a.ticker)} ${String(a.standInDate)}`),
+    o.annotated.map(
+      (a) => `${a.date} ${String(a.ticker)} ${String(a.standInDate)} ${String(a.closedAt)}`,
+    ),
   );
   const out: ReturnType<typeof standInClosures> = { annotate: [], errors: [] };
   for (const s of o.closed) {
@@ -405,19 +412,21 @@ export function standInClosures(o: {
       continue;
     }
     const standIn = { ...s, closedAt: s.closedAt, closeReason: s.closeReason };
-    const from = instantOf(s.createdAt);
+    const reclose = (s.previousClosedAt ?? null) !== null;
+    const from = instantOf(reclose ? s.previousClosedAt! : s.createdAt);
     const until = instantOf(s.closedAt);
     let unplaced = false;
     for (const recorded of o.record) {
       if (recorded.date < s.date) continue;
-      if (done.has(`${recorded.date} ${s.ticker} ${s.date}`)) continue;
+      if (done.has(`${recorded.date} ${s.ticker} ${s.date} ${s.closedAt}`)) continue;
       let used: boolean;
-      if (recorded.runId !== null && recorded.runId === s.runId) used = true;
+      if (!reclose && recorded.runId !== null && recorded.runId === s.runId) used = true;
       else if (Number.isNaN(from) || Number.isNaN(until)) {
         if (!unplaced) {
           out.errors.push(
             `${s.ticker} ${s.date}: the stand-in's timestamps are not instants ` +
-              `(created ${s.createdAt}, closed ${s.closedAt}); its close is not annotated`,
+              `(${reclose ? `previous close ${s.previousClosedAt}` : `created ${s.createdAt}`}, ` +
+              `closed ${s.closedAt}); its close is not annotated`,
           );
         }
         unplaced = true;
@@ -634,9 +643,11 @@ export function recheckWindow(sessions: Sessions, date: TradingDate): TradingDat
  *   that is not red (an older row left by a run that stopped after removing the bar, say) is not
  *   believed: `missing`;
  * - a session before the ticker's first canonical bar was never a session for it: nothing.
- * The window's canonical bars on days that are not sessions (graded red, `bar_valid`) are read
- * too, since the signals read every canonical bar. Days before `forward_records_from` are
- * nothing special. `rows`: the ticker's canonical rows up to `date`, oldest first.
+ * Only the window's sessions are read: a bar on a day the market was closed is not in the series
+ * the signals read (requirements 04 "Closed-day bars"; `reader` leaves such rows out and verify
+ * no longer builds them), so its red grade on that day keeps no strategy red. Days before
+ * `forward_records_from` are nothing special. `rows`: the ticker's canonical rows up to `date`,
+ * oldest first (as `reader` returns them).
  */
 export async function lookbackFlags(
   db: Db,
@@ -650,9 +661,8 @@ export async function lookbackFlags(
   const byDate = new Map(
     rows.filter((r) => r.date >= window[0]! && r.date < date).map((r) => [r.date, r]),
   );
-  const dates = [...new Set([...window.filter((d) => d >= first), ...byDate.keys()])].sort();
   const out: LookbackFlag[] = [];
-  for (const d of dates) {
+  for (const d of window.filter((x) => x >= first)) {
     const bar = byDate.get(d);
     if (bar) {
       if (bar.status === null) out.push({ date: d, why: 'ungraded' });
@@ -668,9 +678,10 @@ export async function lookbackFlags(
 /**
  * Whether a stored stand-in still waits for the primary (requirements 04 stand-in rule): only
  * those are moved by the decision-margin test. Not a resolved one (the primary's bar replaced it),
- * nor one an admin closed (rule 5) while its canonical bar is still that stand-in: its price
- * stays and is read as it is. A closed one whose canonical bar changed is open again (`@saku/db`
- * `isOpenStandIn`; verify grades that day `stand_in_closed_changed`).
+ * nor one an admin closed (rule 5) while its canonical bar is still the price of its latest close:
+ * its price stays and is read as it is. A closed one whose canonical bar changed is open again
+ * until closed again (`@saku/db` `isOpenStandIn`; verify grades that day
+ * `stand_in_closed_changed`).
  */
 export { isOpenStandIn };
 
@@ -687,21 +698,34 @@ export async function openStandIns(
   for (const r of rows) {
     if (!r.standIn) continue;
     const stood = await standInOn(db, symbolId, r.date);
-    if (stood && isOpenStandIn(stood, r)) out.push({ date: r.date, band: stood.band });
+    if (!stood) continue;
+    const latest = stood.closedAt === null ? null : await latestCloseOf(db, symbolId, r.date);
+    if (!isOpenStandIn(stood, latest, r)) continue;
+    // Reopened (its closed price changed): the band of the current build, not the frozen row's;
+    // a bar written before 0012 has none: the widest of the row's, the close's and the layer C
+    // base tolerance (the band with no independent check).
+    const band =
+      latest === null
+        ? stood.band
+        : (r.standInBand ?? Math.max(stood.band, latest.band, TOLERANCE.leverageBase));
+    out.push({ date: r.date, band });
   }
   return out;
 }
 
 export type Rows = Record<string, Awaited<ReturnType<typeof canonicalBars>>>;
 
-/** Reads the canonical bars of the active universe up to a date. */
-export async function reader(db: Db) {
+/**
+ * Reads the canonical bars of the active universe up to a date, through `canonicalBars`: rows on
+ * days the market calendar says were closed are left out (requirements 04 "Closed-day bars").
+ */
+export async function reader(db: Db, sessions: Sessions) {
   const symbolIds = new Map((await activeSymbols(db)).map((s) => [s.ticker, s.id]));
   const loadRows = async (tickers: string[], to: TradingDate): Promise<Rows> => {
     const out: Rows = {};
     for (const t of tickers) {
       const id = symbolIds.get(t);
-      if (id !== undefined) out[t] = await canonicalBars(db, id, to);
+      if (id !== undefined) out[t] = await canonicalBars(db, id, to, sessions);
     }
     return out;
   };
@@ -764,11 +788,13 @@ export async function recompute(
      * the stand-in it waits for is resolved.
      */
     waiting?: Pick<Deferred, 'versionId' | 'date'>[];
+    /** The market calendar (canonical reads leave closed-day rows out, `reader`). */
+    sessions: Sessions;
   },
 ): Promise<RecomputeSummary> {
   const waiting = new Set((o.waiting ?? []).map((w) => `${w.versionId} ${w.date}`));
   const summary: RecomputeSummary = { checked: 0, differences: [], errors: [] };
-  const { loadRows, barsOf } = await reader(db);
+  const { loadRows, barsOf } = await reader(db, o.sessions);
   for (const version of await allVersions(db)) {
     // Before the record check: a version that no longer parses is reported even without a
     // record yet (the forward step skipped it too), so the run is incomplete.

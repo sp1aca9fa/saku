@@ -130,7 +130,7 @@ describe('integrity (layer E)', () => {
   it('core and reference agree, and each sampled day equals the full pass', async () => {
     const { db, ok } = await setup();
     expect(ok).toBe(true);
-    const results = await integrity(db, { to: TARGET });
+    const results = await integrity(db, { to: TARGET, sessions });
     expect(results.map((r) => [r.check, r.status])).toEqual([
       ['core_vs_reference', 'green'],
       ['incremental_vs_full', 'green'],
@@ -141,7 +141,7 @@ describe('integrity (layer E)', () => {
   it('a disagreement is red and names the day', async () => {
     const { db } = await setup();
     reference.flip = true;
-    const [ref] = await integrity(db, { to: TARGET });
+    const [ref] = await integrity(db, { to: TARGET, sessions });
     expect(ref).toMatchObject({ check: 'core_vs_reference', status: 'red' });
     expect(ref!.message).toMatch(/allocation .* vs Flipped/);
   });
@@ -171,7 +171,7 @@ describe('integrity (layer E)', () => {
         ],
       },
     });
-    const results = await integrity(db, { to: TARGET });
+    const results = await integrity(db, { to: TARGET, sessions });
     expect(results.map((r) => [r.message!.split(' (')[0], r.check, r.status])).toEqual([
       ['Trend', 'core_vs_reference', 'red'],
       ['Trend', 'incremental_vs_full', 'red'],

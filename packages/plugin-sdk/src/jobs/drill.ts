@@ -317,7 +317,7 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
   }
 
   // Each version decides the day as the forward step does, without appending.
-  const { symbolIds, loadRows, barsOf } = await reader(db);
+  const { symbolIds, loadRows, barsOf } = await reader(db, o.sessions);
   const alerts: DrillReport['alerts'] = [];
   // One context for the whole drill, as the daily run has one per run: a notifier's channels
   // share its pacing and counts across versions.

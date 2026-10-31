@@ -32,6 +32,7 @@ import {
   sendRevisions,
   sendStandInClosures,
   sendStandInCorrections,
+  sendStandInReopened,
   sendStrategyAlerts,
 } from './alerts';
 import { anchor } from './anchor';
@@ -229,7 +230,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         failures.push(...s.errors);
       }
       // Days whose correction waits are not compared yet (their difference is that correction).
-      const r = await recompute(db, { runId, code: o.code, waiting: c.deferred });
+      const r = await recompute(db, { runId, code: o.code, waiting: c.deferred, sessions });
       log.info(`Recomputed ${r.checked} recorded days: ${r.differences.length} new differences`);
       if (r.differences.length > 0) {
         log.warn('The engine decides recorded days differently', { differences: r.differences });
@@ -367,6 +368,15 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
             : 'is now refused (no canonical bar)') +
           '; it is open again for the decision-margin test and the corrections',
       );
+      // The admins, once per close and new price (after the A1 gate): check it, close again.
+      const told = await sendStandInReopened(db, {
+        ...alerting,
+        ticker: c.ticker,
+        standInDate: c.date,
+        closed: c.closed,
+        now: c.now,
+      });
+      if (told.failed.length > 0) markIncomplete('alerts');
     }
     for (const s of checked.standInsOff) {
       log.warn(
@@ -467,7 +477,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     }
     if (job === 'weekly' || job === 'checks') {
       // Layer E on the stored data: core vs reference, incremental vs full, testfol parity.
-      const results = await integrity(db, { to: target });
+      const results = await integrity(db, { to: target, sessions });
       await storeRunChecks(db, runId, results);
       for (const r of results) {
         log.info(`Layer E ${r.check}: ${r.status}`, { message: r.message });

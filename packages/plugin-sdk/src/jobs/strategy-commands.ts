@@ -8,7 +8,7 @@ import type { Sessions } from '@saku/data';
 import { type Db, registerVersion } from '@saku/db';
 import { annotateStandInCorrections, recompute } from './forward';
 import { lock } from './lock';
-import { registrationProblems } from './registration';
+import { registrationReport } from './registration';
 
 export interface CommandOutput {
   exitCode: 0 | 1;
@@ -50,6 +50,9 @@ interface RegistrationInput {
 }
 
 const problemList = (problems: string[]) => problems.map((p) => `- ${p}`).join('\n');
+/** Information that does not refuse (bars on closed days, left out), printed either way. */
+const noteLines = (notes: string[]) =>
+  notes.length > 0 ? ['Note:', ...notes.map((n) => `- ${n}`)] : [];
 
 /**
  * What `register` would say, without registering: the same problems from the same function,
@@ -57,14 +60,17 @@ const problemList = (problems: string[]) => problems.map((p) => `- ${p}`).join('
  */
 export function previewRegistration(db: Db, o: RegistrationInput): Promise<CommandOutput> {
   return withJobsLock(o.lockDir, async () => {
-    const problems = await registrationProblems(db, o.strategy, {
+    const { problems, notes } = await registrationReport(db, o.strategy, {
       through: o.through,
       sessions: o.sessions,
     });
     if (problems.length > 0) {
-      return refused(`Would not register:\n${problemList(problems)}`);
+      return {
+        ...refused(`Would not register:\n${problemList(problems)}`),
+        stdout: noteLines(notes),
+      };
     }
-    return { exitCode: 0, stdout: ['Ready to register.'], stderr: [] };
+    return { exitCode: 0, stdout: ['Ready to register.', ...noteLines(notes)], stderr: [] };
   });
 }
 
@@ -83,12 +89,12 @@ export function registerStrategy(
   },
 ): Promise<CommandOutput> {
   return withJobsLock(o.lockDir, async () => {
-    const problems = await registrationProblems(db, o.strategy, {
+    const { problems, notes } = await registrationReport(db, o.strategy, {
       through: o.through,
       sessions: o.sessions,
     });
     if (problems.length > 0) {
-      return refused(`Not registered:\n${problemList(problems)}`);
+      return { ...refused(`Not registered:\n${problemList(problems)}`), stdout: noteLines(notes) };
     }
     const v = await registerVersion(db, {
       ownerId: o.ownerId,
@@ -100,6 +106,7 @@ export function registerStrategy(
       stdout: [
         `Registered ${o.strategy.name}: version ${v.id}, hash ${v.hash}.`,
         'Its forward record starts with the first close after now.',
+        ...noteLines(notes),
       ],
       stderr: [],
     };
@@ -120,7 +127,12 @@ export function recomputeRecords(
     const c = await annotateStandInCorrections(db, null, o.sessions);
     if (c.annotations) out.push(`${c.annotations} stand-in corrections annotated.`);
     out.push(...c.errors);
-    const r = await recompute(db, { runId: null, code: o.code, waiting: c.deferred });
+    const r = await recompute(db, {
+      runId: null,
+      code: o.code,
+      waiting: c.deferred,
+      sessions: o.sessions,
+    });
     for (const d of r.differences) {
       out.push(`${d.version} ${d.date}: recorded ${d.recorded}, now ${d.now} (annotated)`);
     }

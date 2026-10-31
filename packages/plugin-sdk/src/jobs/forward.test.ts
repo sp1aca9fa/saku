@@ -193,7 +193,7 @@ describe('forward', () => {
     expect(await forwardRecord(db, broken.id)).toEqual([]);
     expect((await forwardRecord(db, version.id)).map((e) => e.date)).toEqual([D[2], D[3]]);
     // Recompute reports it too (it has no record yet), and still checks the good one.
-    const r = await recompute(db, { runId, code: 'c1' });
+    const r = await recompute(db, { runId, code: 'c1', sessions });
     expect(r.checked).toBe(2);
     expect(r.errors).toEqual([
       {
@@ -228,7 +228,7 @@ describe('forward', () => {
         },
         runId,
       });
-      const r = await recompute(db, { runId, code: 'c2' });
+      const r = await recompute(db, { runId, code: 'c2', sessions });
       // Explained: not a difference. Not explained (the correction said otherwise): compared.
       expect(r.differences.map((d) => [d.date, d.now])).toEqual(
         corrected === 'Calm' ? [] : [['2026-01-08', 'Calm']],
@@ -241,7 +241,7 @@ describe('forward', () => {
     const { db, version, runId, store } = await setup();
     await setSetting(db, 'forward_records_from', '2026-01-05');
     await forward(db, { runId, sessions, to: D[3]! });
-    expect(await recompute(db, { runId, code: 'c1' })).toEqual({
+    expect(await recompute(db, { runId, code: 'c1', sessions })).toEqual({
       checked: 2,
       differences: [],
       errors: [],
@@ -251,11 +251,11 @@ describe('forward', () => {
     await store('AAA', 'p', revised);
     await store('AAA', 's', revised);
     await verify(db, { runId: await startRun(db, 'checks'), sessions, mode: 'full', to: D[3]! });
-    const r = await recompute(db, { runId, code: 'c2' });
+    const r = await recompute(db, { runId, code: 'c2', sessions });
     expect(r.differences).toEqual([
       { version: 'Trend', date: '2026-01-08', recorded: 'Risk on', now: 'Calm' },
     ]);
-    expect((await recompute(db, { runId, code: 'c2' })).differences).toEqual([]);
+    expect((await recompute(db, { runId, code: 'c2', sessions })).differences).toEqual([]);
     const [note] = await annotationsOf(db, version.id, 'recomputed');
     expect(note!.detail).toMatchObject({ code: 'c2', signalsDiffer: ['A'] });
     // The admins hear of it; an undelivered alert is tried again on the next run.
@@ -583,7 +583,7 @@ describe('forward', () => {
     ];
     const run = (
       c: ClosedStandIn[],
-      annotated: { date: string; ticker: unknown; standInDate: unknown }[] = [],
+      annotated: { date: string; ticker: unknown; standInDate: unknown; closedAt: unknown }[] = [],
       deps = ['AAA', 'AAA2'],
     ) => standInClosures({ version: 'Trend (v1)', deps, record, closed: c, annotated });
     expect(run([closed]).annotate.map((a) => [a.recorded.date, a.standIn.closeReason])).toEqual([
@@ -591,13 +591,29 @@ describe('forward', () => {
       ['2026-01-08', 'primary will not deliver'],
     ]);
     expect(run([closed]).errors).toEqual([]);
-    // Idempotent per entry date, ticker and stand-in date; only the version's tickers.
+    // Idempotent per entry date, ticker, stand-in date and close; only the version's tickers.
+    const done = { date: '2026-01-07', ticker: 'AAA', standInDate: '2026-01-07' };
     expect(
-      run(
-        [closed],
-        [{ date: '2026-01-07', ticker: 'AAA', standInDate: '2026-01-07' }],
-      ).annotate.map((a) => a.recorded.date),
+      run([closed], [{ ...done, closedAt: closed.closedAt }]).annotate.map((a) => a.recorded.date),
     ).toEqual(['2026-01-08']);
+    // A re-close (its price changed after the first close): the entries since the previous
+    // close and before this one, the recording run's entry not again; the first close's
+    // annotations do not count for it.
+    const again: ClosedStandIn = {
+      ...closed,
+      closedAt: '2026-01-09T22:00:00.000Z',
+      closeReason: 'revised value checked',
+      previousClosedAt: closed.closedAt,
+    };
+    expect(
+      run([closed, again], [{ ...done, closedAt: closed.closedAt }]).annotate.map((a) => [
+        a.recorded.date,
+        a.standIn.closeReason,
+      ]),
+    ).toEqual([
+      ['2026-01-08', 'primary will not deliver'],
+      ['2026-01-09', 'revised value checked'],
+    ]);
     expect(run([closed], [], ['AAA2']).annotate).toEqual([]);
     // A timestamp that is not an instant: the recording run's entry still is, the rest unknown.
     const bad = run([{ ...closed, closedAt: '2026-01-09 12:00:00' }]);
@@ -614,12 +630,13 @@ describe('forward', () => {
   });
 
   it('a closed stand-in is settled: not open, not moved', () => {
-    const row = { resolvedAt: null, closedAt: null, source: 's', close: 119 };
+    const row = { resolvedAt: null };
+    const latest = { source: 's', close: 119 };
     const bar = { standIn: true, source: 's', close: 119 };
     const closedAt = '2026-01-09T12:00:00.000Z';
-    expect(isOpenStandIn(row, bar)).toBe(true);
-    expect(isOpenStandIn({ ...row, closedAt }, bar)).toBe(false);
-    expect(isOpenStandIn({ ...row, resolvedAt: closedAt }, bar)).toBe(false);
+    expect(isOpenStandIn(row, null, bar)).toBe(true);
+    expect(isOpenStandIn(row, latest, bar)).toBe(false);
+    expect(isOpenStandIn({ resolvedAt: closedAt }, null, bar)).toBe(false);
     // Closed, but the canonical bar is no longer that stand-in: open again.
     for (const other of [
       { ...bar, close: 119.5 },
@@ -627,8 +644,10 @@ describe('forward', () => {
       { ...bar, standIn: false },
       undefined,
     ]) {
-      expect(isOpenStandIn({ ...row, closedAt }, other)).toBe(true);
+      expect(isOpenStandIn(row, latest, other)).toBe(true);
     }
+    // The latest close decides: a re-close of the new price settles it again.
+    expect(isOpenStandIn(row, { source: 's', close: 119.5 }, { ...bar, close: 119.5 })).toBe(false);
   });
 
   it('reads only ISO 8601 instants with a zone', () => {
@@ -674,10 +693,23 @@ describe('forward', () => {
 
   it('a prefix of one read holds the same rows as a read up to that date', async () => {
     const { db } = await setup();
-    const { loadRows } = await reader(db);
+    const { loadRows } = await reader(db, sessions);
     const deps = ['AAA', 'AAA2'];
     const all = await loadRows(deps, D[4]!);
     for (const d of D) expect(upTo(all, d)).toEqual(await loadRows(deps, d));
+  });
+
+  it('reads no canonical row on a closed day; one the calendar does not cover is kept (unknown)', async () => {
+    const { db } = await setup();
+    const aaa = (await symbolId(db, 'AAA'))!;
+    // Rows verify no longer builds (requirements 04 "Closed-day bars"), as left from before.
+    await db.insert(schema.bars).values([
+      { symbolId: aaa, date: '2026-01-03', close: 1, adjClose: 1, source: 'p', status: 'red' },
+      { symbolId: aaa, date: '2025-12-31', close: 1, adjClose: 1, source: 'p', status: 'red' },
+    ]);
+    const { loadRows } = await reader(db, sessions);
+    const dates = (await loadRows(['AAA'], D[4]!)).AAA!.map((r) => r.date);
+    expect(dates).toEqual(['2025-12-31', ...D]);
   });
 
   it('a date never sees a later bar', () => {
@@ -775,9 +807,10 @@ describe('forward: red and stand-ins in the lookback', () => {
 
   /**
    * `gap`: a session AAA's primary lacks (a stand-in from `s` fills it); `from`: the index of
-   * AAA's first bar in every source. A second secondary `s2` has a role but no bars.
+   * AAA's first bar in every source; `closed`: bars AAA's primary also has, on closed days. A
+   * second secondary `s2` has a role but no bars.
    */
-  async function graded(o: { gap?: string; from?: number } = {}) {
+  async function graded(o: { gap?: string; from?: number; closed?: RawBar[] } = {}) {
     const db = await testDb();
     await upsertSymbols(db, [
       { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
@@ -799,7 +832,10 @@ describe('forward: red and stand-ins in the lookback', () => {
         await storeRawBars(db, {
           symbolId: (await symbolId(db, ticker))!,
           source,
-          bars: list.filter((b) => !(ticker === 'AAA' && source === 'p' && b.date === o.gap)),
+          bars: [
+            ...list.filter((b) => !(ticker === 'AAA' && source === 'p' && b.date === o.gap)),
+            ...(ticker === 'AAA' && source === 'p' ? (o.closed ?? []) : []),
+          ].sort((a, b) => (a.date < b.date ? -1 : 1)),
           runId: null,
           fetchedAt: 't',
         });
@@ -858,7 +894,7 @@ describe('forward: red and stand-ins in the lookback', () => {
       },
     ]);
     // Recompute reads the same signals: no difference to annotate.
-    expect(await recompute(db, { runId, code: 'c1' })).toMatchObject({
+    expect(await recompute(db, { runId, code: 'c1', sessions })).toMatchObject({
       checked: 1,
       differences: [],
     });
@@ -1018,6 +1054,7 @@ describe('forward: red and stand-ins in the lookback', () => {
       lockDir: mkdtempSync(join(tmpdir(), 'saku-forward-lock-')),
     });
     expect(closed).toMatchObject({ ok: true });
+    const closedAt = (closed as { closedAt: string }).closedAt;
     expect(await unresolvedStandIns(g.db)).toEqual([]);
     // The secondary revises its D0 bar: the day is built from 119.2, not the closed 119.
     const revised = (close: number) =>
@@ -1037,7 +1074,7 @@ describe('forward: red and stand-ins in the lookback', () => {
       {
         ticker: 'AAA',
         date: D0,
-        closed: { source: 's', close: 119 },
+        closed: { source: 's', close: 119, closedAt },
         now: { source: 's', close: 119.2 },
       },
     ]);
@@ -1053,6 +1090,7 @@ describe('forward: red and stand-ins in the lookback', () => {
     // Open again: corrections wait on it and the decision-margin test moves it.
     expect(await unresolvedStandIns(g.db)).toEqual([{ ticker: 'AAA', date: D0 }]);
     expect((await g.record())[0]!.reasons).toContain(`AAA:stand_in_lookback@${D0}`);
+    expect(bar!.standInBand).toEqual(expect.any(Number));
     // The row keeps what was closed.
     const row = async () =>
       (
@@ -1076,6 +1114,64 @@ describe('forward: red and stand-ins in the lookback', () => {
     expect(resolved).toMatchObject({ close: 119, primaryClose: 119, resolvedRunId: late });
     expect(resolved.closedAt).not.toBeNull();
     expect(resolved.deviation).toBeCloseTo(1 - 119 / 119.2, 12);
+  });
+
+  it('a reopened stand-in is margin-tested with the band of the current build, not the closed one', async () => {
+    const D0 = S[19]!;
+    const reopened = async (current: number) => {
+      const g = await graded({ gap: D0 });
+      let past = D0;
+      for (let i = 0; i < 11; i++) past = sessions.after(past);
+      await finishRun(g.db, await startRun(g.db, 'daily', new Date(), past), {
+        ok: true,
+        datesProcessed: [past],
+      });
+      // The band when it was closed (frozen with the row and the close): narrow.
+      await g.db
+        .update(schema.standIns)
+        .set({ band: 0.001 })
+        .where(and(eq(schema.standIns.symbolId, g.ids.AAA), eq(schema.standIns.date, D0)));
+      const closed = await closeStandIn(g.db, {
+        ticker: 'AAA',
+        date: D0,
+        username: 'alex',
+        reason: 'primary will not deliver',
+        sessions,
+        lockDir: mkdtempSync(join(tmpdir(), 'saku-forward-lock-')),
+      });
+      expect(closed).toMatchObject({ ok: true });
+      await storeRawBars(g.db, {
+        symbolId: g.ids.AAA,
+        source: 's',
+        bars: g
+          .series(S.map((_, i) => 100 + i))
+          .map((b) =>
+            b.date === D0 ? { ...b, open: 119.2, high: 119.2, low: 119.2, close: 119.2 } : b,
+          ),
+        runId: null,
+        fetchedAt: 't2',
+      });
+      const again = await startRun(g.db, 'daily', new Date(Date.now() + 60_000));
+      await verify(g.db, { runId: again, sessions, mode: 'full', to: S.at(-1)! });
+      const [bar] = await g.db.select().from(schema.bars).where(g.bar('AAA', D0));
+      // This build's band and basis are stored with the canonical stand-in bar.
+      expect(bar).toMatchObject({ standIn: true, close: 119.2 });
+      expect(bar!.standInBand).toEqual(expect.any(Number));
+      expect(bar!.standInBasis).toEqual(expect.any(String));
+      // The current build's band, set here to what the test needs.
+      await g.db.update(schema.bars).set({ standInBand: current }).where(g.bar('AAA', D0));
+      return (await g.record())[0]!;
+    };
+    expect(await reopened(0.001)).toMatchObject({
+      allocation: 'Risk on',
+      dataStatus: 'yellow',
+      reasons: [`AAA:stand_in_lookback@${D0}`],
+    });
+    expect(await reopened(0.05)).toMatchObject({
+      allocation: 'Safe state',
+      dataStatus: 'red',
+      reasons: [`AAA:stand_in_lookback@${D0}`, 'AAA:decision_margin'],
+    });
   });
 
   it('a stand-in a later run refuses: its canonical bar is removed, the day and the days after it are red', async () => {
@@ -1153,6 +1249,38 @@ describe('forward: red and stand-ins in the lookback', () => {
       dataStatus: 'red',
       reasons: [`AAA:lookback_missing@${S[18]}`],
     });
+  });
+
+  it('a primary bar on a closed day in the window: not read, so the normal decision (its day stays red)', async () => {
+    // Saturday 01-31, between S[19] and T, far above both (were it read, T would be below its
+    // 2-day SMA: Calm, and its red grade in the window the safe state).
+    const saturday = { ...series([1000])[0]!, date: '2026-01-31' };
+    const { db, ids, record } = await graded({ closed: [saturday] });
+    expect(await record()).toEqual([
+      { date: T, allocation: 'Risk on', dataStatus: 'green', safeStateApplied: false, reasons: [] },
+    ]);
+    const gradedSat = await db
+      .select()
+      .from(schema.dataHealth)
+      .where(
+        and(eq(schema.dataHealth.symbolId, ids.AAA), eq(schema.dataHealth.date, '2026-01-31')),
+      );
+    expect(gradedSat.map((h) => h.status)).toEqual(['red']);
+  });
+
+  it('a canonical row stored on a closed day in the window (left from before) is not read', async () => {
+    const { db, ids, record } = await graded();
+    await db.insert(schema.bars).values({
+      symbolId: ids.AAA,
+      date: '2026-01-31',
+      close: 1000,
+      adjClose: 10,
+      source: 'p',
+      status: 'red',
+    });
+    expect(await record()).toEqual([
+      { date: T, allocation: 'Risk on', dataStatus: 'green', safeStateApplied: false, reasons: [] },
+    ]);
   });
 
   it("a window session before the ticker's first canonical bar counts for nothing", async () => {

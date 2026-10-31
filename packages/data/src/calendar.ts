@@ -52,6 +52,17 @@ export class Sessions {
   }
 
   /**
+   * Whether the market is known to be closed on `date` (requirements 04 "Closed-day bars"): a
+   * date inside the calendar that is not a session. Outside the calendar it is unknown, so false:
+   * a bar there is never left out on a guess (it is kept and checked as before, and the checks
+   * refuse a date they cannot place).
+   */
+  closedOn(date: TradingDate): boolean {
+    if (date < this.calendar.validFrom || date > this.calendar.validTo) return false;
+    return !this.isSession(date);
+  }
+
+  /**
    * How the session on `date` closes (requirements 04, Calendars: half-days from the table):
    * `early` at the table's early-close time, `regular`, or `unknown` outside the range the table's
    * early-close list is complete for (or with no list). Unknown is never read as a full day.

@@ -980,17 +980,32 @@ export async function fxPointInTime(
 
 export type CanonicalRow = typeof bars.$inferSelect;
 
-/** A symbol's canonical bars (primary or stand-in) up to a date, oldest first. */
+/** The market calendar as canonical reads need it (`Sessions` from `@saku/data`). */
+export interface ClosedDays {
+  /** True only for a date the calendar covers and has no session on (outside it: false). */
+  closedOn(date: TradingDate): boolean;
+}
+
+/**
+ * A symbol's canonical bars (primary or stand-in) up to a date, oldest first: the one reader of
+ * the series signals, equity, the forward record, layer E and parity read. A stored row on a day
+ * the market was closed is left out (requirements 04 "Closed-day bars": signals never read it);
+ * verify no longer builds such rows and removes them inside the span it rebuilds, so this guards
+ * the rows it does not rebuild (before the primary's first bar, a symbol without primary bars).
+ * A date the calendar does not cover is unknown, so kept (never a silent exclusion).
+ */
 export async function canonicalBars(
   db: Db,
   symbolId: number,
   to: TradingDate,
+  calendar: ClosedDays,
 ): Promise<CanonicalRow[]> {
-  return db
+  const rows = await db
     .select()
     .from(bars)
     .where(and(eq(bars.symbolId, symbolId), lte(bars.date, to)))
     .orderBy(asc(bars.date));
+  return rows.filter((r) => !calendar.closedOn(r.date));
 }
 
 /** The latest health grade of a symbol on a date (null symbol: the day overall). */

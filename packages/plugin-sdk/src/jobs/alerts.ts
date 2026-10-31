@@ -46,6 +46,7 @@ export type AlertType =
   | 'integrity'
   | 'stand_in_corrected'
   | 'stand_in_closed'
+  | 'stand_in_reopened'
   | 'disk_space';
 const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red'];
 
@@ -523,6 +524,51 @@ export function sendIntegrityFailed(
   });
 }
 
+/**
+ * A stand-in an admin closed whose day the checks now build from another price, or refuse
+ * (requirements 04 stand-in rule 5, verify's `closedChanged`): to the admins once per close
+ * and new price (after the A1 gate, like every alert about data). It is open again: checked as
+ * an unconfirmed price, holding corrections back, until an admin checks the new price and closes
+ * it again (a refused one waits for the primary).
+ */
+export function sendStandInReopened(
+  db: Db,
+  o: AlertOptions & {
+    ticker: string;
+    standInDate: TradingDate;
+    closed: { source: string; close: number; closedAt: string };
+    now: { source: string; close: number } | null;
+  },
+): Promise<AlertSummary> {
+  const values = {
+    ticker: o.ticker,
+    date: o.standInDate,
+    closed: String(o.closed.close),
+    closedSource: o.closed.source,
+  };
+  return sendAdminAlert(db, {
+    ...o,
+    date: o.standInDate,
+    // Once per close and new price: a re-close that changes again is told again.
+    subject:
+      `stand_in_reopened:${o.ticker}@${o.standInDate}#${o.closed.closedAt}:` +
+      (o.now ? `${o.now.source}:${o.now.close}` : 'refused'),
+    type: 'stand_in_reopened',
+    lines: (t) => [
+      { keep: t('alerts.standInReopened.title', values) },
+      {
+        keep: o.now
+          ? t('alerts.standInReopened.body', {
+              ...values,
+              now: String(o.now.close),
+              source: o.now.source,
+            })
+          : t('alerts.standInReopened.refused', values),
+      },
+    ],
+  });
+}
+
 /** A testfol parity case outside a tolerance or unable to run (layer E, requirements 13). */
 export function sendParityFailed(
   db: Db,
@@ -986,21 +1032,33 @@ export async function sendStandInClosures(db: Db, o: AlertOptions): Promise<Stan
   const summary: StandInAlertSummary = { sent: 0, failed: [], errors: [] };
   if (o.drill) return summary;
   const owners: Owners = new Map();
-  // Each closed stand-in as it is now: resolved after all, open again (its canonical bar changed)
-  // or settled.
-  const states = new Map<string, 'settled' | 'resolved' | 'changed'>();
+  // Each close as its stand-in is now: resolved after all; settled (the latest close, still the
+  // canonical bar's price); else changed (open again, or closed again since). A close not found
+  // here is never told with a guessed state: its annotation goes to the admins as unreadable.
+  // The subject of a first close is the one used before re-closes existed (no repeat on upgrade).
+  const states = new Map<string, { state: 'settled' | 'resolved' | 'changed'; subject: string }>();
   for (const r of await standInList(db)) {
-    if (r.closedAt === null) continue;
-    const state =
-      r.resolvedAt !== null ? 'resolved' : isOpenStandIn(r, r.canonical) ? 'changed' : 'settled';
-    states.set(`${r.ticker}@${r.date}`, state);
+    r.closes.forEach((c, i) => {
+      const latest = i === r.closes.length - 1;
+      const state =
+        r.resolvedAt !== null
+          ? 'resolved'
+          : latest && !isOpenStandIn(r, r.latestClose, r.canonical)
+            ? 'settled'
+            : 'changed';
+      const subject = `${r.ticker}@${r.date}${i === 0 ? '' : `#${c.closedAt}`}`;
+      states.set(`${r.ticker}@${r.date}#${c.closedAt}`, { state, subject });
+    });
   }
   for (const version of await allVersions(db)) {
     const notes = await annotationsOf(db, version.id, 'stand_in_closed');
     if (notes.length === 0) continue;
     const last = await lastEntry(db, version.id);
     const health = last && { status: last.dataStatus, date: last.date };
-    const groups = new Map<string, { detail: StandInClosedDetail; days: TradingDate[] }>();
+    const groups = new Map<
+      string,
+      { detail: StandInClosedDetail; days: TradingDate[]; first: { id: number; date: TradingDate } }
+    >();
     for (const a of notes) {
       const detail = standInClosedDetail(a.detail, a.date);
       if (!detail) {
@@ -1013,15 +1071,22 @@ export async function sendStandInClosures(db: Db, o: AlertOptions): Promise<Stan
         );
         continue;
       }
-      const k = `${detail.ticker}@${detail.standInDate}`;
-      const g = groups.get(k) ?? { detail, days: [] };
+      // One message per close: a re-close is a close of its own.
+      const k = `${detail.ticker}@${detail.standInDate}#${detail.closedAt}`;
+      const g = groups.get(k) ?? { detail, days: [], first: { id: a.id, date: a.date } };
       if (!g.days.includes(a.date)) g.days.push(a.date);
       groups.set(k, g);
     }
     for (const [k, g] of groups) {
       g.days.sort();
+      const known = states.get(k);
+      if (!known) {
+        await reportUnreadable(db, o, summary, { version, ...g.first }, 'stand_in_closed');
+        continue;
+      }
+      const { state } = known;
       const key = {
-        subject: `stand_in_closed:${version.id}:${k}`,
+        subject: `stand_in_closed:${version.id}:${known.subject}`,
         date: g.detail.standInDate,
         type: 'stand_in_closed' as const,
       };
@@ -1032,7 +1097,7 @@ export async function sendStandInClosures(db: Db, o: AlertOptions): Promise<Stan
             name: version.name,
             detail: g.detail,
             days: g.days,
-            state: states.get(k) ?? 'settled',
+            state,
             ...(health && { health }),
           },
           roomOn(o, channel, t),

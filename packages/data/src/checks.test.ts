@@ -2,6 +2,8 @@ import { type RawBar, priceReturn, totalReturn } from '@saku/core';
 import { describe, expect, it } from 'vitest';
 import { Sessions } from './calendar';
 import {
+  CLOSED_DAY_EVENT,
+  NOT_A_SESSION,
   adjReturnCheck,
   checkAsRead,
   fxCheck,
@@ -81,6 +83,34 @@ describe('layer A', () => {
       '2026-01-05 yellow',
     );
     expect(statuses(layerA(bars, opts), 'bar_valid')[2]).toBe('2026-01-10 red'); // a Saturday
+  });
+
+  it('a closed-day bar is red and not in the series: moves run from the real session before', () => {
+    // Friday 10, a Saturday bar equal to Monday's close, Monday 13 (+30%).
+    const rs = layerA([bar('2026-01-09', 10), bar('2026-01-10', 13), bar('2026-01-12', 13)], opts);
+    expect(rs.find((r) => r.date === '2026-01-10')).toMatchObject({
+      check: 'bar_valid',
+      status: 'red',
+      message: NOT_A_SESSION,
+    });
+    // Only `bar_valid` on the Saturday; Monday is compared with Friday, never with the Saturday.
+    expect(rs.filter((r) => r.date === '2026-01-10')).toHaveLength(1);
+    expect(statuses(rs, 'large_move')).toEqual(['2026-01-12 yellow']);
+    expect(statuses(rs, 'unchanged_close')).toEqual(['2026-01-12 green']);
+    expect(statuses(rs, 'missing_day')).toEqual([]);
+  });
+
+  it('a closed-day bar with a dividend or split says so (its event is in no series bar)', () => {
+    for (const extra of [{ divCash: 0.5 }, { splitFactor: 2 }]) {
+      const rs = layerA([bar('2026-01-09', 10), bar('2026-01-10', 10, extra)], opts);
+      expect(rs.find((r) => r.date === '2026-01-10')?.message).toBe(
+        `${NOT_A_SESSION}; ${CLOSED_DAY_EVENT}`,
+      );
+    }
+  });
+
+  it('a bar outside the calendar is not guessed: the check throws', () => {
+    expect(() => layerA([bar('2027-01-04', 10)], opts)).toThrow(/outside/);
   });
 });
 

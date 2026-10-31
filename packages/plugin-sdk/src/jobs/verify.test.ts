@@ -1,5 +1,5 @@
 import type { RawBar } from '@saku/core';
-import { Sessions } from '@saku/data';
+import { NOT_A_SESSION, Sessions } from '@saku/data';
 import {
   schema,
   seedSourceRoles,
@@ -175,24 +175,39 @@ describe('verify', () => {
     expect(canonical.map((b) => b.status).sort()).toEqual(['red', 'yellow']);
   });
 
-  it('grades a primary bar on a day that is not a session red, never leaving it ungraded', async () => {
+  it('grades a primary bar on a day that is not a session red, and builds no canonical bar for it', async () => {
     const { db, store } = await setup();
     // A Saturday bar from the primary, before its sessions.
     await store('AAA', 'p', [{ ...bars([99])[0]!, date: '2026-01-03' }]);
     const runId = await startRun(db, 'weekly');
     await verify(db, { runId, sessions, mode: 'full', to: '2026-01-08' });
     const aaa = (await symbolId(db, 'AAA'))!;
-    const [bar] = await db
+    // Requirements 04 "Closed-day bars": out of the canonical series; the raw bar stays.
+    const canonical = await db
       .select()
       .from(schema.bars)
       .where(and(eq(schema.bars.symbolId, aaa), eq(schema.bars.date, '2026-01-03')));
-    expect(bar!.status).toBe('red');
+    expect(canonical).toEqual([]);
+    const raw = await db
+      .select()
+      .from(schema.barsRaw)
+      .where(and(eq(schema.barsRaw.symbolId, aaa), eq(schema.barsRaw.date, '2026-01-03')));
+    expect(raw).toHaveLength(1);
+    // Its date is still graded red, with the result that says why.
     const [row] = await db
       .select()
       .from(schema.dataHealth)
       .where(and(eq(schema.dataHealth.symbolId, aaa), eq(schema.dataHealth.date, '2026-01-03')));
     expect(row).toMatchObject({ status: 'red' });
     expect(row!.reasons).toContain('A.bar_valid@p');
+    const [result] = await db
+      .select()
+      .from(schema.checkResults)
+      .where(
+        and(eq(schema.checkResults.symbolId, aaa), eq(schema.checkResults.date, '2026-01-03')),
+      );
+    expect(result).toMatchObject({ layer: 'A', checkName: 'bar_valid', status: 'red' });
+    expect(result!.message).toBe(NOT_A_SESSION);
     // No canonical bar is left ungraded; the coverage starts at the first bar.
     const ungraded = await db.select().from(schema.bars).where(isNull(schema.bars.status));
     expect(ungraded).toEqual([]);
@@ -201,6 +216,171 @@ describe('verify', () => {
       .from(schema.healthCoverage)
       .where(eq(schema.healthCoverage.symbolId, aaa));
     expect(coverage).toMatchObject({ fromDate: '2026-01-03', toDate: '2026-01-08' });
+  });
+
+  describe('a primary bar on a closed day between sessions (requirements 04 "Closed-day bars")', () => {
+    // Friday, Monday, Tuesday; the closed day a Saturday or (second calendar) the Monday.
+    const days = ['2026-01-09', '2026-01-12', '2026-01-13'];
+    const holiday = new Sessions({ ...sessions.calendar, holidays: ['2026-01-12'] });
+    const bar = (date: string, close: number, extra: Partial<RawBar> = {}): RawBar => ({
+      date,
+      open: close,
+      high: close,
+      low: close,
+      close,
+      closeIsSplitAdjusted: false,
+      volume: 1000,
+      divCash: 0,
+      splitFactor: 1,
+      ...extra,
+    });
+    /**
+     * AAA +1% then +1%; AAA2 2x it; the secondary agrees. `extra`: the primary's added bars;
+     * `drop`: a date the primary has no AAA bar for.
+     */
+    async function graded(cal: Sessions, extra: RawBar[], on = days, drop?: string) {
+      const db = await testDb();
+      await upsertSymbols(db, [
+        { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
+        {
+          ticker: 'AAA2',
+          tier: 0,
+          assetClass: 'equity',
+          currency: 'USD',
+          leverageFactor: 2,
+          underlying: 'AAA',
+        },
+      ]);
+      await seedSourceRoles(db, [
+        { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },
+        { key: 's', dataKind: 'bars', suggestedRole: 'secondary' },
+      ]);
+      const store = async (ticker: string, source: string, list: RawBar[]) =>
+        storeRawBars(db, {
+          symbolId: (await symbolId(db, ticker))!,
+          source,
+          bars: list.sort((a, b) => (a.date < b.date ? -1 : 1)),
+          runId: null,
+          fetchedAt: 't',
+        });
+      const aaa = [100, 101, 102.01].map((c, i) => bar(on[i]!, c));
+      const aaa2 = [50, 51, 52.02].map((c, i) => bar(on[i]!, c));
+      await store('AAA', 'p', [...aaa.filter((b) => b.date !== drop), ...extra]);
+      await store('AAA', 's', aaa);
+      await store('AAA2', 'p', aaa2);
+      await store('AAA2', 's', aaa2);
+      const runId = await startRun(db, 'weekly');
+      const summary = await verify(db, { runId, sessions: cal, mode: 'full', to: on.at(-1)! });
+      const canonical = (
+        await db
+          .select()
+          .from(schema.bars)
+          .orderBy(asc(schema.bars.symbolId), asc(schema.bars.date))
+      ).map(({ symbolId: id, date, close, adjClose, source, standIn, status }) => ({
+        id,
+        date,
+        close,
+        adjClose,
+        source,
+        standIn,
+        status,
+      }));
+      const results = (await db.select().from(schema.checkResults)).map(
+        (r) => `${r.symbolId} ${r.layer} ${r.checkName} ${r.source} ${r.date} ${r.status}`,
+      );
+      const health = (await db.select().from(schema.dataHealth)).map(
+        (h) => `${h.symbolId} ${h.date} ${h.status} ${h.reasons.join(',')}`,
+      );
+      const summaries = (await db.select().from(schema.checkSummaries)).map(
+        (x) => `${x.layer} ${x.checkName} ${x.checked} ${x.passed}`,
+      );
+      return { db, summary, canonical, results, health, summaries };
+    }
+
+    it('the series and every other grade are those of the run without it', async () => {
+      const clean = await graded(sessions, []);
+      // A Saturday bar far off both neighbours (were it in the series, Monday's move and the
+      // leverage check across it would read it).
+      const sat = await graded(sessions, [bar('2026-01-10', 150)]);
+      expect(sat.canonical).toEqual(clean.canonical);
+      expect(sat.canonical.some((b) => b.date === '2026-01-10')).toBe(false);
+      // The Saturday's own findings and grades are added; nothing else changes.
+      const notSat = (x: string) => !x.includes(' 2026-01-10 ');
+      expect(sat.results.filter(notSat)).toEqual(clean.results);
+      expect(sat.health.filter(notSat)).toEqual(clean.health);
+      expect(sat.results.filter((x) => !notSat(x))).toEqual(['1 A bar_valid p 2026-01-10 red']);
+      expect(sat.health.filter((x) => !notSat(x)).sort()).toEqual([
+        '1 2026-01-10 red A.bar_valid@p,single_source',
+        'null 2026-01-10 red AAA',
+      ]);
+      // Monday's layer C ran against Friday (the underlying's real session before).
+      expect(clean.summaries).toContain('C leverage_track 2 2');
+      expect(sat.summaries.filter((x) => !x.startsWith('A bar_valid'))).toEqual(
+        clean.summaries.filter((x) => !x.startsWith('A bar_valid')),
+      );
+    });
+
+    it('on a holiday: the same, and the session it may have shifted from keeps its own grade', async () => {
+      // The calendar closes Monday 01-12: the primary's bars for it are on a closed day; the
+      // secondaries are dated Friday, Tuesday and Wednesday.
+      const on = ['2026-01-09', '2026-01-13', '2026-01-14'];
+      // A bar on the holiday besides the real ones: as on the Saturday.
+      const clean = await graded(holiday, [], on);
+      const extra = await graded(holiday, [bar('2026-01-12', 101)], on);
+      expect(extra.canonical).toEqual(clean.canonical);
+      expect(extra.results).toContain('1 A bar_valid p 2026-01-12 red');
+      expect(extra.health).toContain('null 2026-01-12 red AAA');
+      const notHoliday = (x: string) => !x.includes(' 2026-01-12 ');
+      expect(extra.results.filter(notHoliday)).toEqual(clean.results);
+      expect(extra.health.filter(notHoliday)).toEqual(clean.health);
+      // Tuesday's primary bar dated Monday (shifted onto the holiday): the holiday is red, no
+      // canonical bar on it, and Tuesday is graded as a day the primary lacks (the secondary
+      // stands in: yellow, named), never green and never built from the shifted bar.
+      const shifted = await graded(holiday, [bar('2026-01-12', 101)], on, '2026-01-13');
+      expect(shifted.canonical.some((b) => b.date === '2026-01-12')).toBe(false);
+      expect(shifted.health).toContain('null 2026-01-12 red AAA');
+      expect(shifted.health).toContain('1 2026-01-13 yellow stand_in@s,single_source');
+      expect(shifted.canonical.find((b) => b.id === 1 && b.date === '2026-01-13')).toMatchObject({
+        source: 's',
+        standIn: true,
+      });
+    });
+
+    it('removes a canonical row stored on a closed day before (logged), keeping the raw bar', async () => {
+      const first = await graded(sessions, [bar('2026-01-10', 150)]);
+      const aaa = (await symbolId(first.db, 'AAA'))!;
+      // As an earlier version stored it: a canonical row on the Saturday.
+      await first.db.insert(schema.bars).values({
+        symbolId: aaa,
+        date: '2026-01-10',
+        close: 150,
+        adjClose: 1,
+        source: 'p',
+        status: 'red',
+      });
+      const runId = await startRun(first.db, 'weekly');
+      const again = await verify(first.db, { runId, sessions, mode: 'full', to: days.at(-1)! });
+      expect(again.removedCanonical).toMatchObject([
+        { ticker: 'AAA', date: '2026-01-10', source: 'p', close: 150, status: 'red' },
+      ]);
+      const left = await first.db
+        .select()
+        .from(schema.bars)
+        .where(and(eq(schema.bars.symbolId, aaa), eq(schema.bars.date, '2026-01-10')));
+      expect(left).toEqual([]);
+      const raw = await first.db
+        .select()
+        .from(schema.barsRaw)
+        .where(and(eq(schema.barsRaw.symbolId, aaa), eq(schema.barsRaw.date, '2026-01-10')));
+      expect(raw).toHaveLength(1);
+    });
+
+    it('a bar outside the calendar is not left out on a guess: the run refuses it', async () => {
+      const short = new Sessions({ ...sessions.calendar, validFrom: '2026-01-12' });
+      await expect(graded(short, [], ['2026-01-09', '2026-01-12', '2026-01-13'])).rejects.toThrow(
+        /outside/,
+      );
+    });
   });
 
   it('grades the cash series freshness on the run date', async () => {
@@ -677,7 +857,7 @@ describe('verify', () => {
 
     // The observed premium per fund and issuer source (every source with records). AAA's 8th is
     // graded red (a secondary's close is off): left out.
-    const stats = await issuerStats(db, { from: '2026-01-01', to: '2026-01-08' });
+    const stats = await issuerStats(db, { from: '2026-01-01', to: '2026-01-08', sessions });
     expect(stats.toleranceUnmatched).toEqual(['ZZZ']);
     expect(stats.rows.map((r) => `${r.ticker} ${r.source} ${r.days}`)).toEqual([
       'AAA iss 3',
@@ -688,11 +868,12 @@ describe('verify', () => {
     expect(stats.rows[0]!.median).toBe(0);
     expect(stats.rows[0]!.tolerance).toBe(0.01);
     expect(stats.rows[1]!.median).toBeCloseTo(0.5, 12);
-    expect((await issuerStats(db, { from: '2026-01-07', to: '2026-01-07' })).rows).toMatchObject([
-      { days: 1 },
-      { days: 1 },
-    ]);
-    expect((await issuerStats(db, { from: '2026-02-01', to: '2026-02-08' })).rows).toEqual([
+    expect(
+      (await issuerStats(db, { from: '2026-01-07', to: '2026-01-07', sessions })).rows,
+    ).toMatchObject([{ days: 1 }, { days: 1 }]);
+    expect(
+      (await issuerStats(db, { from: '2026-02-01', to: '2026-02-08', sessions })).rows,
+    ).toEqual([
       {
         ticker: 'AAA',
         source: 'iss',
@@ -754,7 +935,8 @@ describe('verify', () => {
     // The 6th (XXX) has no result, never a green one; the 7th and 8th (USD) are compared.
     expect(premium.map((r) => r.date)).toEqual(['2026-01-07', '2026-01-08']);
     expect(premium[0]!.observed! / premium[0]!.expected! - 1).toBeCloseTo(0.1, 12);
-    const row = (await issuerStats(db, { from: '2026-01-01', to: '2026-01-08' })).rows[0]!;
+    const row = (await issuerStats(db, { from: '2026-01-01', to: '2026-01-08', sessions }))
+      .rows[0]!;
     expect(row.otherCurrency).toEqual({ XXX: { navs: 1, distributions: 0 } });
     // The 5th and 7th compared, the 8th graded red (a secondary's close is off) left out; the XXX
     // NAV (a day kept) is neither a premium nor a day left out.
@@ -780,7 +962,7 @@ describe('verify', () => {
       .where(and(eq(schema.bars.date, '2026-01-08'), eq(schema.bars.standIn, true)));
     expect(standIn).toHaveLength(1);
     const period = { from: '2026-01-06', to: '2026-01-08' };
-    const before = (await issuerStats(db, period)).rows[0]!;
+    const before = (await issuerStats(db, { ...period, sessions })).rows[0]!;
     // The 5th is before the period and the 8th a stand-in: the 6th and 7th count.
     expect(before).toMatchObject({ days: 2, leftOut: { standIn: 1, red: 0 } });
     // Another record before the period changes nothing.
@@ -790,7 +972,7 @@ describe('verify', () => {
       records: [{ date: '2026-01-02', nav: 1, currency: 'USD' }],
       fetchedAt: 't2',
     });
-    expect((await issuerStats(db, period)).rows[0]).toEqual(before);
+    expect((await issuerStats(db, { ...period, sessions })).rows[0]).toEqual(before);
   });
 
   it('compares only what an issuer source declares it publishes', async () => {
@@ -820,9 +1002,13 @@ describe('verify', () => {
     expect(await checks('iss2')).toEqual(['distribution_match']);
     // The premium statistics honor them too: no row for the source declaring no NAV.
     const period = { from: '2026-01-01', to: '2026-01-08' };
-    expect((await issuerStats(db, period)).rows.map((r) => r.source)).toEqual(['iss', 'iss2']);
+    expect((await issuerStats(db, { ...period, sessions })).rows.map((r) => r.source)).toEqual([
+      'iss',
+      'iss2',
+    ]);
     const declared = await issuerStats(db, {
       ...period,
+      sessions,
       publishes: { iss: { nav: true }, iss2: { distributions: true } },
     });
     expect(declared.rows.map((r) => r.source)).toEqual(['iss']);

@@ -738,6 +738,63 @@ describe('fault injection (layer F)', () => {
     });
   }
 
+  describe('a bar dated on a closed day (requirements 04 "Closed-day bars")', () => {
+    /** The primary's SPY bar for `from` dated `to` instead. */
+    const shifted =
+      (from: string, to: string): Fault =>
+      (t, bars) =>
+        t !== 'SPY'
+          ? bars
+          : bars
+              .map((b) => (b.date === from ? { ...b, date: to } : b))
+              .sort((a, b) => (a.date < b.date ? -1 : 1));
+    const graded = async (db: Db, date: string, symbol: boolean) =>
+      (await db.select().from(schema.dataHealth).where(eq(schema.dataHealth.date, date)))
+        .filter((h) => (h.symbolId !== null) === symbol)
+        .map((h) => `${h.status} ${h.reasons.join(',')}`);
+
+    for (const to of ['2026-01-17', '2026-01-10']) {
+      it(`the target's bar dated on a closed day (${to}): never green, graded as a day the primary lacks`, async () => {
+        // The run for the target has no primary bar for SPY on it: the day the bar shifted from
+        // keeps its own grading (04 "Primary missing, secondary present"): the two secondaries
+        // agree and no signal can flip within their band, so they stand in, yellow and named.
+        // A closed day before the target is graded red and stored, never built into the series
+        // (so it does not make the target red: no signal reads it).
+        const { db, today, reasons } = await run(sources(shifted(TARGET, to)));
+        expect(today).toMatchObject({ dataStatus: 'yellow', safeStateApplied: false });
+        expect(reasons).toEqual(['SPY:stand_in@s1']);
+        const spy = (await symbolId(db, 'SPY'))!;
+        const canonical = await db.select().from(schema.bars).where(eq(schema.bars.symbolId, spy));
+        expect(canonical.some((b) => b.date === to)).toBe(false);
+        if (to < TARGET) {
+          expect(await graded(db, to, true)).toContainEqual(
+            expect.stringMatching(/^red A\.bar_valid@p/),
+          );
+        }
+      });
+    }
+
+    it('an earlier session re-dated onto a closed day (its bar already stored): only that day red', async () => {
+      // The daily response dates Monday 01-12's bar Saturday 01-10; Monday's bar from the
+      // bootstrap stays (raw bars are never removed). The Saturday is graded red and stored, but
+      // no signal reads it (no canonical bar, and a closed day is no session of the re-check
+      // window): the target's decision is the clean one.
+      const { db, today } = await run(sources(shifted('2026-01-12', '2026-01-10')));
+      expect(await graded(db, '2026-01-10', true)).toContainEqual(
+        expect.stringMatching(/^red A\.bar_valid@p/),
+      );
+      expect(await graded(db, '2026-01-10', false)).toContainEqual(expect.stringMatching(/^red /));
+      const spy = (await symbolId(db, 'SPY'))!;
+      const canonical = await db.select().from(schema.bars).where(eq(schema.bars.symbolId, spy));
+      expect(canonical.some((b) => b.date === '2026-01-10')).toBe(false);
+      expect(today).toMatchObject({
+        dataStatus: 'green',
+        allocation: 'Risk on',
+        safeStateApplied: false,
+      });
+    });
+  });
+
   it('a day with a single source is never green: yellow, with the warning', async () => {
     const { result, today, reasons, alert } = await run([
       source('p'),

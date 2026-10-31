@@ -11,7 +11,9 @@ import {
   setChannelEnabled,
   setSetting,
   startRun,
+  upsertSymbols,
 } from '@saku/db';
+import { and, eq } from 'drizzle-orm';
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
@@ -35,6 +37,7 @@ import {
   sendRecomputeDiffers,
   sendRevisions,
   sendStandInClosures,
+  sendStandInReopened,
   sendStandInCorrections,
   sendStrategyAlerts,
   sendUpdateFailed,
@@ -1683,9 +1686,50 @@ describe('stand-in close alerts (requirements 04, the stand-in rule 5)', () => {
       runId: null,
     });
 
+  /** AAA's stand-in on DAY, closed at CLOSED_AT, still the canonical bar's price. */
+  const closedStandIn = async (db: TestDb, admin: string) => {
+    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    const [{ id }] = (await db
+      .select({ id: schema.symbols.id })
+      .from(schema.symbols)
+      .where(eq(schema.symbols.ticker, 'AAA'))) as [{ id: number }];
+    await db.insert(schema.standIns).values({
+      symbolId: id,
+      date: DAY,
+      source: 's',
+      close: 100,
+      band: 0.001,
+      basis: 'index',
+      createdAt: '2026-01-05T21:30:00.000Z',
+    });
+    await db
+      .insert(schema.bars)
+      .values({ symbolId: id, date: DAY, close: 100, source: 's', standIn: true });
+    const c = { symbolId: id, date: DAY, source: 's', close: 100, band: 0.001, basis: 'index' };
+    await db.insert(schema.standInCloses).values({
+      ...c,
+      closedBy: admin,
+      reason: 'primary will not deliver',
+      closedAt: CLOSED_AT,
+    });
+    return {
+      id,
+      /** A later close (the price changed, then closed again). */
+      reclose: (closedAt: string, close: number) =>
+        db.insert(schema.standInCloses).values({
+          ...c,
+          close,
+          closedBy: admin,
+          reason: 'revised value checked',
+          closedAt,
+        }),
+    };
+  };
+
   it('one message per version and closed stand-in, to the owner, once (EN and JA)', async () => {
     for (const language of [null, 'ja']) {
-      const { db, version, day } = await setup(language);
+      const { db, owner, version, day } = await setup(language);
+      await closedStandIn(db, owner);
       await day(DAY, 'Calm', { status: 'yellow', reasons: ['AAA:stand_in@s'] });
       await day('2026-01-06', 'Calm');
       await note(db, version.id, DAY);
@@ -1798,6 +1842,82 @@ describe('stand-in close alerts (requirements 04, the stand-in rule 5)', () => {
     expect(describeReason(t, 'AAA:stand_in_closed_changed@s')).toBe(
       'AAA: a stand-in an admin had closed now has another price (from s); it is checked again as an unconfirmed price',
     );
+  });
+
+  it('a re-close is a close of its own: its own message', async () => {
+    const { db, owner, version, day } = await setup();
+    const { id, reclose } = await closedStandIn(db, owner);
+    await day(DAY, 'Calm', { status: 'yellow', reasons: ['AAA:stand_in@s'] });
+    await note(db, version.id, DAY);
+    const { notifier, sent } = fakeNotifier();
+    expect((await sendStandInClosures(db, options(notifier, DAY))).sent).toBe(1);
+    // The price changed and an admin closed the new one.
+    const AGAIN = '2026-02-03T10:00:00.000Z';
+    await db
+      .update(schema.bars)
+      .set({ close: 100.4 })
+      .where(and(eq(schema.bars.symbolId, id), eq(schema.bars.date, DAY)));
+    await reclose(AGAIN, 100.4);
+    await day('2026-01-06', 'Calm');
+    await note(db, version.id, '2026-01-06', { closedAt: AGAIN, reason: 'revised value checked' });
+    expect((await sendStandInClosures(db, options(notifier, '2026-01-06'))).sent).toBe(1);
+    expect(sent[1]!.text).toContain('Reason given: revised value checked');
+    expect(sent[1]!.text).toContain('From now on');
+    expect((await db.select().from(schema.alertsSent)).map((r) => r.subject)).toEqual([
+      `stand_in_closed:${version.id}:AAA@${DAY}`,
+      `stand_in_closed:${version.id}:AAA@${DAY}#${AGAIN}`,
+    ]);
+  });
+
+  it('a closed stand-in with another price: the admins, after the gate, once per close and price', async () => {
+    const { db, owner } = await setup();
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const { notifier, sent } = fakeNotifier();
+    const reopened = (now: { source: string; close: number } | null, closedAt = CLOSED_AT) =>
+      sendStandInReopened(db, {
+        ...options(notifier, '2026-02-02'),
+        ticker: 'AAA',
+        standInDate: DAY,
+        closed: { source: 's', close: 100, closedAt },
+        now,
+      });
+    // Before the A1 gate: nothing (logged by the run only).
+    expect((await reopened({ source: 's', close: 100.4 })).sent).toBe(0);
+    await setSetting(db, 'forward_records_from', DAY);
+    expect((await reopened({ source: 's', close: 100.4 })).sent).toBe(1);
+    expect(sent[0]!.target).toBe('ops');
+    expect(sent[0]!.text.split('\n').slice(0, 2)).toEqual([
+      `Saku: the closed stand-in of AAA on ${DAY} has another price`,
+      `An admin closed the stand-in at 100 from s; the checks now build the day from 100.4 from s. It is open again: checked as an unconfirmed price and holding corrections back. Check the new price, then close it again: pnpm sources stand-in close AAA ${DAY} --reason "<text>" --user <admin>.`,
+    ]);
+    // Once per close and new price; another price, a refusal or a later close is told again.
+    expect((await reopened({ source: 's', close: 100.4 })).sent).toBe(0);
+    expect((await reopened({ source: 's2', close: 100.4 })).sent).toBe(1);
+    expect((await reopened(null)).sent).toBe(1);
+    expect(sent.at(-1)!.text).toContain('the checks now refuse the day');
+    expect((await reopened({ source: 's', close: 100.4 }, '2026-02-03T10:00:00.000Z')).sent).toBe(
+      1,
+    );
+  });
+
+  it('a close the stand-ins do not hold: told to the admins as unreadable, never as settled', async () => {
+    const { db, owner, version, day } = await setup();
+    await day(DAY, 'Calm');
+    // An annotation whose close no stand-in holds (no stand_ins row at all).
+    await note(db, version.id, DAY);
+    const id = (await db.select().from(schema.forwardAnnotations)).at(-1)!.id;
+    await setSetting(db, 'forward_records_from', DAY);
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const { notifier, sent } = fakeNotifier();
+    expect(await sendStandInClosures(db, options(notifier, DAY))).toEqual({
+      sent: 1,
+      failed: [],
+      errors: [],
+    });
+    expect(sent.map((m) => [m.target, m.text.split('\n')[0]])).toEqual([
+      ['ops', 'Saku: a stand-in close annotation cannot be read'],
+    ]);
+    expect(sent[0]!.text).toContain(`annotation ${id}`);
   });
 
   it('an unreadable detail is told to the admins once, never with a guessed value', async () => {

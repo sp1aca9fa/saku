@@ -154,7 +154,12 @@ if (tool === 'sources' && command === 'list') {
   const start = new Date(`${to}T00:00:00Z`);
   start.setUTCFullYear(start.getUTCFullYear() - years);
   const from = start.toISOString().slice(0, 10);
-  const stats = await issuerStats(db, { from, to, publishes: issuerPublishesOf(plugins.issuers) });
+  const stats = await issuerStats(db, {
+    from,
+    to,
+    publishes: issuerPublishesOf(plugins.issuers),
+    sessions: xnys(),
+  });
   if (stats.toleranceInvalid) {
     console.log('Warning: issuer_nav_tolerance does not parse; layer D observes only until reset.');
   }

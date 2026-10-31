@@ -32,6 +32,14 @@ describe('Sessions', () => {
     expect(() => s.isSession('2027-01-04')).toThrow(/outside/);
   });
 
+  it('knows a closed day only inside its range (outside: unknown, not closed)', () => {
+    expect(s.closedOn('2026-01-03')).toBe(true); // a Saturday
+    expect(s.closedOn('2026-01-19')).toBe(true); // a holiday
+    expect(s.closedOn('2026-01-20')).toBe(false);
+    expect(s.closedOn('2027-01-02')).toBe(false); // a Saturday the calendar does not cover
+    expect(s.closedOn('2025-12-25')).toBe(false);
+  });
+
   it('has no early-close knowledge without a list', () => {
     expect(s.closeOf('2026-01-02')).toBe('unknown');
   });

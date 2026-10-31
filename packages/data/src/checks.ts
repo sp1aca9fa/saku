@@ -87,10 +87,22 @@ export function unsplit(bars: RawBar[]): RawBar[] {
   return out.reverse();
 }
 
+/** The `bar_valid` problem of a bar dated on a day that is not a session. */
+export const NOT_A_SESSION = 'not a trading day';
+/**
+ * The `bar_valid` problem of a closed-day bar that carries a dividend or a split: left out of the
+ * canonical series (requirements 04 "Closed-day bars"), its event is in no bar the signals read.
+ */
+export const CLOSED_DAY_EVENT = 'dividend or split on a day that is not a trading day';
+
 /**
  * Layer A for one source's bars of one symbol (sorted by date): structure, trading days, gaps,
  * large moves and unchanged closes. A missing session is red for the primary (no value to use)
- * and yellow for another source.
+ * and yellow for another source. A bar on a day the calendar says is closed is red (`bar_valid`,
+ * `NOT_A_SESSION`) and is not part of the series (requirements 04 "Closed-day bars": the
+ * canonical series leaves it out): the moves and unchanged closes run from session to session,
+ * the session after it compared with the real session before. A date outside the calendar
+ * throws (never a guess).
  */
 export function layerA(
   bars: RawBar[],
@@ -100,7 +112,9 @@ export function layerA(
   const base = { layer: 'A' as const, source: o.source };
   const threshold = moveThreshold(o.leverage);
   const byDate = new Map(bars.map((b) => [b.date, b]));
-  bars.forEach((b, i) => {
+  /** The latest bar on a session before the current one. */
+  let prev: RawBar | undefined;
+  bars.forEach((b) => {
     const problems: string[] = [];
     const prices = [b.open, b.high, b.low, b.close].filter((v): v is number => v !== undefined);
     if (prices.some((p) => !(p > 0))) problems.push('price not positive');
@@ -111,7 +125,9 @@ export function layerA(
     if (b.volume !== undefined && !(b.volume >= 0)) problems.push('negative volume');
     if (!(b.divCash >= 0)) problems.push('negative dividend');
     if (!(b.splitFactor > 0)) problems.push('split factor not positive');
-    if (!o.sessions.isSession(b.date)) problems.push('not a trading day');
+    const closed = !o.sessions.isSession(b.date);
+    if (closed) problems.push(NOT_A_SESSION);
+    if (closed && (b.divCash !== 0 || b.splitFactor !== 1)) problems.push(CLOSED_DAY_EVENT);
     out.push({
       ...base,
       check: 'bar_valid',
@@ -119,9 +135,11 @@ export function layerA(
       status: problems.length ? 'red' : 'green',
       ...(problems.length && { message: problems.join('; ') }),
     });
-    const prev = bars[i - 1];
-    if (!prev) return;
-    const move = totalReturn(prev, b);
+    if (closed) return;
+    const before = prev;
+    prev = b;
+    if (!before) return;
+    const move = totalReturn(before, b);
     out.push({
       ...base,
       check: 'large_move',
@@ -134,11 +152,12 @@ export function layerA(
       ...base,
       check: 'unchanged_close',
       date: b.date,
-      status: b.close === prev.close && b.splitFactor === 1 ? 'yellow' : 'green',
+      status: b.close === before.close && b.splitFactor === 1 ? 'yellow' : 'green',
       observed: b.close,
     });
   });
-  // Gaps: every session from the first bar (or `from`) to the last needs a bar.
+  // Gaps: every session from the first bar (or `from`) to the last needs a bar (a closed-day bar
+  // too says the source has data around it).
   const first = o.from && bars[0] && o.from > bars[0].date ? o.from : bars[0]?.date;
   const last = bars.at(-1)?.date;
   if (first && last) {

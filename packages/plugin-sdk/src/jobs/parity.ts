@@ -284,7 +284,7 @@ export async function parity(
 ): Promise<ParityResult[]> {
   const names = caseFolders(o.dir);
   if (names.length === 0) return [];
-  const { loadRows, barsOf } = await reader(db);
+  const { loadRows, barsOf } = await reader(db, o.sessions);
   // Loaded once: each read is in memory, through asOf.
   const cash = await cashPointInTime(db);
   const cashRate = cashRateOf(cash);

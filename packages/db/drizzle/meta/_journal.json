@@ -85,6 +85,13 @@
       "when": 1793474954887,
       "tag": "0011_stand_in_close",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1793476903492,
+      "tag": "0012_stand_in_closes",
+      "breakpoints": true
     }
   ]
 }

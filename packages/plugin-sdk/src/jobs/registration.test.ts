@@ -14,7 +14,12 @@ import {
 import { testDb } from '@saku/db/testing';
 import { and, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
-import { SAME_CLOSE_REFUSAL, registrationProblems, registrationTickers } from './registration';
+import {
+  SAME_CLOSE_REFUSAL,
+  registrationProblems,
+  registrationReport,
+  registrationTickers,
+} from './registration';
 import { verify } from './verify';
 
 const sessions = new Sessions({
@@ -36,6 +41,14 @@ const strategy = (o: { execution?: string; ticker?: string; safe?: string } = {}
     evaluation: { frequency: 'daily' },
     allocations: [{ name: 'All', holdings: [{ ticker: o.ticker ?? 'AAA', weight: 100 }] }],
   });
+
+const rawBar = (date: string): RawBar => ({
+  date,
+  close: 1,
+  closeIsSplitAdjusted: false,
+  divCash: 0,
+  splitFactor: 1,
+});
 
 let clock = Date.parse('2026-02-01T00:00:00Z');
 async function run(
@@ -293,18 +306,34 @@ describe('registrationProblems', () => {
     ]);
   });
 
-  it('names bars on closed days apart, with what removes them', async () => {
+  it('notes bars on closed days (no signal reads them); refuses those the calendar does not cover', async () => {
     const { db, ids, pass } = await setup();
     await pass();
-    // A Saturday bar, graded red by verify (layer A), and one the calendar does not cover.
-    await db.insert(schema.bars).values([
-      { symbolId: ids.AAA!, date: '2026-01-10', close: 1, source: 'p', status: 'red' },
-      { symbolId: ids.AAA!, date: '2024-12-31', close: 1, source: 'p', status: 'red' },
-    ]);
+    // A stored canonical row on a Saturday (left from before verify excluded them) and the
+    // primary's raw bar on another closed day: information, not a refusal.
+    await db
+      .insert(schema.bars)
+      .values([{ symbolId: ids.AAA!, date: '2026-01-10', close: 1, source: 'p', status: 'red' }]);
+    await seedSourceRoles(db, [{ key: 'p', dataKind: 'bars', suggestedRole: 'primary' }]);
+    await storeRawBars(db, {
+      symbolId: ids.AAA!,
+      source: 'p',
+      bars: [{ ...rawBar('2026-01-04'), close: 2 }],
+      runId: null,
+      fetchedAt: 't',
+    });
+    expect(await registrationReport(db, strategy(), { through: LAST, sessions })).toEqual({
+      problems: [],
+      notes: [
+        'AAA: 2 bars on days the market was closed, excluded (no signal reads them): ' +
+          '2026-01-04, 2026-01-10.',
+      ],
+    });
+    // A bar on a day the calendar does not cover is unknown: refused.
+    await db
+      .insert(schema.bars)
+      .values([{ symbolId: ids.AAA!, date: '2024-12-31', close: 1, source: 'p', status: 'red' }]);
     expect(await check(db, strategy(), '2026-01-12')).toEqual([
-      'AAA: 1 stored bar on days the market was closed: 2026-01-10. No command removes such a ' +
-        'bar yet; tell the admin (an open decision: keep closed-day bars out of the canonical ' +
-        'series, or an admin withdrawal).',
       'AAA: 1 stored bar is on days the market calendar does not cover: 2024-12-31. Update the ' +
         'calendar plug-in.',
       // The pass is also stale and started after the (uncovered) first bar.
@@ -387,7 +416,8 @@ describe('registrationProblems on what verify stores', () => {
   });
   const closes = [100, 101, 102, 101];
 
-  async function verified(secondary: number[]) {
+  /** `closedDay`: bars each source also has on days the market was closed. */
+  async function verified(secondary: number[], closedDay: { p?: RawBar[]; s?: RawBar[] } = {}) {
     const db = await testDb();
     await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
     await seedSourceRoles(db, [
@@ -402,7 +432,9 @@ describe('registrationProblems on what verify stores', () => {
       await storeRawBars(db, {
         symbolId: (await symbolId(db, 'AAA'))!,
         source,
-        bars: list.map((c, i) => bar(D[i]!, c)),
+        bars: [...list.map((c, i) => bar(D[i]!, c)), ...(closedDay[source] ?? [])].sort((a, b) =>
+          a.date < b.date ? -1 : 1,
+        ),
         runId: null,
         fetchedAt: 't',
       });
@@ -427,6 +459,58 @@ describe('registrationProblems on what verify stores', () => {
     expect(await check(db)).toEqual([
       'AAA: 1 stored bar is graded red: 2026-01-08. Its data has not passed the checks (pnpm health --date <date> explains a day).',
       expect.stringMatching(/^AAA: 1 red day in its history .*: 2026-01-08 \(B\.close_match@s\)/),
+    ]);
+  });
+
+  it('a bar on a closed day only: registers, with the bars noted (its red day stays stored)', async () => {
+    // The primary dates a bar on the Saturday before its sessions (01-03), the secondary one on
+    // the Sunday (01-04): both red in layer A, neither in the series the signals read.
+    const { db, id } = await verified(closes, {
+      p: [bar('2026-01-03', 99)],
+      s: [bar('2026-01-04', 98)],
+    });
+    const health = await db
+      .select()
+      .from(schema.dataHealth)
+      .where(and(eq(schema.dataHealth.runId, id), eq(schema.dataHealth.date, '2026-01-03')));
+    expect(health.find((h) => h.symbolId !== null)).toMatchObject({ status: 'red' });
+    expect(await registrationReport(db, strategy(), { through: LAST, sessions })).toEqual({
+      problems: [],
+      notes: [
+        'AAA: 1 bar on days the market was closed, excluded (no signal reads them): 2026-01-03.',
+      ],
+    });
+  });
+
+  it('a closed-day bar with a dividend, or another red on that day, still refuses', async () => {
+    const { db } = await verified(closes, { p: [{ ...bar('2026-01-03', 99), divCash: 0.5 }] });
+    expect(await check(db)).toEqual([
+      expect.stringMatching(/^AAA: 1 red day in its history .*: 2026-01-03 \(A\.bar_valid@p/),
+    ]);
+    // A bar on a closed day that is also broken (a price not positive): refused.
+    const broken = await verified(closes, { p: [{ ...bar('2026-01-03', 99), low: -1 }] });
+    expect(await check(broken.db)).toEqual([
+      expect.stringMatching(/^AAA: 1 red day in its history .*: 2026-01-03/),
+    ]);
+  });
+
+  it('a red reason on a closed day that is not a check result refuses (unknown is not excused)', async () => {
+    const { db, id } = await verified(closes, { p: [bar('2026-01-03', 99)] });
+    const aaa = (await symbolId(db, 'AAA'))!;
+    await db
+      .update(schema.dataHealth)
+      .set({ reasons: ['A.bar_valid@p', 'stand_in_refused:layer_c'] })
+      .where(
+        and(
+          eq(schema.dataHealth.runId, id),
+          eq(schema.dataHealth.symbolId, aaa),
+          eq(schema.dataHealth.date, '2026-01-03'),
+        ),
+      );
+    expect(await check(db)).toEqual([
+      expect.stringMatching(
+        /^AAA: 1 red day in its history .*: 2026-01-03 \(A\.bar_valid@p, stand_in_refused/,
+      ),
     ]);
   });
 });

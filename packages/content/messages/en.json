@@ -129,6 +129,11 @@
       "from": "From now on, signals read this price as it is: it no longer makes a day yellow or red as an unconfirmed price.",
       "pastDay": "This is not a new signal: the latest signal gives the current allocation."
     },
+    "standInReopened": {
+      "title": "Saku: the closed stand-in of {ticker} on {date} has another price",
+      "body": "An admin closed the stand-in at {closed} from {closedSource}; the checks now build the day from {now} from {source}. It is open again: checked as an unconfirmed price and holding corrections back. Check the new price, then close it again: pnpm sources stand-in close {ticker} {date} --reason \"<text>\" --user <admin>.",
+      "refused": "An admin closed the stand-in at {closed} from {closedSource}; the checks now refuse the day (no canonical bar, the day reads as missing). It is open again and holds corrections back until the primary delivers the day."
+    },
     "standInClosedUnreadable": {
       "title": "Saku: a stand-in close annotation cannot be read",
       "body": "{version}, {date}: annotation {id} does not read back, so its close is not told. The record is unchanged; find the cause."
