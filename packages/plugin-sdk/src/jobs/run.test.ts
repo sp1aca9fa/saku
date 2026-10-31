@@ -22,7 +22,7 @@ import { describe, expect, it } from 'vitest';
 import { emptyPlugins } from '../registry';
 import type { BarSource, IssuerSource, Notifier, PluginInfo, SeriesSource } from '../types';
 import { type RunOptions, runJob } from './run';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
 
 const sessions = new Sessions({
@@ -74,7 +74,7 @@ const barSource = (
 };
 const rates = cashRates(sessions, DATES, TARGET);
 
-async function setup() {
+async function setup(gate = true) {
   const db = await testDb();
   await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
   const owner = await createUser(db, {
@@ -85,7 +85,7 @@ async function setup() {
     backupCodeHashes: ['a'],
     isAdmin: true,
   });
-  await setSetting(db, 'forward_records_from', '2026-01-02');
+  if (gate) await setSetting(db, 'forward_records_from', '2026-01-02');
   const version = await registerVersion(db, {
     ownerId: owner,
     name: 'Trend',
@@ -171,6 +171,36 @@ describe('a daily run', () => {
     expect(sent[0]!.text).toContain('First recorded allocation: Risk on (signal of 2026-01-16).');
     const [run] = await db.select().from(schema.jobRuns);
     expect(run).toMatchObject({ status: 'success', heartbeatSent: true });
+  });
+
+  it('before the A1 gate: a full disk reaches the admins, a non-green day and strategies do not', async () => {
+    const { db, version } = await setup(false);
+    const { notifier, sent } = fakeNotifier();
+    const dir = mkdtempSync(join(tmpdir(), 'saku-run-'));
+    const file = join(dir, 'x.db');
+    writeFileSync(file, 'x');
+    // One source only: a single-source day is never green, so after the gate the admins would
+    // get the data-health alert too.
+    await runJob(
+      db,
+      plugins([barSource('p')]),
+      options(notifier, {
+        databaseUrl: `file:${file}`,
+        statfs: async () => ({ bsize: 1, blocks: 1000, bavail: 200 }),
+      }),
+    );
+    const [health] = await db
+      .select({ status: schema.dataHealth.status })
+      .from(schema.dataHealth)
+      .where(and(isNull(schema.dataHealth.symbolId), eq(schema.dataHealth.date, TARGET)));
+    expect(health?.status).not.toBe('green');
+    expect(await forwardRecord(db, version.id)).toEqual([]);
+    const types = (await db.select().from(schema.alertsSent)).map((r) => r.type);
+    expect(types).toContain('disk_space');
+    expect(types.filter((t) => t !== 'disk_space' && t !== 'job_failure')).toEqual([]);
+    expect(sent.every((m) => m.target === 'ops')).toBe(true);
+    const disk = sent.find((m) => m.text.startsWith('Saku: the server disk is 80.0% full'));
+    expect(disk!.text.split('\n').at(-1)).toMatch(/^Data health: (yellow|red)\. \(As of/);
   });
 
   it('a full disk is told to the admins; a failed measurement never fails the run', async () => {

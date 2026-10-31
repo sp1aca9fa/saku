@@ -121,13 +121,18 @@ Alerts (strategy changes, data health, failed runs for admins) go to Discord or 
 # Discord: Server Settings > Integrations > Webhooks > New Webhook, copy its URL.
 # Telegram: create a bot with @BotFather, put TELEGRAM_BOT_TOKEN in .env, send the bot a message,
 # then read your chat id from https://api.telegram.org/bot<token>/getUpdates.
-pnpm channel add discord --user <name> --admin   # asks for the target; --admin: also failed runs
+pnpm channel add discord --user <name> --admin   # asks for the target; --admin: also operational alerts
 pnpm channel list --user <name>
 pnpm channel test <channel id> --user <name>
 ```
 
-Admin channels get failed runs, failed self-updates and days whose data is not green. No alert is
-sent before forward records start (the A1 gate); `pnpm channel test` works at any time.
+Admin channels get failed runs, failed self-updates, disk space warnings and days whose data is
+not green. Before forward records start (the A1 gate) only the operational ones arrive: a failed
+run, a failed self-update and the disk warning, as soon as an admin channel exists. Their last line
+then states the data-health grade alone (for example `Data health: red.`), with nothing about
+signals, since none are live yet. Everything else (strategy changes, data health, revisions,
+calculation and parity checks, recompute differences, stand-in corrections) starts at the gate.
+`pnpm channel test` works at any time.
 An alert that could not be delivered leaves the run incomplete; it is retried at the next hourly
 check, so a broken channel also stops the healthchecks.io ping. `pnpm channel disable` turns one off.
 Users' languages: `pnpm settings set primary_language ja` (the default for users who chose none).

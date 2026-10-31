@@ -28,6 +28,7 @@ import {
   jobFailureParts,
   sendDataHealthAdmin,
   sendDayAlert,
+  sendDiskSpace,
   sendIntegrityFailed,
   sendJobFailure,
   sendParityFailed,
@@ -300,15 +301,148 @@ describe('channels', () => {
 });
 
 describe('admin alerts', () => {
-  it('waits for the A1 gate', async () => {
+  // Stage-a A2 (2026-11-01): admin-only operational alerts go out before the A1 gate.
+  const disk = { databaseBytes: 2048, totalBytes: 1000, freeBytes: 250, usedPercent: 75 };
+  const update = { from: 'abc1234', to: 'def5678', step: 'check', stuck: false };
+
+  it.each([
+    ['en', 'Data health: red.', 'Data health: red. (As of the last check, 2026-01-05.)'],
+    ['ja', 'データ状態: 赤。', 'データ状態: 赤。 (最後のチェック 2026-01-05 時点)'],
+  ])(
+    'before the A1 gate: a failed run, a failed update and disk space reach admin channels once a day, the health line a grade only (%s)',
+    async (language, given, latest) => {
+      const { db, owner } = await setup(language);
+      await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+      const run = await startRun(db, 'daily', new Date('2026-01-06T01:00:00Z'));
+      await db
+        .insert(schema.dataHealth)
+        .values({ runId: run, date: '2026-01-05', symbolId: null, status: 'red', reasons: [] });
+      const { notifier, sent } = fakeNotifier();
+      const o = options(notifier, '2026-01-05');
+      const job = { ...o, job: 'daily', failures: ['x'], health: 'red' };
+      for (const send of [
+        () => sendJobFailure(db, job),
+        () => sendUpdateFailed(db, { ...o, ...update }),
+        () => sendDiskSpace(db, { ...o, disk }),
+      ]) {
+        expect(await send()).toEqual({ sent: 1, failed: [] });
+        expect(await send()).toEqual({ sent: 0, failed: [] });
+      }
+      // Only the admin channel; the owner's ordinary channel got none.
+      expect(sent.map((m) => m.target)).toEqual(['ops', 'ops', 'ops']);
+      // The grade as given or on record, never "no normal signal" before any signal is live.
+      expect(sent.map((m) => m.text.split('\n').at(-1))).toEqual([given, latest, latest]);
+      const t = translator(language);
+      for (const m of sent) {
+        expect(m.text).not.toContain(t('alerts.health.red'));
+      }
+      expect((await db.select().from(schema.alertsSent)).map((r) => r.type).sort()).toEqual([
+        'disk_space',
+        'job_failure',
+        'update_failed',
+      ]);
+    },
+  );
+
+  it('before the A1 gate: no grade on record stays unknown', async () => {
     const { db, owner } = await setup();
     await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
     const { notifier, sent } = fakeNotifier();
-    const o = { ...options(notifier, '2026-01-05'), job: 'daily', failures: ['x'] };
-    expect((await sendJobFailure(db, o)).sent).toBe(0);
-    await setSetting(db, 'forward_records_from', '2026-01-05');
-    expect((await sendJobFailure(db, o)).sent).toBe(1);
+    expect((await sendDiskSpace(db, { ...options(notifier, '2026-01-05'), disk })).sent).toBe(1);
+    expect(sent[0]!.text.split('\n').at(-1)).toBe(translator('en')('alerts.healthGrade.unknown'));
+  });
+
+  it('before the A1 gate: an undelivered operational alert is reported, not recorded, and retried', async () => {
+    const { db, owner } = await setup();
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const down = fakeNotifier(true);
+    const r = await sendDiskSpace(db, { ...options(down.notifier, '2026-01-05'), disk });
+    expect(r.sent).toBe(0);
+    expect(r.failed).toHaveLength(1);
+    expect(await db.select().from(schema.alertsSent)).toEqual([]);
+    const { notifier, sent } = fakeNotifier();
+    expect((await sendDiskSpace(db, { ...options(notifier, '2026-01-05'), disk })).sent).toBe(1);
     expect(sent).toHaveLength(1);
+  });
+
+  it('before the A1 gate every other admin alert waits; after it each one is sent', async () => {
+    const { db, owner, version } = await setup();
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const DAY = '2026-01-05';
+    const library = await registerVersion(db, { ownerId: null, name: 'Library', strategy });
+    await appendForward(
+      db,
+      library,
+      {
+        date: DAY,
+        allocation: 'Calm',
+        holdings: [{ ticker: 'CASH_USD', weight: 100 }],
+        safeStateApplied: false,
+        dataStatus: 'green',
+        equity: 1,
+        detail: { reasons: [] },
+      },
+      null,
+    );
+    await annotate(db, {
+      versionId: library.id,
+      date: DAY,
+      kind: 'stand_in_corrected',
+      detail: {
+        ticker: 'AAA',
+        standInDate: DAY,
+        deviation: 0.01,
+        recordedAllocation: 'Calm',
+        correctedAllocation: 'Risk on',
+        differs: true,
+      } as never,
+      runId: null,
+    });
+    await annotate(db, {
+      versionId: version.id,
+      date: DAY,
+      kind: 'recomputed',
+      detail: { recordedAllocation: 'Calm', recomputedAllocation: 'Risk on', signalsDiffer: ['s'] },
+      runId: null,
+    });
+    const revisions = [
+      {
+        ticker: 'IDX',
+        source: 'fred',
+        field: 'value',
+        count: 1,
+        from: DAY,
+        to: DAY,
+        kind: 'changed' as const,
+      },
+    ];
+    const { notifier, sent } = fakeNotifier(false, 5000);
+    const o = options(notifier, DAY);
+    const gated = {
+      dataHealth: () => sendDataHealthAdmin(db, { ...o, health: 'red', reasons: ['AAA'] }),
+      revisions: () => sendRevisions(db, { ...o, runId: 'r', revisions }),
+      integrity: () =>
+        sendIntegrityFailed(db, {
+          ...o,
+          check: 'core_reference',
+          versionId: version.id,
+          detail: 'x',
+        }),
+      parity: () => sendParityFailed(db, { ...o, caseName: 'c', detail: 'x' }),
+      recompute: () => sendRecomputeDiffers(db, o),
+      standIn: () => sendStandInCorrections(db, o),
+    };
+    for (const send of Object.values(gated)) {
+      expect(await send()).toMatchObject({ sent: 0, failed: [] });
+    }
+    expect(sent).toEqual([]);
+    expect(await db.select().from(schema.alertsSent)).toEqual([]);
+    // The same calls after the gate: each delivered, so the test above is not vacuous.
+    await setSetting(db, 'forward_records_from', DAY);
+    for (const send of Object.values(gated)) {
+      expect(await send()).toMatchObject({ sent: 1, failed: [] });
+    }
+    expect(sent.map((m) => m.target)).toEqual(Array(6).fill('ops'));
   });
 
   it('reports a failed update and a non-green day with the latest data health', async () => {

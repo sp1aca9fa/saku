@@ -85,6 +85,16 @@ database's quota guard does not see them. A drill sends a few messages per chann
 strategy's alert and the admins' data alert); mind a channel whose provider has a small daily or
 monthly cap, and do not run drills back to back on it.
 
+## Alerts before the A1 gate
+
+Until forward records start (`forward_records_from`), admin channels get only the operational
+alerts: a failed run, a failed self-update and the disk warning. Their last line is the
+data-health grade alone, such as `Data health: red.`; it says nothing about signals because no
+strategy is live yet. Data-health, revision, calculation-check and strategy alerts start at the
+gate. Delivery works as after the gate: each alert once per subject and day, and a disk warning
+that cannot be delivered leaves the daily run incomplete (tried again at the next hourly check), so
+a broken admin channel also stops the healthchecks.io ping.
+
 ## A failed run and catch-up
 
 The run did not complete (a source down, an alert not delivered, a backup failed). No stamp is

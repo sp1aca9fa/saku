@@ -4,6 +4,12 @@
 // type). A state change compares the day's allocation with what the channel was last told, so a
 // run that caught up several days still reports the change, and a new channel gets the current
 // state first.
+//
+// Before the A1 gate (`forward_records_from` not set) only the admin alerts in BEFORE_GATE go
+// out: a failed run, a failed self-update, disk space (stage-a A2, decisions log 2026-11-01).
+// Their health line then states the data-health grade alone, with nothing about signals or
+// strategies, since none are live. Every other alert (strategies, data health, revisions,
+// integrity, parity, recompute, stand-in corrections) waits for the gate.
 import { CASH_USD, SAFE_STATE, type Strategy, type TradingDate } from '@saku/core';
 import { type Translate, hasText, translator } from '@saku/content';
 import type { Sessions } from '@saku/data';
@@ -39,6 +45,18 @@ export type AlertType =
   | 'stand_in_corrected'
   | 'disk_space';
 const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red'];
+
+/**
+ * The admin alerts sent before the A1 gate (stage-a A2: admin-only operational alerts may go
+ * live as soon as an admin channel exists; decisions log 2026-11-01). Decided per alert type
+ * here, never by a caller: they are about the server and the runs, never about data health,
+ * signals or strategies.
+ */
+export const BEFORE_GATE: ReadonlySet<AlertType> = new Set<AlertType>([
+  'job_failure',
+  'update_failed',
+  'disk_space',
+]);
 
 export interface Alert {
   key: AlertKey & { type: AlertType };
@@ -259,10 +277,10 @@ export async function sendDayAlert(
 }
 
 /**
- * An operational alert to every admin channel, once per (subject, date, type). Nothing is sent
- * before forward records start (the A1 gate): stage A allows no production alerts before it.
+ * An operational alert to every admin channel, once per (subject, date, type). Before forward
+ * records start (the A1 gate) only a type in BEFORE_GATE is sent; the others wait for the gate.
  */
-export async function sendAdminAlert(
+async function sendAdminAlert(
   db: Db,
   o: AlertOptions & {
     subject: string;
@@ -278,7 +296,7 @@ export async function sendAdminAlert(
 ): Promise<AlertSummary> {
   const summary: AlertSummary = { sent: 0, failed: [] };
   const key = { subject: o.subject, date: o.date, type: o.type };
-  await eachAdminChannel(db, o, o.health, async (t, channel, healthLine) => {
+  await eachAdminChannel(db, o, o.type, o.health, async (t, channel, healthLine) => {
     const parts = [...o.lines(t), { keep: healthLine }];
     const alert = { key, ...fitted(fitMessage(parts, roomOn(o, channel, t))) };
     await deliver(db, o, channel, alert, summary, t);
@@ -286,23 +304,31 @@ export async function sendAdminAlert(
   return summary;
 }
 
-/** Every admin channel with its owner's translator and the health line (after the A1 gate). */
+/**
+ * Every admin channel with its owner's translator and the health line. After the A1 gate every
+ * type; before it only a type in BEFORE_GATE, whose health line is then the grade alone
+ * (`alerts.healthGrade`: no "no normal signal" or "computed with a warning", as no signal is
+ * live yet). The grade is the same data either way; unknown stays unknown.
+ */
 async function eachAdminChannel(
   db: Db,
   o: AlertOptions,
+  type: AlertType,
   health: string | undefined,
   fn: (t: Translate, channel: Target, healthLine: string, language: string) => Promise<void>,
 ) {
-  if (!(await getSetting(db, 'forward_records_from'))) return;
+  const live = Boolean(await getSetting(db, 'forward_records_from'));
+  if (!live && !BEFORE_GATE.has(type)) return;
   const latest = health ? undefined : await latestOverallHealth(db);
   const status = health ?? latest?.status ?? 'unknown';
+  const grade = live ? 'alerts.health' : 'alerts.healthGrade';
   const admins = await db.select().from(schema.users).where(eq(schema.users.isAdmin, true));
   for (const admin of admins) {
     const language = await languageOf(db, admin.id);
     const t = translator(language);
     const healthLine = latest
-      ? `${t(`alerts.health.${status}`)} ${t('alerts.healthDate', { date: latest.date })}`
-      : t(`alerts.health.${status}`);
+      ? `${t(`${grade}.${status}`)} ${t('alerts.healthDate', { date: latest.date })}`
+      : t(`${grade}.${status}`);
     for (const channel of await deliveryTargets(db, admin.id, o.authSecret)) {
       if (channel.admin) await fn(t, channel, healthLine, language);
     }
@@ -530,7 +556,7 @@ export async function sendRecomputeDiffers(db: Db, o: AlertOptions): Promise<Ale
     }
   }
   if (notes.length === 0) return summary;
-  await eachAdminChannel(db, o, undefined, async (t, channel, healthLine) => {
+  await eachAdminChannel(db, o, 'recompute_differs', undefined, async (t, channel, healthLine) => {
     const told = await sentSubjects(db, channel, 'recompute_differs');
     const pending = notes.filter((n) => !told.has(n.key.subject));
     const first = pending[0];
@@ -825,7 +851,7 @@ export async function sendStandInCorrections(
     if (!version.ownerId) {
       // The status passed only spares the overall-health read: the message states the
       // version's own latest day instead of the admins' health line.
-      await eachAdminChannel(db, o, 'unknown', (t, channel, _line, language) =>
+      await eachAdminChannel(db, o, 'stand_in_corrected', 'unknown', (t, channel, _l, language) =>
         tell(t, language, channel),
       );
       continue;
