@@ -105,6 +105,27 @@ sudo systemctl daemon-reload && sudo systemctl enable --now saku-weekly.timer
 
 `pnpm verify` runs the checks and layer E without fetching, any time.
 
+### The monthly audit report
+
+`ops/systemd/saku-monthly.service` and `.timer` run on the 1st of each month at 11:47 (server
+time): the audit report of the previous month (`pnpm monthly`): its trading days by grade with
+the reasons, revisions and re-adjustments, quota use per provider, the forward records' chain
+verified, failed runs and stand-ins. It is stored in the activity log and, after the A1 gate, its
+short form goes to the admin channels once. The timer also fires on the 2nd and 3rd; those runs
+only retry a month that is not done (another job held the lock, an alert was not delivered) and
+change nothing otherwise. Set the server's time zone to the install's (`pnpm settings set
+time_zone`), or the month may be judged in another zone; a month missed is caught up by the next
+run. It can be installed before the gate.
+
+```bash
+sudo cp ops/systemd/saku-monthly.* /etc/systemd/system/
+sudo sed -i "s/<user>/$USER/g" /etc/systemd/system/saku-monthly.service
+sudo systemctl daemon-reload && sudo systemctl enable --now saku-monthly.timer
+```
+
+`pnpm audit-report [--month <YYYY-MM>]` prints a month's report at any time (not `pnpm audit`,
+which is pnpm's own security check).
+
 ## 5. Outside watch
 
 Create a check on healthchecks.io (free): period 1 day, grace 6 hours, and put its URL in `.env`
@@ -113,7 +134,8 @@ down, a source keeps failing, a backup failed), healthchecks.io tells you. The m
 its own outage.
 
 Optional: a second check for the weekly refetch (period 7 days, grace 1 day) as
-`HEALTHCHECK_WEEKLY_URL`.
+`HEALTHCHECK_WEEKLY_URL`, and a third for the monthly audit report (period 31 days, grace 3 days)
+as `HEALTHCHECK_MONTHLY_URL`.
 
 Alerts (strategy changes, data health, failed runs for admins) go to Discord or Telegram:
 
@@ -131,7 +153,8 @@ not green. Before forward records start (the A1 gate) only the operational ones 
 run, a failed self-update and the disk warning, as soon as an admin channel exists. Their last line
 then states the data-health grade alone (for example `Data health: red.`), with nothing about
 signals, since none are live yet. Everything else (strategy changes, data health, revisions,
-calculation and parity checks, recompute differences, stand-in corrections) starts at the gate.
+calculation and parity checks, recompute differences, stand-in corrections, the monthly audit
+report) starts at the gate.
 A failed run's alert lists what failed, one line each (the check's name and the first 200
 characters of its reason, up to 5 lines, the rest counted), so before the gate a failed
 calculation or testfol parity check arrives there, not as an alert of its own.

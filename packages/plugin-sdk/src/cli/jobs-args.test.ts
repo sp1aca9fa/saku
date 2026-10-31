@@ -4,6 +4,10 @@ import { parseJobArgs } from './jobs-args';
 describe('parseJobArgs', () => {
   it('reads each job and its known flags', () => {
     expect(parseJobArgs(['weekly'])).toEqual({ job: 'weekly', force: false });
+    expect(parseJobArgs(['monthly'])).toEqual({ job: 'monthly', force: false });
+    expect(parseJobArgs(['monthly', '--force'])).toEqual({
+      error: expect.stringMatching(/Unknown argument --force for pnpm monthly/),
+    });
     expect(parseJobArgs(['daily', '--force'])).toEqual({ job: 'daily', force: true });
     expect(parseJobArgs(['spike'])).toEqual({ job: 'spike', force: false });
     expect(parseJobArgs(['spike', '--from', '2026-10-30'])).toEqual({

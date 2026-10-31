@@ -47,7 +47,8 @@ export type AlertType =
   | 'stand_in_corrected'
   | 'stand_in_closed'
   | 'stand_in_reopened'
-  | 'disk_space';
+  | 'disk_space'
+  | 'monthly_audit';
 const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red'];
 
 /**
@@ -451,6 +452,18 @@ export function sendDiskSpace(
       },
     ],
   });
+}
+
+/**
+ * The monthly audit report in short form (stage-a A3, layer H; jobs/audit.ts `auditParts`), once
+ * per month (`date`: the month's last day). Not in BEFORE_GATE: it is about data health and the
+ * forward records, so it waits for the A1 gate like every such alert.
+ */
+export function sendMonthlyAudit(
+  db: Db,
+  o: AlertOptions & { month: string; lines: (t: Translate) => Part[] },
+): Promise<AlertSummary> {
+  return sendAdminAlert(db, { ...o, subject: `audit:${o.month}`, type: 'monthly_audit' });
 }
 
 /** Revised rows (ticker, field, source) listed per kind in the revisions alert; the rest counted. */
@@ -1496,6 +1509,8 @@ export function describeReason(t: Translate, code: string): string {
   } else if (rest.startsWith('stand_in_refused:')) text = t('alerts.reason.standInRefused');
   else if ((m = /^stand_in_closed_changed@(.+)$/.exec(rest))) {
     text = t('alerts.reason.standInClosedChanged', { source: m[1]! });
+  } else if ((m = /^closed_day_event@(\d{4}-\d{2}-\d{2})$/.exec(rest))) {
+    text = t('alerts.reason.closedDayEvent', { date: m[1]! });
   } else if ((m = /^stand_in_lookback@(\d{4}-\d{2}-\d{2})$/.exec(rest))) {
     text = t('alerts.reason.standInLookback', { date: m[1]! });
   } else if ((m = /^lookback_(red|ungraded|missing)@(\d{4}-\d{2}-\d{2})$/.exec(rest))) {

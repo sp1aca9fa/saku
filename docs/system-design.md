@@ -68,7 +68,7 @@ The US close is 05:00 or 06:00 JST (summer/winter). A1 measures when each bar so
 |---|---|---|
 | `saku-daily` | hourly (`OnCalendar=*-*-* *:20:00`, `Persistent=true`) | Once per trading day, at the first check after data is final: ingest, verify, evaluate, forward entries, alerts, timestamp, backup, admin alerts. A run that did not finish runs again at the next check. Exits at once when the day is done. |
 | `saku-weekly` | Sunday 10:37 | Full refetch, revision diff, full recomputation, `pnpm verify` (core vs reference, parity, incremental vs full on real data) |
-| `saku-monthly` | 1st, 11:47 | Audit report |
+| `saku-monthly` | 1st, 11:47 (2nd and 3rd: retry only) | Audit report of the previous month (`pnpm monthly`), stored in the activity log, short form to admins after the A1 gate |
 | `saku-update` | every 5 min | Pull both repos, install, migrate, build, restart, check; roll back and alert on failure; never while a job runs |
 | `saku-app` | service | Web app on `127.0.0.1:3001` |
 | Key-day (F1) | around 21:00 | Post-v1 |

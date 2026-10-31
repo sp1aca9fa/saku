@@ -43,17 +43,10 @@ import { type Db, createDb, getSetting, schema } from '@saku/db';
 import { dbConfigFromEnv, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { eq } from 'drizzle-orm';
-import { describeReason, describeReasons } from '../jobs/alerts';
+import { describeReason } from '../jobs/alerts';
+import { describeDay } from '../jobs/health-lines';
 import { issuerNotCompared, notComparedLines } from '../jobs/issuer';
-import {
-  type DayReport,
-  type Grade,
-  daysVerdict,
-  healthReport,
-  latestGradedDate,
-  latestRun,
-  storedAny,
-} from '../jobs/health';
+import { daysVerdict, healthReport, latestGradedDate, latestRun, storedAny } from '../jobs/health';
 import {
   DATE_CAP,
   DAY,
@@ -181,20 +174,6 @@ function header(r: Awaited<ReturnType<typeof latestRun>>): string {
     `Latest run: ${r.jobType} for ${r.datesProcessed?.[0] ?? 'an unknown date'}, ${r.status}` +
     `${error ? ` (${error})` : ''}, heartbeat ${r.heartbeatSent ? 'sent' : 'not sent'}.`
   );
-}
-
-function describeGrade(t: Translate, g: Grade): string {
-  if (g.status === 'not_graded') return 'not graded';
-  return g.reasons.length ? `${g.status}: ${describeReasons(t, g.reasons)}` : g.status;
-}
-
-function describeDay(t: Translate, d: DayReport): string[] {
-  const by = d.run ? `  (${d.run.jobType} run for ${d.run.target})` : '';
-  if (d.green) return [`${d.date}  green${by}`];
-  return [
-    `${d.date}  ${describeGrade(t, d.overall)}${by}`,
-    ...d.symbols.map((s) => `  ${s.ticker}  ${describeGrade(t, s.grade)}`),
-  ];
 }
 
 async function summary(

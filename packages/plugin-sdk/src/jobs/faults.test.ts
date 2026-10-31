@@ -754,15 +754,24 @@ describe('fault injection (layer F)', () => {
         .map((h) => `${h.status} ${h.reasons.join(',')}`);
 
     for (const to of ['2026-01-17', '2026-01-10']) {
-      it(`the target's bar dated on a closed day (${to}): never green, graded as a day the primary lacks`, async () => {
+      it(`the target's bar dated on a closed day (${to}): never green, the target graded as a day the primary lacks`, async () => {
         // The run for the target has no primary bar for SPY on it: the day the bar shifted from
         // keeps its own grading (04 "Primary missing, secondary present"): the two secondaries
         // agree and no signal can flip within their band, so they stand in, yellow and named.
-        // A closed day before the target is graded red and stored, never built into the series
-        // (so it does not make the target red: no signal reads it).
+        // A closed day before the target is graded red and stored, never built into the series.
+        // The target's bar carries SPY's dividend: dated on Saturday 01-10, the dividend is in no
+        // series bar, so Monday 01-12 is red (`closed_day_event`) and the target reads it in its
+        // re-check window: red, the safe state. Dated after the target, the run does not see it.
         const { db, today, reasons } = await run(sources(shifted(TARGET, to)));
-        expect(today).toMatchObject({ dataStatus: 'yellow', safeStateApplied: false });
-        expect(reasons).toEqual(['SPY:stand_in@s1']);
+        if (to > TARGET) {
+          expect(today).toMatchObject({ dataStatus: 'yellow', safeStateApplied: false });
+          expect(reasons).toEqual(['SPY:stand_in@s1']);
+        } else {
+          expect(today).toMatchObject({ dataStatus: 'red', safeStateApplied: true });
+          expect(reasons).toEqual(
+            expect.arrayContaining(['SPY:stand_in@s1', 'SPY:lookback_red@2026-01-12']),
+          );
+        }
         const spy = (await symbolId(db, 'SPY'))!;
         const canonical = await db.select().from(schema.bars).where(eq(schema.bars.symbolId, spy));
         expect(canonical.some((b) => b.date === to)).toBe(false);
@@ -773,6 +782,30 @@ describe('fault injection (layer F)', () => {
         }
       });
     }
+
+    it('a 2:1 split dated on a Saturday in the window: the next session red, the target in its safe state', async () => {
+      // The daily response adds a bar for Saturday 01-10 carrying a 2:1 split (Friday's prices):
+      // the split is in no canonical bar, so Monday 01-12 is red and the target reads it in its
+      // re-check window.
+      const saturdaySplit: Fault = (t, bars) =>
+        t !== 'SPY'
+          ? bars
+          : [
+              ...bars,
+              { ...bars.find((b) => b.date === '2026-01-09')!, date: '2026-01-10', splitFactor: 2 },
+            ].sort((a, b) => (a.date < b.date ? -1 : 1));
+      const { db, today, reasons, alert } = await run(sources(saturdaySplit));
+      expect(today).toMatchObject({
+        dataStatus: 'red',
+        safeStateApplied: true,
+        allocation: 'Safe state',
+      });
+      expect(reasons).toContain('SPY:lookback_red@2026-01-12');
+      expect(alert).toMatch(new RegExp(`^Trend 2x: safe state for ${TARGET}`));
+      expect(await graded(db, '2026-01-12', true)).toContainEqual(
+        expect.stringMatching(/^red .*closed_day_event@2026-01-10/),
+      );
+    });
 
     it('an earlier session re-dated onto a closed day (its bar already stored): only that day red', async () => {
       // The daily response dates Monday 01-12's bar Saturday 01-10; Monday's bar from the

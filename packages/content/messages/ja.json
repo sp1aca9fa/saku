@@ -47,6 +47,21 @@
       "title": "Saku: サーバーのディスク使用率が {percent}% になりました",
       "body": "空き容量は {free}、データベースは {size} です。古いバックアップとログを削除して空きを確保してください(docs/troubleshooting.md)。"
     },
+    "audit": {
+      "title": "Saku: {month} の監査レポート",
+      "clear": "判定: 問題なし。",
+      "attention": "判定: 要確認。",
+      "days": "取引日: 緑 {green}、黄 {yellow}、赤 {red}、未チェック {notGraded}。",
+      "daysUnknown": "取引日: 不明(市場カレンダーがこの月を含んでいません)。",
+      "revisions": "改訂: 保存済みの価格データの値の変更 {revisions} 件、提供元の再調整 {readjustments} 件。",
+      "quota": "利用枠: {providers} 件の提供元のうち {over} 件が上限の 80% を超えました。",
+      "quotaPartial": "利用枠: {providers} 件の提供元のうち {over} 件が上限の 80% を超えました。最初の数日分はもう保存されていないため、件数は不完全です。",
+      "forward": "フォワード記録: チェーンを検証しました。記録 {entries} 件、安全状態の日 {safe} 日、欠けている日 {missing} 日、注記 {annotations} 件。",
+      "forwardBroken": "フォワード記録: チェーンの検証で問題が {problems} 件見つかりました。記録 {entries} 件、安全状態の日 {safe} 日、欠けている日 {missing} 日、注記 {annotations} 件。",
+      "runs": "実行: {runs} 回、うち失敗または未完了 {failed} 回。",
+      "standIns": "代替価格: {count} 件(主ソースで解消 {resolved}、管理者が確定 {closed}、未確定 {open}、確定後に再び未確定 {reopened})。",
+      "full": "完全なレポートはサーバーにあります: {command}"
+    },
     "update": {
       "title": "Saku: {to} への更新が {step} の段階で失敗しました",
       "back": "サーバーは {from} に戻り、そのまま動作しています。新しいバージョンがプッシュされると再試行します。詳細はサーバーの更新ログにあります。",
@@ -84,6 +99,7 @@
       "standIn": "主ソースが欠けたため {source} の値で代替しています",
       "standInRefused": "主ソースが欠け、代替値も検証を通りませんでした",
       "standInClosedChanged": "管理者が確定した代替価格が別の値({source})に変わったため、未確認の価格として再び検証しています",
+      "closedDayEvent": "市場の休場日である {date} に配当または株式分割が記録されています。シグナルが参照する価格には含まれないため、この日の値動きは信頼できません",
       "standInLookback": "シグナルが参照する {date} の価格は副ソースの値で、主ソースでまだ確認されていません",
       "lookbackRed": "シグナルがまだ参照している {date} のデータが赤(信頼できない)です",
       "lookbackUngraded": "シグナルがまだ参照している {date} のデータがまだ検証されていません",

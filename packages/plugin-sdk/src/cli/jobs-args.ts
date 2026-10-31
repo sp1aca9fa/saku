@@ -4,11 +4,21 @@
 
 import { isRealDate } from '../jobs/probe-report';
 
-export const JOBS = ['bootstrap', 'daily', 'weekly', 'verify', 'checks', 'probe', 'spike'] as const;
+export const JOBS = [
+  'bootstrap',
+  'daily',
+  'weekly',
+  'monthly',
+  'verify',
+  'checks',
+  'probe',
+  'spike',
+] as const;
 export type Job = (typeof JOBS)[number];
 
 export const USAGE =
-  'Usage: pnpm bootstrap | pnpm daily [--force] | pnpm weekly | pnpm verify | pnpm checks | ' +
+  'Usage: pnpm bootstrap | pnpm daily [--force] | pnpm weekly | pnpm monthly | pnpm verify | ' +
+  'pnpm checks | ' +
   'pnpm probe [--report [--from <YYYY-MM-DD>] [--file <path>]] | pnpm spike [--from <YYYY-MM-DD>]';
 
 export interface JobArgs {

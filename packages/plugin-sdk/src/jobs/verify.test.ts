@@ -236,9 +236,17 @@ describe('verify', () => {
     });
     /**
      * AAA +1% then +1%; AAA2 2x it; the secondary agrees. `extra`: the primary's added bars;
-     * `drop`: a date the primary has no AAA bar for.
+     * `drop`: a date the primary has no AAA bar for; `secondary`: AAA's secondary bars instead
+     * (null: AAA has no secondary); `main`: AAA's primary bars on sessions instead.
      */
-    async function graded(cal: Sessions, extra: RawBar[], on = days, drop?: string) {
+    async function graded(
+      cal: Sessions,
+      extra: RawBar[],
+      on = days,
+      drop?: string,
+      secondary?: RawBar[] | null,
+      main?: RawBar[],
+    ) {
       const db = await testDb();
       await upsertSymbols(db, [
         { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
@@ -265,8 +273,8 @@ describe('verify', () => {
         });
       const aaa = [100, 101, 102.01].map((c, i) => bar(on[i]!, c));
       const aaa2 = [50, 51, 52.02].map((c, i) => bar(on[i]!, c));
-      await store('AAA', 'p', [...aaa.filter((b) => b.date !== drop), ...extra]);
-      await store('AAA', 's', aaa);
+      await store('AAA', 'p', [...(main ?? aaa).filter((b) => b.date !== drop), ...extra]);
+      if (secondary !== null) await store('AAA', 's', secondary ?? aaa);
       await store('AAA2', 'p', aaa2);
       await store('AAA2', 's', aaa2);
       const runId = await startRun(db, 'weekly');
@@ -373,6 +381,82 @@ describe('verify', () => {
         .from(schema.barsRaw)
         .where(and(eq(schema.barsRaw.symbolId, aaa), eq(schema.barsRaw.date, '2026-01-10')));
       expect(raw).toHaveLength(1);
+    });
+
+    describe('with a dividend or split on it: the next session red (its event is in no series bar)', () => {
+      // AAA: Friday 100, a 2:1 split dated Saturday, Monday 50.5 (+1% on the new basis). Left
+      // out, the split would read as a -49.5% Friday-to-Monday return.
+      const fri = bar('2026-01-09', 100);
+      const split = bar('2026-01-10', 50.5, { splitFactor: 2 });
+      const mon = bar('2026-01-12', 50.5);
+      const tue = bar('2026-01-13', 51);
+      const dividend = bar('2026-01-10', 101, { divCash: 1 });
+      const aaaRow = (g: Awaited<ReturnType<typeof graded>>, date: string) =>
+        g.health.filter((h) => h.startsWith(`1 ${date} `));
+      const gradedWith = (main: RawBar[], extra: RawBar[], secondary: RawBar[] | null) =>
+        graded(sessions, extra, days, undefined, secondary, main);
+
+      for (const c of [
+        { name: 'a split, primary only', extra: [split], main: [fri, mon, tue], sec: null },
+        {
+          name: 'a split, the secondary dating it Saturday too',
+          extra: [split],
+          main: [fri, mon, tue],
+          sec: [fri, split, mon, tue],
+        },
+        {
+          name: 'a dividend, primary only',
+          extra: [dividend],
+          main: [fri, bar('2026-01-12', 101), bar('2026-01-13', 102)],
+          sec: null,
+        },
+        {
+          name: 'a dividend, the secondary dating it Saturday too',
+          extra: [dividend],
+          main: [fri, bar('2026-01-12', 101), bar('2026-01-13', 102)],
+          sec: [fri, dividend, bar('2026-01-12', 101), bar('2026-01-13', 102)],
+        },
+      ]) {
+        it(c.name, async () => {
+          const g = await gradedWith(c.main, c.extra, c.sec);
+          expect(aaaRow(g, '2026-01-12')).toEqual([
+            expect.stringMatching(/^1 2026-01-12 red .*closed_day_event@2026-01-10/),
+          ]);
+          expect(g.canonical.find((b) => b.id === 1 && b.date === '2026-01-12')).toMatchObject({
+            status: 'red',
+          });
+          // Only the session after it: Tuesday keeps its own grade.
+          expect(aaaRow(g, '2026-01-13').join()).not.toMatch(/closed_day_event/);
+          expect(g.canonical.some((b) => b.date === '2026-01-10')).toBe(false);
+        });
+      }
+
+      it('a split-adjusted primary (its own split dated Saturday): the same', async () => {
+        // As sent split-adjusted: Friday 50 (100 before the split), Saturday's split, Monday 50.5.
+        const adj = (b: RawBar, close: number) => ({ ...b, close, closeIsSplitAdjusted: true });
+        const g = await gradedWith(
+          [adj(fri, 50), adj(mon, 50.5), adj(tue, 51)],
+          [adj(split, 50.5)],
+          null,
+        );
+        expect(aaaRow(g, '2026-01-12')).toEqual([
+          expect.stringMatching(/^1 2026-01-12 red .*closed_day_event@2026-01-10/),
+        ]);
+      });
+
+      it('every primary bar on closed days: those days red with their result, and covered', async () => {
+        const g = await gradedWith([], [bar('2026-01-10', 100), bar('2026-01-11', 100)], null);
+        expect(aaaRow(g, '2026-01-10')).toEqual(['1 2026-01-10 red A.bar_valid@p']);
+        expect(aaaRow(g, '2026-01-11')).toEqual(['1 2026-01-11 red A.bar_valid@p']);
+        const aaa = (await symbolId(g.db, 'AAA'))!;
+        const [coverage] = await g.db
+          .select()
+          .from(schema.healthCoverage)
+          .where(eq(schema.healthCoverage.symbolId, aaa));
+        // No primary bar on a session: red on the run's date (primary missing) as before.
+        expect(aaaRow(g, '2026-01-13')).toEqual(['1 2026-01-13 red primary_missing']);
+        expect(coverage).toMatchObject({ fromDate: '2026-01-10', toDate: '2026-01-13' });
+      });
     });
 
     it('a bar outside the calendar is not left out on a guess: the run refuses it', async () => {

@@ -5,6 +5,8 @@
 //                          final; exits at once when the day is done (the hourly timer calls it)
 //   pnpm daily --force     run again for the latest final day
 //   pnpm weekly            full-history refetch (revisions reported), checks, recompute, layer E
+//   pnpm monthly           the audit report of the previous month (and earlier ones never
+//                          stored), stored and sent in short form to the admins (jobs/monthly.ts)
 //   pnpm verify            layers A-C over the full history and layer E (core vs reference,
 //                          incremental vs full, testfol parity cases in plugins/test/testfol)
 //                          on the stored data, no fetching
@@ -139,6 +141,38 @@ if (job === 'probe') {
   for (const l of lines.filter((l) => l.error)) log.warn(`probe ${l.source}: ${l.error}`);
   held.release();
   process.exit(0);
+}
+
+if (job === 'monthly') {
+  // The audit report (jobs/monthly.ts): its own run record, then the monthly heartbeat.
+  const { declaredLimits, installTimeZone } = await import('../jobs/audit');
+  const { runMonthly } = await import('../jobs/monthly');
+  const { SYSTEM_CA } = await import('../jobs/anchor');
+  let ok = false;
+  try {
+    const r = await runMonthly(db, {
+      now,
+      timeZone: await installTimeZone(db),
+      sessions,
+      finalAfter,
+      limits: declaredLimits([...allInfos(plugins), ...plugins.notifiers.map((n) => n.info)]),
+      caFile: process.env.SAKU_TSA_CAFILE?.trim() || SYSTEM_CA,
+      alerting: {
+        notifiers: plugins.notifiers,
+        authSecret: process.env.AUTH_SECRET?.trim() ?? '',
+        context: notifierContexts(log, providerUsageStore(db)),
+        log,
+      },
+      log,
+      onComplete: () => heartbeat('HEALTHCHECK_MONTHLY_URL'),
+    });
+    ok = r.ok;
+  } catch (e) {
+    log.warn('Run could not start or finish', { error: String(e) });
+  } finally {
+    held.release();
+  }
+  process.exit(ok ? 0 : 1);
 }
 
 if (job === 'daily' && !force && (readStamp('daily') ?? '') >= target) {

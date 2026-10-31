@@ -47,6 +47,21 @@
       "title": "Saku: the server disk is {percent}% full",
       "body": "{free} is free and the database is {size}. Prune old backups and logs to free space (docs/troubleshooting.md)."
     },
+    "audit": {
+      "title": "Saku: audit report for {month}",
+      "clear": "Verdict: all clear.",
+      "attention": "Verdict: needs attention.",
+      "days": "Trading days: {green} green, {yellow} yellow, {red} red, {notGraded} not graded.",
+      "daysUnknown": "Trading days: not known (the market calendar does not cover the month).",
+      "revisions": "Revisions: {revisions} stored bar values changed, {readjustments} provider re-adjustments.",
+      "quota": "Quota: {over} of {providers} providers above 80% of a limit.",
+      "quotaPartial": "Quota: {over} of {providers} providers above 80% of a limit; the counts are incomplete (the earliest days are no longer stored).",
+      "forward": "Forward records: chains verified; {entries} entries, {safe} safe-state days, {missing} days missing, {annotations} annotations.",
+      "forwardBroken": "Forward records: chain verification found {problems} problems; {entries} entries, {safe} safe-state days, {missing} days missing, {annotations} annotations.",
+      "runs": "Runs: {runs}, of which {failed} failed or did not finish.",
+      "standIns": "Stand-ins: {count} ({resolved} resolved, {closed} closed, {open} open, {reopened} reopened).",
+      "full": "The full report is on the server: {command}"
+    },
     "update": {
       "title": "Saku: the update to {to} failed at the {step} step",
       "back": "The server went back to {from} and keeps running it. It tries again when a newer version is pushed; the update log on the server has the details.",
@@ -84,6 +99,7 @@
       "standIn": "the main source was missing; {source} stands in",
       "standInRefused": "the main source was missing and no stand-in passed the checks",
       "standInClosedChanged": "a stand-in an admin had closed now has another price (from {source}); it is checked again as an unconfirmed price",
+      "closedDayEvent": "a dividend or split is dated {date}, a day the market was closed; it is in no price the signals read, so this day's change cannot be trusted",
       "standInLookback": "the signals read a secondary source's price for {date}, not yet confirmed by the main source",
       "lookbackRed": "the data of {date}, which the signals still read, is red (unreliable)",
       "lookbackUngraded": "the data of {date}, which the signals still read, has not been checked",

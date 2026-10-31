@@ -710,6 +710,14 @@ describe('reason codes in words', () => {
     expect(describeReason(t, 'SPY:lookback_ungraded@2026-11-03')).toBe(
       'SPY: the data of 2026-11-03, which the signals still read, has not been checked',
     );
+    // A dividend or split on a closed-day bar (requirements 04 "Closed-day bars").
+    expect(describeReason(t, 'SPY:closed_day_event@2026-11-01')).toBe(
+      'SPY: a dividend or split is dated 2026-11-01, a day the market was closed; it is in no ' +
+        "price the signals read, so this day's change cannot be trusted",
+    );
+    expect(describeReason(translator('ja'), 'SPY:closed_day_event@2026-11-01')).toMatch(
+      /^SPY: 市場の休場日である 2026-11-01 に配当または株式分割/,
+    );
     expect(describeReason(t, 'SPY:stand_in_lookback@2026-11-03')).toBe(
       "SPY: the signals read a secondary source's price for 2026-11-03, not yet confirmed by the main source",
     );

@@ -810,7 +810,9 @@ describe('forward: red and stand-ins in the lookback', () => {
    * AAA's first bar in every source; `closed`: bars AAA's primary also has, on closed days. A
    * second secondary `s2` has a role but no bars.
    */
-  async function graded(o: { gap?: string; from?: number; closed?: RawBar[] } = {}) {
+  async function graded(
+    o: { gap?: string; from?: number; closed?: RawBar[]; closedInSecondary?: boolean } = {},
+  ) {
     const db = await testDb();
     await upsertSymbols(db, [
       { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
@@ -834,7 +836,9 @@ describe('forward: red and stand-ins in the lookback', () => {
           source,
           bars: [
             ...list.filter((b) => !(ticker === 'AAA' && source === 'p' && b.date === o.gap)),
-            ...(ticker === 'AAA' && source === 'p' ? (o.closed ?? []) : []),
+            ...(ticker === 'AAA' && (source === 'p' || o.closedInSecondary)
+              ? (o.closed ?? [])
+              : []),
           ].sort((a, b) => (a.date < b.date ? -1 : 1)),
           runId: null,
           fetchedAt: 't',
@@ -1267,6 +1271,34 @@ describe('forward: red and stand-ins in the lookback', () => {
       );
     expect(gradedSat.map((h) => h.status)).toEqual(['red']);
   });
+
+  for (const c of [
+    { event: { splitFactor: 2 }, name: 'a 2:1 split' },
+    { event: { divCash: 1 }, name: 'a dividend' },
+  ]) {
+    for (const closedInSecondary of [false, true]) {
+      it(`${c.name} on a Saturday primary bar${closedInSecondary ? ' (the secondary dates it Saturday too)' : ''}: the next session red, the safe state`, async () => {
+        // Saturday 01-31, between S[19] and T: its event is in no canonical bar, so T (the
+        // session after it) is red, and the day after T reads it in its re-check window.
+        const saturday = { ...series([119])[0]!, date: '2026-01-31', ...c.event };
+        const { record } = await graded({ closed: [saturday], closedInSecondary });
+        expect(await record()).toEqual([
+          {
+            date: T,
+            allocation: 'Safe state',
+            dataStatus: 'red',
+            safeStateApplied: true,
+            reasons: expect.arrayContaining(['AAA:closed_day_event@2026-01-31']),
+          },
+        ]);
+        expect((await record(S[21]!)).at(-1)).toMatchObject({
+          date: S[21],
+          safeStateApplied: true,
+          reasons: expect.arrayContaining([`AAA:lookback_red@${T}`]),
+        });
+      });
+    }
+  }
 
   it('a canonical row stored on a closed day in the window (left from before) is not read', async () => {
     const { db, ids, record } = await graded();

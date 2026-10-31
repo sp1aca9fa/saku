@@ -484,8 +484,12 @@ describe('registrationProblems on what verify stores', () => {
 
   it('a closed-day bar with a dividend, or another red on that day, still refuses', async () => {
     const { db } = await verified(closes, { p: [{ ...bar('2026-01-03', 99), divCash: 0.5 }] });
+    // The dividend is in no series bar: the next session is red too (`closed_day_event`).
     expect(await check(db)).toEqual([
-      expect.stringMatching(/^AAA: 1 red day in its history .*: 2026-01-03 \(A\.bar_valid@p/),
+      'AAA: 1 stored bar is graded red: 2026-01-05. Its data has not passed the checks (pnpm health --date <date> explains a day).',
+      expect.stringMatching(
+        /^AAA: 2 red days in its history .*: 2026-01-03 \(A\.bar_valid@p, single_source\), 2026-01-05 \(closed_day_event@2026-01-03\)/,
+      ),
     ]);
     // A bar on a closed day that is also broken (a price not positive): refused.
     const broken = await verified(closes, { p: [{ ...bar('2026-01-03', 99), low: -1 }] });

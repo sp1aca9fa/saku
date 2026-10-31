@@ -1,0 +1,11 @@
+[Unit]
+Description=Saku monthly audit report
+
+[Timer]
+# The 1st; the 2nd and 3rd only retry a month not done (another job held the lock, an alert
+# was not delivered): a no-op otherwise.
+OnCalendar=*-*-01..03 11:47:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

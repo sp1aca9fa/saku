@@ -175,6 +175,33 @@ function isClosed(calendar: Sessions, date: TradingDate): boolean {
   }
 }
 
+/**
+ * Each primary bar on a closed day that carries a dividend or split, with the first session after
+ * it (on or before `to`; none yet, or past the calendar's end: left out until a run reaches it).
+ * Such a bar is kept out of the canonical series (requirements 04 "Closed-day bars"), so its event
+ * is in no bar the signals read and the return into that session would be read without it (a
+ * split as a fall): that session is graded red, `closed_day_event@<closed date>`, while the bar
+ * is stored. The event is never moved to a session (which one is a guess).
+ */
+function closedDayEvents(
+  closedDays: RawBar[],
+  sessions: Sessions,
+  to: TradingDate,
+): { date: TradingDate; next: TradingDate; reason: string }[] {
+  const out: { date: TradingDate; next: TradingDate; reason: string }[] = [];
+  for (const b of closedDays) {
+    if (b.divCash === 0 && b.splitFactor === 1) continue;
+    let next: TradingDate;
+    try {
+      next = sessions.after(b.date);
+    } catch {
+      continue;
+    }
+    if (next <= to) out.push({ date: b.date, next, reason: `closed_day_event@${b.date}` });
+  }
+  return out;
+}
+
 /** The first canonical bar of each symbol (where its graded history starts). */
 async function firstCanonical(db: Db): Promise<Map<number, TradingDate>> {
   const rows = await db
@@ -586,16 +613,27 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
         firstBars.get(s.id) ?? s.inceptionDate ?? undefined,
         o,
       );
+      const events = closedDayEvents(closedDays, o.sessions, o.to);
       for (const date of missing) {
+        const reasons = [
+          'primary_missing',
+          ...events.filter((e) => e.next === date).map((e) => e.reason),
+        ];
+        healthRows.push({ symbolId: s.id, date, health: { status: 'red', reasons } });
+        grade(date, 'red', s.ticker);
+      }
+      // Its bars on closed days are graded red with their layer A result, as with other bars.
+      const closed = closedDays.map((b) => b.date).filter((d) => !missing.includes(d));
+      for (const date of closed) {
         healthRows.push({
           symbolId: s.id,
           date,
-          health: { status: 'red', reasons: ['primary_missing'] },
+          health: { status: 'red', reasons: [`A.bar_valid@${bars.primary}`] },
         });
         grade(date, 'red', s.ticker);
       }
       await markCanonical(db, s.id, missing, 'red');
-      covered(s.id, missing);
+      covered(s.id, [...missing, ...closed].sort());
       continue;
     }
 
@@ -643,6 +681,12 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       standIns: si.standIns,
       refused: si.refused,
     });
+    for (const e of closedDayEvents(closedDays, o.sessions, o.to)) {
+      const h = health.get(e.next);
+      if (!h) continue;
+      h.status = 'red';
+      if (!h.reasons.includes(e.reason)) h.reasons.push(e.reason);
+    }
     // Closed stand-ins (rule 5) are settled only while the canonical bar is that stand-in: a day
     // built from another price is graded as a stand-in again (at least yellow, named), and the
     // margin test and the corrections treat it as open (`isOpenStandIn`). The close used by the

@@ -1,0 +1,205 @@
+// The monthly job (spec 2026-11-01 monthly-audit): the report stored once per text in the
+// activity log, its short form sent once per month and admin channel after the A1 gate only, a
+// month missed caught up, a failed delivery leaving the run failed without a heartbeat.
+import { Sessions } from '@saku/data';
+import {
+  addChannel,
+  createUser,
+  finishRun,
+  schema,
+  setSetting,
+  startRun,
+  symbolId,
+  upsertSymbols,
+} from '@saku/db';
+import { testDb } from '@saku/db/testing';
+import { eq } from 'drizzle-orm';
+import { describe, expect, it } from 'vitest';
+import { monthsDue, runMonthly, storedAudits } from './monthly';
+import { fakeNotifier, quiet } from './testkit';
+import type { ProviderLimits } from '../types';
+
+const sessions = new Sessions({
+  id: 't',
+  version: 't',
+  validFrom: '2025-01-01',
+  validTo: '2026-12-31',
+  holidays: [],
+});
+const TZ = 'Asia/Tokyo';
+const NOW = new Date('2026-04-01T03:00:00.000Z');
+const SECRET = 'test-secret-test-secret-test-secret';
+
+async function setup() {
+  const db = await testDb();
+  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  const aaa = (await symbolId(db, 'AAA'))!;
+  const admin = await createUser(db, {
+    username: 'ada',
+    passwordHash: 'x',
+    totpSecretEnc: 'x',
+    totpLastStep: 1,
+    backupCodeHashes: ['a'],
+    isAdmin: true,
+  });
+  await addChannel(db, admin, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+  // March graded green by a full run (started April 1 in Tokyo, so not one of March's runs).
+  const march = sessions.between('2026-03-01', '2026-03-31');
+  const run = await startRun(db, 'checks', new Date('2026-04-01T00:00:00.000Z'));
+  await db.insert(schema.bars).values({ symbolId: aaa, date: march[0]!, close: 1, source: 'p' });
+  await db
+    .insert(schema.healthCoverage)
+    .values({ runId: run, symbolId: aaa, fromDate: march[0]!, toDate: march.at(-1)! });
+  for (const date of march) {
+    await db
+      .insert(schema.dataHealth)
+      .values({ runId: run, date, symbolId: null, status: 'green', reasons: [] });
+  }
+  await finishRun(db, run, { ok: true, datesProcessed: [march.at(-1)!] });
+  return { db };
+}
+
+function options(down: string[] = [], now = NOW) {
+  const { notifier, sent } = fakeNotifier(down);
+  let beats = 0;
+  return {
+    sent,
+    beats: () => beats,
+    o: {
+      now,
+      timeZone: TZ,
+      sessions,
+      finalAfter: '20:00',
+      limits: new Map<string, ProviderLimits | undefined>(),
+      caFile: '/none',
+      token: async () => true,
+      alerting: {
+        notifiers: [notifier],
+        authSecret: SECRET,
+        context: () => ({ http: null as never, now, log: quiet }),
+        log: quiet,
+      },
+      log: quiet,
+      onComplete: async () => {
+        beats++;
+        return true;
+      },
+    },
+  };
+}
+
+describe('the monthly job', () => {
+  it('before the A1 gate: stores the report, sends nothing, completes with the heartbeat', async () => {
+    const { db } = await setup();
+    const { o, sent, beats } = options();
+    const r = await runMonthly(db, o);
+    expect(r).toMatchObject({ ok: true, months: ['2026-03'] });
+    expect(sent).toEqual([]);
+    expect(beats()).toBe(1);
+    const stored = await storedAudits(db);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      month: '2026-03',
+      verdict: 'Verdict: all clear.',
+      clear: true,
+      runId: r.runId,
+    });
+    expect(stored[0]!.text).toMatch(/^Audit report for 2026-03 \(Asia\/Tokyo: /);
+    const [run] = await db.select().from(schema.jobRuns).where(eq(schema.jobRuns.id, r.runId));
+    expect(run).toMatchObject({
+      jobType: 'monthly',
+      status: 'success',
+      datesProcessed: ['2026-03'],
+      heartbeatSent: true,
+    });
+  });
+
+  it('after the gate: sent once per month and channel; a rerun stores no copy and sends nothing', async () => {
+    const { db } = await setup();
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    const first = options();
+    expect((await runMonthly(db, first.o)).ok).toBe(true);
+    expect(first.sent).toHaveLength(1);
+    expect(first.sent[0]!.text.split('\n').slice(0, 2)).toEqual([
+      'Saku: audit report for 2026-03',
+      'Verdict: all clear.',
+    ]);
+    expect(first.sent[0]!.text).toContain(
+      'The full report is on the server: pnpm audit-report --month 2026-03',
+    );
+    // The health line closes it, as in every admin alert.
+    expect(first.sent[0]!.text.split('\n').at(-1)).toMatch(/^Data health: green\./);
+
+    const again = options();
+    expect((await runMonthly(db, again.o)).ok).toBe(true);
+    expect(again.sent).toEqual([]);
+    expect(await storedAudits(db)).toHaveLength(1);
+    expect(
+      (await db.select().from(schema.alertsSent)).filter((a) => a.type === 'monthly_audit'),
+    ).toHaveLength(1);
+  });
+
+  it('a month produced again with another text is stored beside the earlier one, never over it', async () => {
+    const { db } = await setup();
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    expect((await runMonthly(db, options(['ops']).o)).ok).toBe(false);
+    // A run of March that failed, found later (the report now says it).
+    const failed = await startRun(db, 'daily', new Date('2026-03-10T12:00:00.000Z'), '2026-03-09');
+    await finishRun(db, failed, { ok: false, error: 'source down' });
+    const up = options();
+    expect((await runMonthly(db, up.o)).ok).toBe(true);
+    const stored = await storedAudits(db);
+    expect(stored.map((s) => s.verdict)).toEqual([
+      'Verdict: all clear.',
+      'Verdict: needs attention (1 run failed or unfinished).',
+    ]);
+    expect(up.sent[0]!.text).toContain('Verdict: needs attention.');
+  });
+
+  it('an undelivered alert leaves the run failed, without the heartbeat, and is sent next time', async () => {
+    const { db } = await setup();
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    const down = options(['ops']);
+    const r = await runMonthly(db, down.o);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^2026-03: alert not delivered: fake channel .*Fake: HTTP 500/);
+    expect(down.beats()).toBe(0);
+    const [run] = await db.select().from(schema.jobRuns).where(eq(schema.jobRuns.id, r.runId));
+    expect(run).toMatchObject({ status: 'failed', heartbeatSent: false });
+    // The report itself was stored; the next run delivers the alert.
+    expect(await storedAudits(db)).toHaveLength(1);
+    const up = options();
+    expect((await runMonthly(db, up.o)).ok).toBe(true);
+    expect(up.sent.filter((m) => m.text.startsWith('Saku: audit report'))).toHaveLength(1);
+  });
+
+  it('catches up the months without a stored report since the first run', async () => {
+    const { db } = await setup();
+    await startRun(db, 'daily', new Date('2026-01-15T00:00:00.000Z'));
+    // A monthly run that never finished (it names its target from the start) did nothing.
+    await startRun(db, 'monthly', new Date('2026-04-01T02:00:00.000Z'), '2026-03');
+    const o = { now: NOW, timeZone: TZ, sessions, finalAfter: '20:00' };
+    expect(await monthsDue(db, o)).toEqual({ months: ['2026-01', '2026-02', '2026-03'] });
+    const r = await runMonthly(db, options().o);
+    expect(r.months).toEqual(['2026-01', '2026-02', '2026-03']);
+    // Done: the timer's retry days and a rerun change nothing.
+    expect(await monthsDue(db, o)).toEqual({ months: [] });
+    const rerun = options();
+    expect(await runMonthly(db, rerun.o)).toMatchObject({ ok: true, months: [] });
+    expect(await storedAudits(db)).toHaveLength(3);
+  });
+
+  it('a month whose last trading day is not final yet waits; the one before is audited', async () => {
+    const { db } = await setup();
+    // April 1, 01:00 in Tokyo: March is over there, but March 31 is 12:00 in New York.
+    const o = {
+      now: new Date('2026-03-31T16:00:00.000Z'),
+      timeZone: TZ,
+      sessions,
+      finalAfter: '20:00',
+    };
+    const due = await monthsDue(db, o);
+    expect(due.months).toEqual(['2026-02']);
+    expect(due.why).toMatch(/2026-03-31.*not final/);
+  });
+});
