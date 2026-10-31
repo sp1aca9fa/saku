@@ -151,7 +151,7 @@ describe('recomputeRecords', () => {
     const db = await testDb();
     const dir = lockDir();
     lock('jobs', dir, process.ppid);
-    const out = await recomputeRecords(db, { code: 'test', lockDir: dir });
+    const out = await recomputeRecords(db, { code: 'test', sessions, lockDir: dir });
     expect(out.exitCode).toBe(1);
     expect(out.stderr[0]).toMatch(/^A job is running/);
   });
@@ -159,7 +159,7 @@ describe('recomputeRecords', () => {
   it('runs and releases the lock when no job holds it', async () => {
     const db = await testDb();
     const dir = lockDir();
-    const out = await recomputeRecords(db, { code: 'test', lockDir: dir });
+    const out = await recomputeRecords(db, { code: 'test', sessions, lockDir: dir });
     expect(out).toEqual({
       exitCode: 0,
       stdout: ['0 recorded days, 0 new differences.'],

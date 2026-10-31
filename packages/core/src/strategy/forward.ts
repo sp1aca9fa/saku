@@ -7,14 +7,14 @@
 // unresolved stand-in price up to the day is moved by the margin test.
 import type { HealthStatus, RawBar, TradingDate } from '../domain';
 import { CASH_USD, parseTicker } from './backtest';
-import { type StrategyDay, evaluate, signalTickers } from './engine';
+import { type StrategyDay, evaluate, signalLookbacks, signalTickers } from './engine';
 import type { Holding, Strategy } from './schema';
 
 export const SAFE_STATE = 'Safe state';
 
 /**
- * More unresolved stand-in prices than this among the bars the signals read (the day's own and
- * earlier ones, counted per ticker and date) is red: the margin test evaluates every corner of
+ * More unresolved stand-in prices than this inside the signals' lookback (the day's own and
+ * earlier ones, counted per ticker and date; `readsStandIn`) is red: the margin test evaluates every corner of
  * their bands, 2^n evaluations.
  */
 export const MAX_MARGIN_STAND_INS = 4;
@@ -94,6 +94,28 @@ function shifted(
   };
 }
 
+/**
+ * Whether the signals' values on `date` read the ticker's bar of a stand-in (requirements 04
+ * stand-in rule 6: "inside a signal's lookback"): one of the ticker's last `bars` bars up to
+ * `date` (`signalLookbacks`). A total-return series also reads an older close on a day with a
+ * distribution: there it moves every later level of the index (elsewhere the shift cancels in the
+ * next day's return), so such a stand-in counts at any age for an operand reading total return.
+ */
+function readsStandIn(
+  list: RawBar[] | undefined,
+  date: TradingDate,
+  standIn: StandInPrice,
+  lookback: { bars: number; totalReturn: boolean },
+): boolean {
+  if (!list) return false;
+  let end = list.length;
+  while (end > 0 && list[end - 1]!.date > date) end--;
+  const i = list.findIndex((b) => b.date === standIn.date);
+  if (i < 0 || i >= end) return false;
+  if (i >= end - lookback.bars) return true;
+  return lookback.totalReturn && list[i]!.divCash !== 0;
+}
+
 const sameSignals = (a: StrategyDay, b: StrategyDay) =>
   Object.keys(a.signals).every((k) => a.signals[k] === b.signals[k]);
 
@@ -104,8 +126,9 @@ const sameSignals = (a: StrategyDay, b: StrategyDay) =>
  * For the tickers the signals read (not those only held, whose past prices no signal reads):
  * - each `lookback` day makes the day red (`T:lookback_red@date`, `T:lookback_ungraded@date`),
  *   requirements 04 "Red in the lookback"; the day's own grade keeps its own reasons;
- * - each unresolved stand-in before the day is named (`T:stand_in_lookback@date`, yellow:
- *   "secondary source only") and moved by the decision-margin test with the day's own.
+ * - each unresolved stand-in the signals read (`readsStandIn`: inside a signal's lookback) before
+ *   the day is named (`T:stand_in_lookback@date`, yellow: "secondary source only") and moved by
+ *   the decision-margin test with the day's own; older ones are neither named nor counted.
  */
 export function forwardDecision(
   strategy: Strategy,
@@ -120,6 +143,12 @@ export function forwardDecision(
     if (!reasons.includes(reason)) reasons.push(reason);
   };
   const reads = signalTickers(strategy);
+  const lookbacks = signalLookbacks(strategy);
+  /** The ticker's unresolved stand-ins the signals read on the day (none for a held ticker). */
+  const standInsRead = (t: string) =>
+    (health[t]?.standIns ?? []).filter((s) =>
+      readsStandIn(bars[t], date, s, lookbacks.get(t) ?? { bars: 0, totalReturn: false }),
+    );
   for (const t of dependencies(strategy)) {
     const h = health[t];
     if (!h) flag('red', `${t}:no_data`);
@@ -128,7 +157,7 @@ export function forwardDecision(
     for (const l of h.lookback ?? []) {
       if (l.date < date) flag('red', `${t}:lookback_${l.why}@${l.date}`);
     }
-    for (const s of h.standIns ?? []) {
+    for (const s of standInsRead(t)) {
       if (s.date < date) flag('yellow', `${t}:stand_in_lookback@${s.date}`);
     }
   }
@@ -141,13 +170,11 @@ export function forwardDecision(
   }
   if (!day) flag('red', 'no_decision');
 
-  // Decision-margin test over every unresolved stand-in price the signals read up to the day (its
-  // own and earlier ones), all at once: every corner of their bands (each close at its low or
+  // Decision-margin test over every unresolved stand-in price inside the signals' lookback (the
+  // day's own and earlier ones, `readsStandIn`), all at once: every corner of their bands (each close at its low or
   // high end), since two shifts together can flip what one cannot.
   if (day && status !== 'red') {
-    const banded = reads.flatMap((t) =>
-      (health[t]?.standIns ?? []).filter((s) => s.date <= date).map((s) => ({ t, ...s })),
-    );
+    const banded = reads.flatMap((t) => standInsRead(t).map((s) => ({ t, ...s })));
     const label = `${[...new Set(banded.map((b) => b.t))].join('+')}:decision_margin`;
     if (banded.length > MAX_MARGIN_STAND_INS) flag('red', label);
     else if (banded.length > 0) {

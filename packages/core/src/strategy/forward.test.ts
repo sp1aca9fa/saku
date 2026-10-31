@@ -255,21 +255,104 @@ describe('forwardDecision', () => {
     expect(flips.reasons).toContain('X:decision_margin');
   });
 
-  it('more than 4 unresolved stand-in prices the signals read is red, counted per date', () => {
-    const many = (n: number) => ({
+  it('more than 4 unresolved stand-in prices inside the lookback is red, counted per date', () => {
+    // SMA(5): the day reads the last 5 bars (days 3-7); days 0-2 are outside its lookback.
+    const long = Strategy.parse({
+      ...strategy,
+      signals: [
+        {
+          id: 'A',
+          type: 'compare',
+          left: { indicator: 'price', ticker: 'X' },
+          op: '>',
+          right: { indicator: 'sma', ticker: 'X', length: 5 },
+        },
+      ],
+    });
+    const D7 = day(7);
+    const input = { X: bars([100, 100, 100, 100, 100, 100, 100, 110]) };
+    const on = (days: number[]) => ({
       ...green,
-      standIns: Array.from({ length: n }, (_, i) => ({ date: day(i), band: 1e-6 })),
+      standIns: days.map((i) => ({ date: day(i), band: 1e-6 })),
     });
-    const input = { X: bars([100, 100, 100, 110]) };
-    expect(forwardDecision(strategy, D, input, { X: many(4), X3: green })).toMatchObject({
-      dataStatus: 'yellow',
-    });
-    const five = forwardDecision(strategy, D, input, {
-      X: { ...many(4), standIns: [...many(4).standIns, { date: D, band: 1e-6 }] },
-      X3: green,
-    });
+    const four = forwardDecision(long, D7, input, { X: on([4, 5, 6, 7]), X3: green });
+    expect(four).toMatchObject({ dataStatus: 'yellow', allocation: 'Risk on' });
+    const five = forwardDecision(long, D7, input, { X: on([3, 4, 5, 6, 7]), X3: green });
     expect(five).toMatchObject({ dataStatus: 'red', safeStateApplied: true });
     expect(five.reasons).toContain('X:decision_margin');
+    // Older ones are outside the lookback: neither counted nor named (four are, yellow).
+    const older = forwardDecision(long, D7, input, { X: on([0, 1, 2, 4, 5, 6, 7]), X3: green });
+    expect(older).toMatchObject({ dataStatus: 'yellow', allocation: 'Risk on' });
+    expect(older.reasons).toEqual([4, 5, 6].map((i) => `X:stand_in_lookback@${day(i)}`));
+  });
+
+  it('the lookback is the bars the indicators read: price 1, SMA n, volatility n + 1', () => {
+    const vol = Strategy.parse({
+      ...strategy,
+      signals: [
+        {
+          id: 'A',
+          type: 'compare',
+          left: { indicator: 'volatility', ticker: 'X', length: 3 },
+          op: '<',
+          right: { threshold: 1000 },
+        },
+      ],
+    });
+    const input = { X: bars([100, 101, 100, 101, 100]) };
+    const at = (i: number) =>
+      forwardDecision(vol, day(4), input, {
+        X: { ...green, standIns: [{ date: day(i), band: 1e-6 }] },
+        X3: green,
+      });
+    // Volatility of 3 returns on day 4 reads the closes of days 1-4.
+    expect(at(1).reasons).toEqual([`X:stand_in_lookback@${day(1)}`]);
+    expect(at(0)).toMatchObject({ dataStatus: 'green', reasons: [] });
+    // Price alone reads the day only.
+    const price = Strategy.parse({
+      ...strategy,
+      signals: [
+        {
+          id: 'A',
+          type: 'compare',
+          left: { indicator: 'price', ticker: 'X' },
+          op: '>',
+          right: { threshold: 1 },
+        },
+      ],
+    });
+    const p = (i: number) =>
+      forwardDecision(price, day(4), input, {
+        X: { ...green, standIns: [{ date: day(i), band: 1e-6 }] },
+        X3: green,
+      });
+    expect(p(3)).toMatchObject({ dataStatus: 'green', reasons: [] });
+    expect(p(4)).toMatchObject({ dataStatus: 'green' });
+  });
+
+  it('total return: an older stand-in on a day with a distribution counts at any age', () => {
+    const tr = Strategy.parse({
+      ...strategy,
+      signals: [
+        {
+          id: 'A',
+          type: 'compare',
+          left: { indicator: 'price', ticker: 'X', totalReturn: true },
+          op: '>',
+          right: { threshold: 0.5 },
+        },
+      ],
+    });
+    const input = {
+      X: bars([100, 100, 100, 100, 100]).map((b, i) => (i === 1 ? { ...b, divCash: 1 } : b)),
+    };
+    const with1 = (i: number) =>
+      forwardDecision(tr, day(4), input, {
+        X: { ...green, standIns: [{ date: day(i), band: 1e-6 }] },
+        X3: green,
+      });
+    expect(with1(1).reasons).toEqual([`X:stand_in_lookback@${day(1)}`]);
+    expect(with1(2)).toMatchObject({ dataStatus: 'green', reasons: [] });
   });
 
   it('red when the day cannot be evaluated (no bar that day)', () => {

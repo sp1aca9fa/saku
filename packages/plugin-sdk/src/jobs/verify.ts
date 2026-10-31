@@ -96,6 +96,8 @@ export interface VerifySummary {
   standIns: number;
   /** Stand-ins the primary has now replaced, off by more than the layer B close tolerance. */
   standInsOff: { ticker: string; date: TradingDate; deviation: number }[];
+  /** Stored canonical bars this run's build no longer produced, removed (`writeCanonical`). */
+  removedCanonical: RemovedCanonical[];
   /** The stored `issuer_nav_tolerance` does not parse (layer D observes only; yellow). */
   toleranceInvalid: boolean;
   /** `issuer_nav_tolerance` keys that name no active symbol. */
@@ -218,13 +220,39 @@ export async function rawBars(db: Db, symbolId: number): Promise<Map<string, Raw
   return bySource;
 }
 
-/** Writes the canonical bars (primary or stand-in) with our adjusted series and health status. */
+/** A stored canonical bar the run's build no longer produced, removed (see `writeCanonical`). */
+export interface RemovedCanonical {
+  ticker: string;
+  date: TradingDate;
+  source: string;
+  standIn: boolean;
+  close: number;
+  /** Its grade before removal (null: never graded). */
+  status: HealthStatus | null;
+}
+
+/**
+ * Writes the canonical bars (primary or stand-in) with our adjusted series and health status.
+ * Canonical bars are derived, rebuilt from the raw bars by every run: a stored canonical bar
+ * dated from the primary's first bar (`from`) to the run's date that this build did not produce
+ * (a stand-in a later run refused while the primary still lacks the day, a date the primary no
+ * longer has, a bar on a day that is no session once the build leaves such days out) is removed,
+ * so no stale price or grade greener than the day's own stays where the signals and the forward
+ * step read (requirements 04: never a normal signal on red data). The raw bars, their revision
+ * log and the `stand_ins` row stay; the day is then read through its `data_health` grade
+ * (`primary_missing` or `stand_in_refused`, red). Bars before `from` (kept from an earlier
+ * primary, graded by no check; registration refuses them) are left as they are. Returns the
+ * removed ones, for the run log.
+ */
 async function writeCanonical(
   db: Db,
   symbolId: number,
   bars: CanonicalBar[],
   health: Map<TradingDate, DayHealth>,
-) {
+  span: { from: TradingDate; to: TradingDate },
+): Promise<Omit<RemovedCanonical, 'ticker'>[]> {
+  const built = new Set(bars.map((b) => b.date));
+  const removed: Omit<RemovedCanonical, 'ticker'>[] = [];
   const adj = totalReturnIndex(bars);
   const rows = bars.map((b, i) => ({
     symbolId,
@@ -242,6 +270,29 @@ async function writeCanonical(
     status: health.get(b.date)?.status ?? null,
   }));
   await db.transaction(async (tx) => {
+    const stored = await tx
+      .select({
+        date: schema.bars.date,
+        source: schema.bars.source,
+        standIn: schema.bars.standIn,
+        close: schema.bars.close,
+        status: schema.bars.status,
+      })
+      .from(schema.bars)
+      .where(
+        and(
+          eq(schema.bars.symbolId, symbolId),
+          gte(schema.bars.date, span.from),
+          lte(schema.bars.date, span.to),
+        ),
+      );
+    for (const row of stored) {
+      if (built.has(row.date)) continue;
+      await tx
+        .delete(schema.bars)
+        .where(and(eq(schema.bars.symbolId, symbolId), eq(schema.bars.date, row.date)));
+      removed.push(row);
+    }
     for (let i = 0; i < rows.length; i += CHUNK) {
       const chunk = rows.slice(i, i + CHUNK);
       await tx
@@ -265,6 +316,7 @@ async function writeCanonical(
         });
     }
   });
+  return removed.sort((a, b) => (a.date < b.date ? -1 : 1));
 }
 
 /**
@@ -359,6 +411,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   };
   let standInCount = 0;
   const standInsOff: VerifySummary['standInsOff'] = [];
+  const removedCanonical: RemovedCanonical[] = [];
   const firstBars = await firstCanonical(db);
   /** Full passes: the dates graded per symbol (a missing non-green row is green only inside). */
   const coverage: { symbolId: number; fromDate: TradingDate; toDate: TradingDate }[] = [];
@@ -524,7 +577,11 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       standIns: si.standIns,
       refused: si.refused,
     });
-    await writeCanonical(db, s.id, merged, health);
+    const removed = await writeCanonical(db, s.id, merged, health, {
+      from: primary[0]!.date,
+      to: o.to,
+    });
+    removedCanonical.push(...removed.map((r) => ({ ticker: s.ticker, ...r })));
     covered(s.id, dates);
     for (const [date, h] of health) {
       healthRows.push({ symbolId: s.id, date, health: h });
@@ -614,6 +671,10 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   for (const [date, h] of overall) healthRows.push({ symbolId: null, date, health: h });
 
   const inRange = (date: TradingDate) => date <= o.to && (!o.from || date >= o.from);
+  // A day whose canonical bar was removed is read through its stored grade: that symbol row is
+  // stored whatever the run's window or mode, so an older (greener) row is never the latest.
+  const ids = new Map(symbols.map((s) => [s.ticker, s.id]));
+  const removedKeys = new Set(removedCanonical.map((r) => `${ids.get(r.ticker)} ${r.date}`));
   const inWindow = results.filter((r) => inRange(r.date));
   const byStatus: Record<string, number> = {};
   for (const r of inWindow) byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;
@@ -636,8 +697,9 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     o.runId,
     healthRows.filter(
       (h) =>
-        inRange(h.date) &&
-        (o.mode === 'daily' || h.symbolId === null || h.health.status !== 'green'),
+        (inRange(h.date) &&
+          (o.mode === 'daily' || h.symbolId === null || h.health.status !== 'green')) ||
+        (h.symbolId !== null && removedKeys.has(`${h.symbolId} ${h.date}`)),
     ),
   );
   return {
@@ -648,6 +710,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     reasons: overall.has(o.to) ? overall.get(o.to)!.reasons : ['no_data'],
     standIns: standInCount,
     standInsOff,
+    removedCanonical,
     toleranceInvalid: nav.invalid,
     toleranceUnmatched: unmatchedTolerances(
       nav.tolerances,

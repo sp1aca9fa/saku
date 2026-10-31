@@ -54,6 +54,30 @@ export function signalTickers(s: Strategy): string[] {
   ];
 }
 
+/**
+ * How many of a ticker's own latest bars, up to and including a date, the signals' values on that
+ * date read (the formulas in `indicators.ts`, requirements 06): a price 1 bar, an SMA of n n bars,
+ * a volatility of n n + 1 bars (n returns). Per signal ticker: the longest of its operands, and
+ * whether any operand reads its total-return series. A signal's state can still carry an older
+ * value through its tolerance band (the previous state is kept inside it); that is the state on
+ * the day before, decided then.
+ */
+export function signalLookbacks(s: Strategy): Map<string, { bars: number; totalReturn: boolean }> {
+  const out = new Map<string, { bars: number; totalReturn: boolean }>();
+  for (const c of s.signals.flatMap(comparisonsOf)) {
+    for (const o of [c.left, c.right]) {
+      if (!('ticker' in o)) continue;
+      const bars = o.indicator === 'price' ? 1 : o.indicator === 'sma' ? o.length : o.length + 1;
+      const prev = out.get(o.ticker);
+      out.set(o.ticker, {
+        bars: Math.max(prev?.bars ?? 0, bars),
+        totalReturn: (prev?.totalReturn ?? false) || o.totalReturn,
+      });
+    }
+  }
+  return out;
+}
+
 const operandKey = (o: IndicatorOperand) =>
   `${o.indicator}:${o.ticker}:${'length' in o ? o.length : ''}:${o.totalReturn ? 'tr' : 'p'}`;
 

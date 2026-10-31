@@ -17,7 +17,7 @@ import {
   verifyChain,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, lte, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
 import { sendRecomputeDiffers, sendStrategyAlerts } from './alerts';
@@ -342,7 +342,7 @@ describe('forward', () => {
         .where(eq(schema.strategyVersions.id, version.id));
     await setJson(JSON.stringify(broken));
     expect((await forward(db, { runId, sessions, to: D[3]! })).errors).toHaveLength(1);
-    expect(await annotateStandInCorrections(db, runId)).toEqual({
+    expect(await annotateStandInCorrections(db, runId, sessions)).toEqual({
       annotations: 0,
       deferred: [],
       errors: [],
@@ -354,7 +354,7 @@ describe('forward', () => {
     expect((await forward(db, { runId, sessions, to: D[3]! })).errors).toEqual([]);
     // The stand-in day's entry and the next one, appended while it was unresolved (its lookback
     // reads the stand-in's close).
-    expect(await annotateStandInCorrections(db, runId)).toEqual({
+    expect(await annotateStandInCorrections(db, runId, sessions)).toEqual({
       annotations: 2,
       deferred: [],
       errors: [],
@@ -373,7 +373,7 @@ describe('forward', () => {
       [D[3], detail(record[1]!.allocation)],
     ]);
     expect(record.map((e) => e.date)).toEqual([D[2], D[3]]);
-    expect((await annotateStandInCorrections(db, runId)).annotations).toBe(0);
+    expect((await annotateStandInCorrections(db, runId, sessions)).annotations).toBe(0);
     expect(await annotationsOf(db, version.id, 'stand_in_corrected')).toHaveLength(2);
     // The record itself is untouched.
     expect(await forwardRecord(db, version.id)).toEqual(record);
@@ -397,7 +397,7 @@ describe('forward', () => {
       resolvedAt: '2026-01-08T21:30:00.000Z',
     });
     expect((await forward(db, { runId, sessions, to: D[3]! })).appended).toBe(2);
-    expect(await annotateStandInCorrections(db, runId)).toEqual({
+    expect(await annotateStandInCorrections(db, runId, sessions)).toEqual({
       annotations: 0,
       deferred: [],
       errors: [],
@@ -689,7 +689,11 @@ describe('forward: red and stand-ins in the lookback', () => {
     ],
   };
 
-  async function graded() {
+  /**
+   * `gap`: a session AAA's primary lacks (a stand-in from `s` fills it); `from`: the index of
+   * AAA's first bar in every source. A second secondary `s2` has a role but no bars.
+   */
+  async function graded(o: { gap?: string; from?: number } = {}) {
     const db = await testDb();
     await upsertSymbols(db, [
       { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
@@ -698,17 +702,20 @@ describe('forward: red and stand-ins in the lookback', () => {
     await seedSourceRoles(db, [
       { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },
       { key: 's', dataKind: 'bars', suggestedRole: 'secondary' },
+      { key: 's2', dataKind: 'bars', suggestedRole: 'secondary' },
     ]);
     for (const [ticker, base] of [
       ['AAA', 100],
       ['BBB', 50],
     ] as const) {
-      const list = series(S.map((_, i) => base + i));
+      const list = series(S.map((_, i) => base + i)).filter(
+        (b) => ticker !== 'AAA' || b.date >= S[o.from ?? 0]!,
+      );
       for (const source of ['p', 's']) {
         await storeRawBars(db, {
           symbolId: (await symbolId(db, ticker))!,
           source,
-          bars: list,
+          bars: list.filter((b) => !(ticker === 'AAA' && source === 'p' && b.date === o.gap)),
           runId: null,
           fetchedAt: 't',
         });
@@ -744,7 +751,7 @@ describe('forward: red and stand-ins in the lookback', () => {
         reasons: (JSON.parse(e.payload) as { reasons: string[] }).reasons,
       }));
     };
-    return { db, version, runId, ids, bar, record };
+    return { db, version, runId, ids, bar, record, series };
   }
 
   it('clean: the normal decision (the control)', async () => {
@@ -883,6 +890,108 @@ describe('forward: red and stand-ins in the lookback', () => {
       allocation: 'Risk on',
       dataStatus: 'green',
       reasons: [],
+    });
+  });
+  it('a stand-in a later run refuses: its canonical bar is removed, the day and the days after it are red', async () => {
+    const D0 = S[18]!;
+    const g = await graded({ gap: D0 });
+    // The first (full) check accepted s's bar for D0: a canonical stand-in, yellow.
+    const [stood] = await g.db.select().from(schema.bars).where(g.bar('AAA', D0));
+    expect(stood).toMatchObject({ standIn: true, source: 's', status: 'yellow' });
+    // A second secondary now disagrees on D0 by 1%: the stand-in is refused. The run's window
+    // (a daily run after T) leaves D0 out, so only the removal stores D0's red grade.
+    await storeRawBars(g.db, {
+      symbolId: g.ids.AAA,
+      source: 's2',
+      bars: series(S.map((_, i) => 100 + i)).map((b) =>
+        b.date === D0 ? { ...b, close: b.close * 1.01, high: b.high! * 1.01 } : b,
+      ),
+      runId: null,
+      fetchedAt: 't',
+    });
+    const checked = await verify(g.db, {
+      runId: await startRun(g.db, 'daily'),
+      sessions,
+      mode: 'daily',
+      from: S[21]!,
+      to: S.at(-1)!,
+    });
+    expect(checked.removedCanonical).toEqual([
+      { ticker: 'AAA', date: D0, source: 's', standIn: true, close: 118, status: 'yellow' },
+    ]);
+    expect(await g.db.select().from(schema.bars).where(g.bar('AAA', D0))).toEqual([]);
+    // The stand-in record and the raw bars stay.
+    expect(
+      await g.db.select().from(schema.standIns).where(eq(schema.standIns.symbolId, g.ids.AAA)),
+    ).toHaveLength(1);
+    // D0 itself (catch-up from D0) and every day after it in the window: the safe state.
+    await setSetting(g.db, 'forward_records_from', D0);
+    const record = await g.record();
+    expect(record.map((e) => [e.date, e.allocation, e.dataStatus])).toEqual([
+      [D0, 'Safe state', 'red'],
+      [S[19], 'Safe state', 'red'],
+      [T, 'Safe state', 'red'],
+    ]);
+    expect(record[0]!.reasons).toContain('AAA:primary_missing');
+    expect(record[2]!.reasons).toContain(`AAA:lookback_red@${D0}`);
+  });
+
+  it("a window session before the ticker's first canonical bar counts for nothing", async () => {
+    // AAA's history starts at S[15]: T's window (S[10]-S[19]) has 5 sessions before it.
+    const { record } = await graded({ from: 15 });
+    expect(await record()).toEqual([
+      { date: T, allocation: 'Risk on', dataStatus: 'green', safeStateApplied: false, reasons: [] },
+    ]);
+  });
+
+  it('a daily check after a full one grades every canonical bar: no NULL status is left', async () => {
+    const { db, record } = await graded();
+    await db.update(schema.bars).set({ status: null });
+    await verify(db, {
+      runId: await startRun(db, 'daily'),
+      sessions,
+      mode: 'daily',
+      from: sessions.before(T, 10),
+      to: T,
+    });
+    const statuses = await db
+      .select({ date: schema.bars.date, status: schema.bars.status })
+      .from(schema.bars)
+      .where(lte(schema.bars.date, T));
+    expect(statuses.length).toBe(2 * 21);
+    expect(statuses.filter((r) => r.status === null)).toEqual([]);
+    expect((await record())[0]).toMatchObject({ allocation: 'Risk on', dataStatus: 'green' });
+  });
+
+  it('a stand-in correction keeps a day still red in the safe state (lookback red)', async () => {
+    const { db, version, runId, ids, bar, record } = await graded();
+    await db.update(schema.bars).set({ status: 'red' }).where(bar('AAA', S[17]!));
+    // T's AAA bar was a stand-in in this run, corrected 1% by the primary in a later one.
+    await db.insert(schema.standIns).values({
+      symbolId: ids.AAA,
+      date: T,
+      source: 's',
+      close: 120 * 1.01,
+      band: 0.001,
+      basis: 'index',
+      runId,
+    });
+    expect((await record())[0]).toMatchObject({ allocation: 'Safe state' });
+    await db
+      .update(schema.standIns)
+      .set({
+        primaryClose: 120,
+        deviation: 0.01,
+        resolvedAt: new Date(Date.now() + 1000).toISOString(),
+        resolvedRunId: await startRun(db, 'daily'),
+      })
+      .where(eq(schema.standIns.symbolId, ids.AAA));
+    expect(await annotateStandInCorrections(db, null, sessions)).toMatchObject({ annotations: 1 });
+    const [a] = await annotationsOf(db, version.id, 'stand_in_corrected');
+    expect(a!.detail).toMatchObject({
+      recordedAllocation: 'Safe state',
+      correctedAllocation: 'Safe state',
+      differs: false,
     });
   });
 });

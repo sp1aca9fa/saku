@@ -11,6 +11,7 @@ import {
   type Db,
   activeSymbols,
   finishRun,
+  getSetting,
   revisionsOfRun,
   seedSourceRoles,
   sourceRolesOf,
@@ -163,7 +164,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     const recomputeAndTell = async () => {
       // First the corrected stand-ins (a day one explains is not a recompute difference, so a
       // stand-in this run resolved never reads as "the engine decides differently").
-      const c = await annotateStandInCorrections(db, runId);
+      const c = await annotateStandInCorrections(db, runId, sessions);
       log.info(`Stand-in corrections: ${c.annotations} new annotations`);
       // A correction waiting for another unresolved stand-in is annotated by a later run. After
       // the weekly full refetch a stand-in still unresolved is not one a source is late with:
@@ -323,6 +324,15 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       );
     }
     log.info(`Data health on ${target}: ${checked.health}`, { standIns: checked.standIns });
+    // Canonical bars are derived: one the build no longer produced was removed (verify), each
+    // named here; its raw bars, revision log and stand-in record stay.
+    for (const r of checked.removedCanonical) {
+      log.warn(
+        `${r.ticker} ${r.date}: canonical bar removed, the checks no longer build it ` +
+          `(was ${r.standIn ? 'a stand-in' : 'a bar'} from ${r.source}, close ${r.close}, ` +
+          `${r.status ?? 'ungraded'}); the day is read through its grade`,
+      );
+    }
     for (const s of checked.standInsOff) {
       log.warn(
         `${s.ticker} ${s.date}: the stand-in was off the primary by ${(100 * s.deviation).toFixed(3)}%`,
@@ -383,7 +393,18 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         if (!disk) log.warn('Disk space not measured (the database is not a file)');
         else if (diskWarns(disk)) {
           const sent = await sendDiskSpace(db, { ...alerting, disk });
-          if (sent.failed.length > 0) markIncomplete('alerts');
+          if (sent.failed.length === 0) {
+            // Delivered (or no admin channel): nothing more to do.
+          } else if (await getSetting(db, 'forward_records_from')) markIncomplete('alerts');
+          else {
+            // Before the A1 gate an undelivered operational alert is only logged: an incomplete
+            // run is rerun hourly, and the latest run of a day is the one the gate counting
+            // (spike) judges, so a broken admin channel must not fail a gate day. It is told
+            // again at the next daily run (not recorded as sent).
+            log.warn('Disk alert not delivered (before the A1 gate; the run is not held for it)', {
+              failed: sent.failed,
+            });
+          }
         }
       } catch (e) {
         log.warn('Disk space not measured', { error: String(e) });

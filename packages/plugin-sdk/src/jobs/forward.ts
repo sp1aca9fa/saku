@@ -218,7 +218,8 @@ export interface StandInCorrectionSummary {
  * one `stand_in_corrected` annotation on every recorded entry that used it (`standInCorrections`:
  * the stand-in day's and each later day's appended while it was unresolved, whose lookback may
  * read it): the recorded allocation against the decision on the corrected bars (only bars dated
- * <= the entry's date, all green: the primary's bar is there now).
+ * <= the entry's date; the primary's bar is there now) with the day's health as graded now
+ * (`healthOf`), so a day still red stays in the safe state in the comparison.
  *
  * Caught up from `stand_ins` (not one run's list), so a version skipped in the resolving run is
  * annotated in a later one; idempotent. Run it before every recompute (daily, weekly, `pnpm
@@ -229,6 +230,7 @@ export interface StandInCorrectionSummary {
 export async function annotateStandInCorrections(
   db: Db,
   runId: string | null,
+  sessions: Sessions,
 ): Promise<StandInCorrectionSummary> {
   const summary: StandInCorrectionSummary = { annotations: 0, deferred: [], errors: [] };
   const corrected = (await resolvedStandIns(db)).filter(
@@ -236,7 +238,7 @@ export async function annotateStandInCorrections(
   );
   if (corrected.length === 0) return summary;
   const unresolved = await unresolvedStandIns(db);
-  const { loadRows, barsOf } = await reader(db);
+  const { symbolIds, loadRows, barsOf } = await reader(db);
   const errors = new Set<string>();
   for (const version of await allVersions(db)) {
     const parsed = parseVersion(version);
@@ -264,8 +266,12 @@ export async function annotateStandInCorrections(
       });
     }
     for (const { standIn, recorded } of pending.annotate) {
-      const bars = barsOf(await loadRows(deps, recorded.date));
-      const now = forwardDecision(strategy, recorded.date, bars, allGreen(deps));
+      const rows = await loadRows(deps, recorded.date);
+      // The day's health as graded now (the primary's bar is there now): a day still red for
+      // another reason (a red day in the lookback, say) stays in the safe state, so the corrected
+      // allocation never claims a normal signal the data does not allow.
+      const health = await healthOf(db, symbolIds, rows, recorded.date, sessions);
+      const now = forwardDecision(strategy, recorded.date, barsOf(rows), health);
       await annotate(db, {
         versionId: version.id,
         date: recorded.date,
@@ -574,9 +580,6 @@ export function upTo(rows: Rows, date: TradingDate): Rows {
   }
   return out;
 }
-
-const allGreen = (tickers: string[]): Record<string, TickerHealth> =>
-  Object.fromEntries(tickers.map((t) => [t, { status: 'green' as const, reasons: [] }]));
 
 export interface RecomputeSummary {
   checked: number;

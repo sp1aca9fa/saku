@@ -113,11 +113,11 @@ export function registerStrategy(
  */
 export function recomputeRecords(
   db: Db,
-  o: { code: string; lockDir?: string },
+  o: { code: string; sessions: Sessions; lockDir?: string },
 ): Promise<CommandOutput> {
   return withJobsLock(o.lockDir, async () => {
     const out: string[] = [];
-    const c = await annotateStandInCorrections(db, null);
+    const c = await annotateStandInCorrections(db, null, o.sessions);
     if (c.annotations) out.push(`${c.annotations} stand-in corrections annotated.`);
     out.push(...c.errors);
     const r = await recompute(db, { runId: null, code: o.code, waiting: c.deferred });

@@ -310,6 +310,11 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
     from: o.sessions.before(o.target, DAILY_OVERLAP),
   });
   o.log.info(`Drill: data health on ${o.target}: ${checked.health}`, { reasons: checked.reasons });
+  if (checked.removedCanonical.length > 0) {
+    o.log.info('Drill: canonical bars the checks no longer build (removed on the copy)', {
+      removed: checked.removedCanonical.map((r) => `${r.ticker} ${r.date}`),
+    });
+  }
 
   // Each version decides the day as the forward step does, without appending.
   const { symbolIds, loadRows, barsOf } = await reader(db);

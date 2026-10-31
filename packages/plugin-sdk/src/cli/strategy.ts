@@ -98,13 +98,18 @@ function load(file: string | undefined) {
   return parsed.data!;
 }
 
-/** The market calendar and the latest final session, as registration reads them. */
-async function registrationInput() {
+/** The market calendar (xnys), as the daily run reads it. */
+async function marketSessions(): Promise<Sessions> {
   const calendar = (await loadPlugins()).calendars
     .flatMap((c) => c.calendars)
     .find((c) => c.id === 'xnys');
   if (!calendar) fail('No xnys calendar plug-in is loaded.');
-  const sessions = new Sessions(calendar!);
+  return new Sessions(calendar!);
+}
+
+/** The market calendar and the latest final session, as registration reads them. */
+async function registrationInput() {
+  const sessions = await marketSessions();
   let through: string;
   try {
     // The latest session whose data is final now: a full check must have graded through it.
@@ -180,7 +185,7 @@ if (tool === 'strategy' && command === 'check') {
   }
   process.exit(bad ? 1 : 0);
 } else if (tool === 'strategy' && command === 'recompute') {
-  finish(await recomputeRecords(db, { code: codeVersion() }));
+  finish(await recomputeRecords(db, { code: codeVersion(), sessions: await marketSessions() }));
 } else if (tool === 'journal' && command === 'add') {
   const [versionId, signalDate, action] = rest;
   if (!versionId || !signalDate || !isTradingDate(signalDate))
