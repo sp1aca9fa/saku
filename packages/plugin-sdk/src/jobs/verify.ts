@@ -41,12 +41,13 @@ import {
   issuerRecordsOf,
   navTolerances,
   schema,
+  standInMatchesBar,
   unmatchedTolerances,
   seriesPointInTime,
 } from '@saku/db';
 import { cashSeries } from './cash';
 import type { NotCompared } from './issuer';
-import { and, asc, eq, gte, isNull, lte, min, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, isNotNull, isNull, lte, min, sql } from 'drizzle-orm';
 
 const CHUNK = 500;
 const sqlExcluded = (column: string) => sql.raw(`excluded.${column}`);
@@ -100,6 +101,17 @@ export interface VerifySummary {
   standInsOff: { ticker: string; date: TradingDate; deviation: number }[];
   /** Stored canonical bars this run's build no longer produced, removed (`writeCanonical`). */
   removedCanonical: RemovedCanonical[];
+  /**
+   * Closed stand-ins (rule 5) whose canonical bar this run built differently (another secondary,
+   * a revised value) or refused (`now` null): no longer settled; such a day is graded at least
+   * yellow, `stand_in_closed_changed@<source>` (a refused one is red already).
+   */
+  closedChanged: {
+    ticker: string;
+    date: TradingDate;
+    closed: { source: string; close: number };
+    now: { source: string; close: number } | null;
+  }[];
   /** The stored `issuer_nav_tolerance` does not parse (layer D observes only; yellow). */
   toleranceInvalid: boolean;
   /** `issuer_nav_tolerance` keys that name no active symbol. */
@@ -348,8 +360,10 @@ async function markCanonical(db: Db, symbolId: number, dates: TradingDate[], sta
 /**
  * Records new stand-ins (a later run may still change an unresolved one) and resolves those the
  * primary has now replaced, closed ones too (rule 5: a primary that arrives after the close is
- * still compared and recorded; the close stays). Returns the resolved ones off by more than the
- * close tolerance.
+ * still compared and recorded; the close stays). A closed row's close is frozen, so it is compared
+ * against the close the canonical bar last used (`lastUsed`: the stored canonical stand-in close
+ * before this run rebuilt the day), as an open one's last stored close is: the price the entries
+ * read until now. Returns the resolved ones off by more than the close tolerance.
  */
 async function recordStandIns(
   db: Db,
@@ -357,6 +371,7 @@ async function recordStandIns(
   symbolId: number,
   used: { date: TradingDate; source: string; bar: RawBar; band: number; basis: string }[],
   primary: Map<TradingDate, RawBar>,
+  lastUsed: Map<TradingDate, number>,
 ): Promise<{ date: TradingDate; deviation: number }[]> {
   for (const s of used) {
     await db
@@ -386,7 +401,8 @@ async function recordStandIns(
   for (const row of open) {
     const p = primary.get(row.date);
     if (!p) continue;
-    const deviation = Math.abs(p.close / row.close - 1);
+    const stood = row.closedAt !== null ? (lastUsed.get(row.date) ?? row.close) : row.close;
+    const deviation = Math.abs(p.close / stood - 1);
     await db
       .update(schema.standIns)
       .set({
@@ -423,6 +439,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   let standInCount = 0;
   const standInsOff: VerifySummary['standInsOff'] = [];
   const removedCanonical: RemovedCanonical[] = [];
+  const closedChanged: VerifySummary['closedChanged'] = [];
   const firstBars = await firstCanonical(db);
   /** Full passes: the dates graded per symbol (a missing non-green row is green only inside). */
   const coverage: { symbolId: number; fromDate: TradingDate; toDate: TradingDate }[] = [];
@@ -601,6 +618,47 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       standIns: si.standIns,
       refused: si.refused,
     });
+    // Closed stand-ins (rule 5) are settled only while the canonical bar is that stand-in: a day
+    // built from another price is graded as a stand-in again (at least yellow, named), and the
+    // margin test and the corrections treat it as open (`isOpenStandIn`). The close used by the
+    // stored canonical bar is kept to compare a late primary with (`recordStandIns`).
+    const closedRows = await db
+      .select({
+        date: schema.standIns.date,
+        source: schema.standIns.source,
+        close: schema.standIns.close,
+      })
+      .from(schema.standIns)
+      .where(
+        and(
+          eq(schema.standIns.symbolId, s.id),
+          isNotNull(schema.standIns.closedAt),
+          isNull(schema.standIns.resolvedAt),
+        ),
+      );
+    const lastUsed = new Map<TradingDate, number>();
+    for (const c of closedRows) {
+      const [stored] = await db
+        .select({ standIn: schema.bars.standIn, close: schema.bars.close })
+        .from(schema.bars)
+        .where(and(eq(schema.bars.symbolId, s.id), eq(schema.bars.date, c.date)));
+      if (stored?.standIn) lastUsed.set(c.date, stored.close);
+      const built = merged.find((b) => b.date === c.date);
+      if (built && !built.standIn) continue; // the primary's bar: resolved below
+      if (built && standInMatchesBar(c, built)) continue;
+      closedChanged.push({
+        ticker: s.ticker,
+        date: c.date,
+        closed: { source: c.source, close: c.close },
+        now: built ? { source: built.source, close: built.close } : null,
+      });
+      const h = built && health.get(c.date);
+      if (h) {
+        h.status = worst(h.status, 'yellow');
+        const reason = `stand_in_closed_changed@${built.source}`;
+        if (!h.reasons.includes(reason)) h.reasons.push(reason);
+      }
+    }
     const removed = await writeCanonical(db, s.id, merged, health, {
       from: primary[0]!.date,
       to: o.to,
@@ -617,6 +675,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       s.id,
       si.standIns,
       new Map(primary.map((b) => [b.date, b])),
+      lastUsed,
     );
     standInCount += si.standIns.filter((x) => !o.from || x.date >= o.from).length;
     standInsOff.push(...off.map((x) => ({ ticker: s.ticker, ...x })));
@@ -735,6 +794,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     reasons: overall.has(o.to) ? overall.get(o.to)!.reasons : ['no_data'],
     standIns: standInCount,
     standInsOff,
+    closedChanged,
     removedCanonical,
     toleranceInvalid: nav.invalid,
     toleranceUnmatched: unmatchedTolerances(

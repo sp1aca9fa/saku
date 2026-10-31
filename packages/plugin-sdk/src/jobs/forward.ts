@@ -32,6 +32,7 @@ import {
   closedStandIns,
   forwardRecord,
   getSetting,
+  isOpenStandIn,
   lastEntry,
   latestHealth,
   resolvedStandIns,
@@ -666,12 +667,12 @@ export async function lookbackFlags(
 
 /**
  * Whether a stored stand-in still waits for the primary (requirements 04 stand-in rule): only
- * those are moved by the decision-margin test. A resolved one (the primary's bar replaced it) is
- * not, nor one an admin closed (rule 5: the primary will not replace it; its price stays and is
- * read as it is).
+ * those are moved by the decision-margin test. Not a resolved one (the primary's bar replaced it),
+ * nor one an admin closed (rule 5) while its canonical bar is still that stand-in: its price
+ * stays and is read as it is. A closed one whose canonical bar changed is open again (`@saku/db`
+ * `isOpenStandIn`; verify grades that day `stand_in_closed_changed`).
  */
-export const isOpenStandIn = (row: { resolvedAt: string | null; closedAt: string | null }) =>
-  row.resolvedAt === null && row.closedAt === null;
+export { isOpenStandIn };
 
 /**
  * The ticker's unresolved stand-in prices up to the last of `rows` (requirements 04 stand-in rule
@@ -686,7 +687,7 @@ export async function openStandIns(
   for (const r of rows) {
     if (!r.standIn) continue;
     const stood = await standInOn(db, symbolId, r.date);
-    if (stood && isOpenStandIn(stood)) out.push({ date: r.date, band: stood.band });
+    if (stood && isOpenStandIn(stood, r)) out.push({ date: r.date, band: stood.band });
   }
   return out;
 }

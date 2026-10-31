@@ -9,7 +9,6 @@ import {
   addChannel,
   annotationsOf,
   appendForward,
-  closeStandIn,
   createUser,
   forwardRecord,
   registerVersion,
@@ -24,6 +23,7 @@ import { emptyPlugins } from '../registry';
 import type { BarSource, IssuerSource, Notifier, PluginInfo, SeriesSource } from '../types';
 import { type RunOptions, runJob } from './run';
 import { and, eq, isNull, sql } from 'drizzle-orm';
+import { closeStandIn } from './stand-ins';
 import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
 
 const sessions = new Sessions({
@@ -967,183 +967,260 @@ describe('a stand-in the primary later corrects', () => {
     expect((await forwardRecord(db, version.id)).map((e) => e.date)).toEqual([DAY, '2026-01-16']);
   });
 
-  it('closed by an admin (rule 5): corrections proceed, the weekly run completes, the owner told once; a late primary is still compared', async () => {
-    const { db, version } = await setup();
-    await upsertSymbols(db, [{ ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' }]);
-    // Reads AAA's last two returns (so D+1 reads D), holds BBB.
-    const quiet = await registerVersion(db, {
-      ownerId: version.ownerId,
-      name: 'Quiet',
-      at: new Date('2026-01-12T22:00:00Z'),
-      strategy: {
-        name: 'Quiet',
-        account: 'taxable',
-        safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
-        evaluation: { frequency: 'daily' },
-        signals: [
-          {
-            id: 'V',
-            type: 'compare',
-            left: { indicator: 'volatility', ticker: 'AAA', length: 2 },
-            op: '<',
-            right: { threshold: 0.005 },
-          },
-        ],
-        allocations: [
-          { name: 'Still', when: { all: ['V'] }, holdings: [{ ticker: 'BBB', weight: 100 }] },
-          { name: 'Calm', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
-        ],
+  describe('closed by an admin (rule 5)', () => {
+    // Long enough to close a stand-in: more than DAILY_OVERLAP sessions after it, a complete
+    // daily run. The closes continue the test sources' (same series from 2025-12-29).
+    const LONG = sessions.between('2025-12-29', '2026-02-13');
+    const longCloses = LONG.map((_, i) => 100 * 1.002 ** i);
+    const longRates = cashRates(sessions, LONG, '2026-02-13');
+    /** A source without the listed `ticker date` bars, and with closes scaled for others. */
+    const source = (key: string, omit: string[] = [], scale: Record<string, number> = {}) => ({
+      info: testInfo(key, 'bar'),
+      async fetchBars(ticker: string, from: string, to: string): Promise<RawBar[]> {
+        return LONG.flatMap((date, i) => {
+          if (date < from || date > to || omit.includes(`${ticker} ${date}`)) return [];
+          const close = longCloses[i]! * (scale[`${ticker} ${date}`] ?? 1);
+          return [
+            {
+              date,
+              open: close,
+              high: close,
+              low: close,
+              close,
+              closeIsSplitAdjusted: false,
+              volume: 1000,
+              divCash: 0,
+              splitFactor: 1,
+            },
+          ];
+        });
       },
     });
-    const [D, D1, D2] = ['2026-01-13', '2026-01-14', '2026-01-15'];
-    const source = (key: string, omit: string[] = [], scale: Record<string, number> = {}) => {
-      const base = barSource(key);
-      const out: BarSource = {
-        info: base.info,
-        async fetchBars(ticker, from, to, ctx) {
-          return (await base.fetchBars(ticker, from, to, ctx))
-            .filter((b) => !omit.includes(`${ticker} ${b.date}`))
-            .map((b) => {
-              const close = b.close * (scale[`${ticker} ${b.date}`] ?? 1);
-              return { ...b, open: close, high: close, low: close, close };
-            });
-        },
-      };
-      return out;
-    };
-    const at = (notifier: Notifier, target: string, now: string, over: Partial<RunOptions> = {}) =>
-      options(notifier, {
+    const longPlugins = (bars: BarSource[]) => ({ ...emptyPlugins(), bars, series: [longRates] });
+    /** A run for `target`, at 01:30 UTC the next day (`late` minutes later for a second one). */
+    const at = (notifier: Notifier, target: string, over: Partial<RunOptions> = {}, late = 0) => {
+      const now = new Date(Date.parse(`${sessions.after(target)}T01:30:00Z`) + late * 60_000);
+      return options(notifier, {
         target,
-        now: new Date(now),
-        clock: () => new Date(now),
+        now,
+        clock: () => now,
         alerting: { ...options(notifier).alerting, date: target },
         ...over,
       });
-    // The secondary is 1% low on AAA's D and BBB's D+1, the days the primary lacks.
-    const off = source('s', [], { [`AAA ${D}`]: 0.99, [`BBB ${D1}`]: 0.99 });
-    const { notifier, sent } = fakeNotifier();
-    await runJob(
-      db,
-      plugins([source('p', [`AAA ${D}`]), off]),
-      at(notifier, D, '2026-01-14T01:30:00Z'),
-    );
-    await runJob(
-      db,
-      plugins([source('p', [`AAA ${D}`, `BBB ${D1}`]), off]),
-      at(notifier, D1, '2026-01-15T01:30:00Z'),
-    );
-    // D+2: AAA's primary arrives (the secondary agrees with it on D now); BBB's D+1 never will.
-    const offB = source('s', [], { [`BBB ${D1}`]: 0.99 });
-    const lacking = () => plugins([source('p', [`BBB ${D1}`]), offB]);
-    await runJob(db, lacking(), at(notifier, D2, '2026-01-16T01:30:00Z'));
-    const weekly = (now: string) => runJob(db, lacking(), at(notifier, D2, now, { job: 'weekly' }));
-    const w = await weekly('2026-01-16T02:30:00Z');
-    expect(w.ok).toBe(false);
-    expect(w.error).toContain('stand-in corrections waiting');
-    const corrections = async () =>
-      (await annotationsOf(db, quiet.id, 'stand_in_corrected')).map((n) => [
-        n.date,
-        (n.detail as { ticker: string }).ticker,
-        (n.detail as { closedAt?: string }).closedAt,
-      ]);
-    expect(await corrections()).toEqual([[D, 'AAA', undefined]]);
-    const [bbb] = await db.select().from(schema.symbols).where(eq(schema.symbols.ticker, 'BBB'));
-    const canonical = () =>
-      db
+    };
+    const lockDir = () => mkdtempSync(join(tmpdir(), 'saku-run-lock-'));
+    type TestDb = Awaited<ReturnType<typeof setup>>['db'];
+    const closeAs = (db: TestDb, username: string, ticker: string, date: string) =>
+      closeStandIn(db, {
+        ticker,
+        date,
+        username,
+        reason: 'primary will not deliver',
+        sessions,
+        lockDir: lockDir(),
+      });
+    const standInRow = async (db: TestDb, ticker: string, date: string) => {
+      const [s] = await db.select().from(schema.symbols).where(eq(schema.symbols.ticker, ticker));
+      const [row] = await db
         .select()
-        .from(schema.bars)
-        .where(and(eq(schema.bars.symbolId, bbb!.id), eq(schema.bars.date, D1)));
-    const [barBefore] = await canonical();
-    expect(barBefore).toMatchObject({ standIn: true, source: 's' });
+        .from(schema.standIns)
+        .where(and(eq(schema.standIns.symbolId, s!.id), eq(schema.standIns.date, date)));
+      return row!;
+    };
 
-    // A non-admin cannot close it; the admin can.
-    await createUser(db, {
-      username: 'bo',
-      passwordHash: 'x',
-      totpSecretEnc: 'x',
-      totpLastStep: 1,
-      backupCodeHashes: ['b'],
-      isAdmin: false,
-    });
-    const args = { ticker: 'BBB', date: D1, reason: 'primary will not deliver' };
-    expect(await closeStandIn(db, { ...args, username: 'bo' })).toMatchObject({ ok: false });
-    const closed = await closeStandIn(db, { ...args, username: 'alex' });
-    expect(closed).toMatchObject({ ok: true });
-    const closedAt = (closed as { closedAt: string }).closedAt;
+    it('corrections proceed, the weekly run completes, the owner told once; a later entry and a late primary', async () => {
+      const { db, version } = await setup();
+      await upsertSymbols(db, [{ ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+      // Reads AAA's last two returns (so D+1 reads D), holds BBB.
+      const quiet = await registerVersion(db, {
+        ownerId: version.ownerId,
+        name: 'Quiet',
+        at: new Date('2026-01-12T22:00:00Z'),
+        strategy: {
+          name: 'Quiet',
+          account: 'taxable',
+          safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+          evaluation: { frequency: 'daily' },
+          signals: [
+            {
+              id: 'V',
+              type: 'compare',
+              left: { indicator: 'volatility', ticker: 'AAA', length: 2 },
+              op: '<',
+              right: { threshold: 0.005 },
+            },
+          ],
+          allocations: [
+            { name: 'Still', when: { all: ['V'] }, holdings: [{ ticker: 'BBB', weight: 100 }] },
+            { name: 'Calm', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+          ],
+        },
+      });
+      const [D, D1, D2] = ['2026-01-13', '2026-01-14', '2026-01-15'];
+      // The secondary is 1% low on AAA's D and BBB's D+1, the days the primary lacks.
+      const off = source('s', [], { [`AAA ${D}`]: 0.99, [`BBB ${D1}`]: 0.99 });
+      const { notifier, sent } = fakeNotifier();
+      await runJob(db, longPlugins([source('p', [`AAA ${D}`]), off]), at(notifier, D));
+      await runJob(
+        db,
+        longPlugins([source('p', [`AAA ${D}`, `BBB ${D1}`]), off]),
+        at(notifier, D1),
+      );
+      // D+2: AAA's primary arrives (the secondary agrees with it on D now); BBB's D+1 never will.
+      const offB = source('s', [], { [`BBB ${D1}`]: 0.99 });
+      const lacking = () => longPlugins([source('p', [`BBB ${D1}`]), offB]);
+      expect(await runJob(db, lacking(), at(notifier, D2))).toMatchObject({ ok: true });
+      const w = await runJob(db, lacking(), at(notifier, D2, { job: 'weekly' }, 60));
+      expect(w.ok).toBe(false);
+      expect(w.error).toContain('stand-in corrections waiting');
+      const corrections = async () =>
+        (await annotationsOf(db, quiet.id, 'stand_in_corrected')).map((n) => [
+          n.date,
+          (n.detail as { ticker: string }).ticker,
+          (n.detail as { closedAt?: string }).closedAt,
+        ]);
+      expect(await corrections()).toEqual([[D, 'AAA', undefined]]);
 
-    // The weekly run completes: D+1's correction proceeds; nothing is edited.
-    const w2 = await weekly('2026-01-16T03:30:00Z');
-    expect(w2).toMatchObject({ ok: true });
-    expect(await corrections()).toEqual([
-      [D, 'AAA', undefined],
-      [D1, 'AAA', undefined],
-    ]);
-    expect(await canonical()).toEqual([barBefore]);
-    // The entries that used it while it was open are annotated once, with the reason.
-    const closes = async () =>
-      (await annotationsOf(db, quiet.id, 'stand_in_closed')).map((n) => [n.date, n.detail]);
-    const detail = (recorded: string) => ({
-      ticker: 'BBB',
-      standInDate: D1,
-      reason: 'primary will not deliver',
-      closedAt,
-      recordedAllocation: recorded,
-    });
-    const recorded = await forwardRecord(db, quiet.id);
-    expect(recorded.map((e) => [e.date, e.allocation])).toEqual([
-      [D, 'Calm'],
-      [D1, 'Calm'],
-      [D2, 'Still'],
-    ]);
-    expect(await closes()).toEqual([
-      [D1, detail(recorded[1]!.allocation)],
-      [D2, detail(recorded[2]!.allocation)],
-    ]);
-    expect(await annotationsOf(db, version.id, 'stand_in_closed')).toEqual([]);
-    // The owner is told once on each channel.
-    const told = () => sent.filter((m) => m.text.startsWith(`Quiet: BBB's price for ${D1}`));
-    expect(told().map((m) => m.target)).toEqual(['me', 'ops']);
-    expect(told()[0]!.text.split('\n')).toEqual([
-      `Quiet: BBB's price for ${D1} stays a secondary price`,
-      `The primary source will not deliver BBB's price for ${D1}, so an admin closed its stand-in: the secondary source's price stays, and no primary price will check it.`,
-      'Reason given: primary will not deliver',
-      `Recorded days that used it: 2 (${D1} to ${D2}). Their signals stay as recorded; the record is annotated, not changed.`,
-      'From now on, signals read this price as it is: it no longer makes a day yellow or red as an unconfirmed price.',
-      'This is not a new signal: the latest signal gives the current allocation.',
-      expect.stringContaining(`(Latest recorded day, ${D2}.)`),
-    ]);
-    expect(await weekly('2026-01-16T04:30:00Z')).toMatchObject({ ok: true });
-    expect(await closes()).toHaveLength(2);
-    expect(told()).toHaveLength(2);
+      // Inside the daily refetch window (1 session after the latest daily run's date): refused.
+      const early = await closeAs(db, 'alex', 'BBB', D1);
+      expect(!early.ok && early.error).toMatch(/inside the 10-session window/);
+      // 11 sessions after D+1, a complete daily run; the primary still lacks it.
+      const T = '2026-01-29';
+      expect(await runJob(db, lacking(), at(notifier, T))).toMatchObject({ ok: true });
+      const [bbb] = await db.select().from(schema.symbols).where(eq(schema.symbols.ticker, 'BBB'));
+      const canonical = () =>
+        db
+          .select()
+          .from(schema.bars)
+          .where(and(eq(schema.bars.symbolId, bbb!.id), eq(schema.bars.date, D1)));
+      const [barBefore] = await canonical();
+      expect(barBefore).toMatchObject({ standIn: true, source: 's' });
 
-    // The primary delivers it after all: compared and recorded (resolution after the close),
-    // the close row unchanged; the correction says so.
-    const late = await runJob(
-      db,
-      plugins([source('p'), offB]),
-      at(notifier, D2, '2026-01-16T05:30:00Z'),
-    );
-    expect(late).toMatchObject({ ok: true });
-    const [row] = await db
-      .select()
-      .from(schema.standIns)
-      .where(and(eq(schema.standIns.symbolId, bbb!.id), eq(schema.standIns.date, D1)));
-    expect(row).toMatchObject({
-      closedAt,
-      closeReason: 'primary will not deliver',
-      resolvedAt: expect.any(String),
+      // A non-admin cannot close it (wrong user); the admin can.
+      await createUser(db, {
+        username: 'bo',
+        passwordHash: 'x',
+        totpSecretEnc: 'x',
+        totpLastStep: 1,
+        backupCodeHashes: ['b'],
+        isAdmin: false,
+      });
+      const wrong = await closeAs(db, 'bo', 'BBB', D1);
+      expect(!wrong.ok && wrong.error).toMatch(/bo is not an admin/);
+      const closed = await closeAs(db, 'alex', 'BBB', D1);
+      expect(closed).toMatchObject({ ok: true });
+      const closedAt = (closed as { closedAt: string }).closedAt;
+
+      // The weekly run completes: D+1's correction proceeds; nothing is edited.
+      const weekly = (late: number) =>
+        runJob(db, lacking(), at(notifier, T, { job: 'weekly' }, late));
+      expect(await weekly(60)).toMatchObject({ ok: true });
+      expect(await corrections()).toEqual([
+        [D, 'AAA', undefined],
+        [D1, 'AAA', undefined],
+      ]);
+      expect(await canonical()).toEqual([barBefore]);
+      // The entries that used it while it was open are annotated once, with the reason.
+      const closes = async () =>
+        (await annotationsOf(db, quiet.id, 'stand_in_closed')).map((n) => [n.date, n.detail]);
+      const recorded = (await forwardRecord(db, quiet.id)).filter((e) => e.date >= D1);
+      expect(recorded.at(-1)!.date).toBe(T);
+      expect(await closes()).toEqual(
+        recorded.map((e) => [
+          e.date,
+          {
+            ticker: 'BBB',
+            standInDate: D1,
+            reason: 'primary will not deliver',
+            closedAt,
+            recordedAllocation: e.allocation,
+          },
+        ]),
+      );
+      expect(await annotationsOf(db, version.id, 'stand_in_closed')).toEqual([]);
+      // The owner is told once on each channel.
+      const told = () => sent.filter((m) => m.text.startsWith(`Quiet: BBB's price for ${D1}`));
+      expect(told().map((m) => m.target)).toEqual(['me', 'ops']);
+      expect(told()[0]!.text.split('\n')).toEqual([
+        `Quiet: BBB's price for ${D1} stays a secondary price`,
+        `The primary source will not deliver BBB's price for ${D1}, so an admin closed its stand-in: the secondary source's price stays, and no primary price will check it.`,
+        'Reason given: primary will not deliver',
+        `Recorded days that used it: ${recorded.length} (${D1} to ${T}). Their signals stay as recorded; the record is annotated, not changed.`,
+        'From now on, signals read this price as it is: it no longer makes a day yellow or red as an unconfirmed price.',
+        'This is not a new signal: the latest signal gives the current allocation.',
+        expect.stringContaining(`(Latest recorded day, ${T}.)`),
+      ]);
+      expect(await weekly(120)).toMatchObject({ ok: true });
+      expect(await closes()).toHaveLength(recorded.length);
+      expect(told()).toHaveLength(2);
+
+      // A daily entry appended after the close: no close annotation.
+      const after = '2026-01-30';
+      expect(await runJob(db, lacking(), at(notifier, after))).toMatchObject({ ok: true });
+      expect(await closes()).toHaveLength(recorded.length);
+
+      // The weekly full refetch finds the primary's bar after all: compared and recorded
+      // (resolution after the close), the close row unchanged; the corrections say so, the later
+      // entry's too.
+      const late = await runJob(
+        db,
+        longPlugins([source('p'), offB]),
+        at(notifier, after, { job: 'weekly' }, 60),
+      );
+      expect(late).toMatchObject({ ok: true });
+      const row = await standInRow(db, 'BBB', D1);
+      expect(row).toMatchObject({
+        closedAt,
+        closeReason: 'primary will not deliver',
+        resolvedAt: expect.any(String),
+      });
+      expect(row.deviation).toBeCloseTo(1 / 0.99 - 1, 9);
+      const bbbCorrections = (await corrections()).filter((c) => c[1] === 'BBB');
+      expect(bbbCorrections).toEqual(
+        [...recorded.map((e) => e.date), after].map((d) => [d, 'BBB', closedAt]),
+      );
+      const lateTold = sent.filter((m) =>
+        m.text.includes('closed this stand-in as never to be replaced'),
+      );
+      expect(lateTold.map((m) => m.target)).toEqual(['me', 'ops']);
+      expect(await notes(db, 'recomputed')).toEqual([]);
     });
-    expect(row!.deviation).toBeCloseTo(1 / 0.99 - 1, 9);
-    const bbbCorrections = (await corrections()).filter((c) => c[1] === 'BBB');
-    expect(bbbCorrections).toEqual([
-      [D1, 'BBB', closedAt],
-      [D2, 'BBB', closedAt],
-    ]);
-    const lateTold = sent.filter((m) =>
-      m.text.includes('closed this stand-in as never to be replaced'),
-    );
-    expect(lateTold.map((m) => m.target)).toEqual(['me', 'ops']);
-    expect(await notes(db, 'recomputed')).toEqual([]);
+
+    it('closed and resolved before the run tells it: the close alert says the primary arrived', async () => {
+      const { db, version } = await setup();
+      const DAY = '2026-01-15';
+      // 01-15: the primary lacks AAA, the secondary (1% low) stands in.
+      const off = source('s', [], { [`AAA ${DAY}`]: 0.99 });
+      const lacking = () => longPlugins([source('p', [`AAA ${DAY}`]), off]);
+      const { notifier, sent } = fakeNotifier();
+      await runJob(db, lacking(), at(notifier, DAY));
+      const T = '2026-01-30';
+      expect(await runJob(db, lacking(), at(notifier, T))).toMatchObject({ ok: true });
+      const closed = await closeAs(db, 'alex', 'AAA', DAY);
+      expect(closed).toMatchObject({ ok: true });
+      // The next (weekly) run: the primary delivers 01-15 (verify resolves it), then the close is
+      // annotated and told, with the correction.
+      const r = await runJob(
+        db,
+        longPlugins([source('p'), off]),
+        at(notifier, T, { job: 'weekly' }, 60),
+      );
+      expect(r).toMatchObject({ ok: true });
+      expect((await standInRow(db, 'AAA', DAY)).resolvedAt).not.toBeNull();
+      expect((await annotationsOf(db, version.id, 'stand_in_closed')).length).toBeGreaterThan(0);
+      const told = sent.filter((m) => m.text.startsWith(`Trend: AAA's stand-in for ${DAY}`));
+      expect(told.map((m) => m.target)).toEqual(['me', 'ops']);
+      const lines = told[0]!.text.split('\n');
+      expect(lines.slice(0, 2)).toEqual([
+        `Trend: AAA's stand-in for ${DAY} was closed, then the primary's price arrived`,
+        `The primary source was expected not to deliver AAA's price for ${DAY}, so an admin closed its stand-in; the primary's price arrived later after all and was compared with it (a difference is told as a correction).`,
+      ]);
+      expect(told[0]!.text).not.toContain('no primary price will check it');
+      expect(told[0]!.text).not.toContain('From now on');
+      expect(
+        sent.some((m) => m.text.includes('closed this stand-in as never to be replaced')),
+      ).toBe(true);
+    });
   });
 });
 

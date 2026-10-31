@@ -4,7 +4,6 @@ import {
   addChannel,
   annotate,
   annotationsOf,
-  closeStandIn,
   createUser,
   finishRun,
   forwardRecord,
@@ -15,11 +14,12 @@ import {
   startRun,
   storeRawBars,
   symbolId,
+  unresolvedStandIns,
   upsertSymbols,
   verifyChain,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
-import { and, eq, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, lte, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
 import { sendRecomputeDiffers, sendStrategyAlerts } from './alerts';
@@ -39,6 +39,10 @@ import {
   upTo,
 } from './forward';
 import { healthReport } from './health';
+import { closeStandIn } from './stand-ins';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { verify } from './verify';
 
 const sessions = new Sessions({
@@ -610,9 +614,21 @@ describe('forward', () => {
   });
 
   it('a closed stand-in is settled: not open, not moved', () => {
-    expect(isOpenStandIn({ resolvedAt: null, closedAt: null })).toBe(true);
-    expect(isOpenStandIn({ resolvedAt: null, closedAt: '2026-01-09T12:00:00.000Z' })).toBe(false);
-    expect(isOpenStandIn({ resolvedAt: '2026-01-09T12:00:00.000Z', closedAt: null })).toBe(false);
+    const row = { resolvedAt: null, closedAt: null, source: 's', close: 119 };
+    const bar = { standIn: true, source: 's', close: 119 };
+    const closedAt = '2026-01-09T12:00:00.000Z';
+    expect(isOpenStandIn(row, bar)).toBe(true);
+    expect(isOpenStandIn({ ...row, closedAt }, bar)).toBe(false);
+    expect(isOpenStandIn({ ...row, resolvedAt: closedAt }, bar)).toBe(false);
+    // Closed, but the canonical bar is no longer that stand-in: open again.
+    for (const other of [
+      { ...bar, close: 119.5 },
+      { ...bar, source: 's2' },
+      { ...bar, standIn: false },
+      undefined,
+    ]) {
+      expect(isOpenStandIn({ ...row, closedAt }, other)).toBe(true);
+    }
   });
 
   it('reads only ISO 8601 instants with a zone', () => {
@@ -942,13 +958,22 @@ describe('forward: red and stand-ins in the lookback', () => {
         }),
       });
       if (closed) {
+        // Closable once a complete daily run is past the refetch window (11 sessions later).
+        let past = S[19]!;
+        for (let i = 0; i < 11; i++) past = sessions.after(past);
+        await finishRun(g.db, await startRun(g.db, 'daily', new Date(), past), {
+          ok: true,
+          datesProcessed: [past],
+        });
         const r = await closeStandIn(g.db, {
           ticker: 'AAA',
           date: S[19]!,
           username: 'alex',
           reason: 'primary will not deliver',
+          sessions,
+          lockDir: mkdtempSync(join(tmpdir(), 'saku-forward-lock-')),
         });
-        expect(r.ok).toBe(true);
+        expect(r).toMatchObject({ ok: true });
       }
       return (await g.record())[0]!;
     };
@@ -975,6 +1000,84 @@ describe('forward: red and stand-ins in the lookback', () => {
       reasons: [],
     });
   });
+  it('a closed stand-in whose secondary is revised: graded again, open again; a late primary is compared with the price used', async () => {
+    const D0 = S[19]!;
+    const g = await graded({ gap: D0 });
+    let past = D0;
+    for (let i = 0; i < 11; i++) past = sessions.after(past);
+    await finishRun(g.db, await startRun(g.db, 'daily', new Date(), past), {
+      ok: true,
+      datesProcessed: [past],
+    });
+    const closed = await closeStandIn(g.db, {
+      ticker: 'AAA',
+      date: D0,
+      username: 'alex',
+      reason: 'primary will not deliver',
+      sessions,
+      lockDir: mkdtempSync(join(tmpdir(), 'saku-forward-lock-')),
+    });
+    expect(closed).toMatchObject({ ok: true });
+    expect(await unresolvedStandIns(g.db)).toEqual([]);
+    // The secondary revises its D0 bar: the day is built from 119.2, not the closed 119.
+    const revised = (close: number) =>
+      series(S.map((_, i) => 100 + i)).map((b) =>
+        b.date === D0 ? { ...b, open: close, high: close, low: close, close } : b,
+      );
+    await storeRawBars(g.db, {
+      symbolId: g.ids.AAA,
+      source: 's',
+      bars: revised(119.2),
+      runId: null,
+      fetchedAt: 't2',
+    });
+    const again = await startRun(g.db, 'daily', new Date(Date.now() + 60_000));
+    const checked = await verify(g.db, { runId: again, sessions, mode: 'full', to: S.at(-1)! });
+    expect(checked.closedChanged).toEqual([
+      {
+        ticker: 'AAA',
+        date: D0,
+        closed: { source: 's', close: 119 },
+        now: { source: 's', close: 119.2 },
+      },
+    ]);
+    const [bar] = await g.db.select().from(schema.bars).where(g.bar('AAA', D0));
+    expect(bar).toMatchObject({ standIn: true, close: 119.2, status: 'yellow' });
+    const [grade] = await g.db
+      .select()
+      .from(schema.dataHealth)
+      .where(and(eq(schema.dataHealth.symbolId, g.ids.AAA), eq(schema.dataHealth.date, D0)))
+      .orderBy(desc(schema.dataHealth.id))
+      .limit(1);
+    expect(grade!.reasons).toContain('stand_in_closed_changed@s');
+    // Open again: corrections wait on it and the decision-margin test moves it.
+    expect(await unresolvedStandIns(g.db)).toEqual([{ ticker: 'AAA', date: D0 }]);
+    expect((await g.record())[0]!.reasons).toContain(`AAA:stand_in_lookback@${D0}`);
+    // The row keeps what was closed.
+    const row = async () =>
+      (
+        await g.db
+          .select()
+          .from(schema.standIns)
+          .where(and(eq(schema.standIns.symbolId, g.ids.AAA), eq(schema.standIns.date, D0)))
+      )[0]!;
+    expect(await row()).toMatchObject({ close: 119, closeReason: 'primary will not deliver' });
+    // The primary delivers 119 after all: compared with 119.2, the price the canonical bar used.
+    await storeRawBars(g.db, {
+      symbolId: g.ids.AAA,
+      source: 'p',
+      bars: revised(119),
+      runId: null,
+      fetchedAt: 't3',
+    });
+    const late = await startRun(g.db, 'daily', new Date(Date.now() + 120_000));
+    await verify(g.db, { runId: late, sessions, mode: 'full', to: S.at(-1)! });
+    const resolved = await row();
+    expect(resolved).toMatchObject({ close: 119, primaryClose: 119, resolvedRunId: late });
+    expect(resolved.closedAt).not.toBeNull();
+    expect(resolved.deviation).toBeCloseTo(1 - 119 / 119.2, 12);
+  });
+
   it('a stand-in a later run refuses: its canonical bar is removed, the day and the days after it are red', async () => {
     const D0 = S[10]!;
     const g = await graded({ gap: D0 });

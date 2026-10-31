@@ -1782,6 +1782,24 @@ describe('stand-in close alerts (requirements 04, the stand-in rule 5)', () => {
     expect(standInClosedText(t, o, 100).needed).toBeGreaterThan(100);
   });
 
+  it('a closed stand-in whose day now has another price: said so, no "from now on"; its reason in words', () => {
+    const t = translator('en');
+    const o = {
+      name: 'Trend',
+      detail: { ticker: 'AAA', standInDate: DAY, reason: 'primary will not deliver' },
+      days: [DAY],
+    };
+    const changed = standInClosedText(t, { ...o, state: 'changed' }, 10_000).text;
+    expect(changed).toContain(
+      'since then the day has another secondary price, which is checked again as an unconfirmed price',
+    );
+    expect(changed).not.toContain('From now on');
+    expect(standInClosedText(t, o, 10_000).text).toContain('From now on');
+    expect(describeReason(t, 'AAA:stand_in_closed_changed@s')).toBe(
+      'AAA: a stand-in an admin had closed now has another price (from s); it is checked again as an unconfirmed price',
+    );
+  });
+
   it('an unreadable detail is told to the admins once, never with a guessed value', async () => {
     const { db, owner, version, day } = await setup();
     await day(DAY, 'Calm');

@@ -22,10 +22,12 @@ import {
   annotationsOf,
   deliveryTargets,
   getSetting,
+  isOpenStandIn,
   lastEntry,
   lastToldAllocation,
   recordAlertSent,
   schema,
+  standInList,
 } from '@saku/db';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { Logger, Notifier, PluginContext } from '../types';
@@ -910,8 +912,12 @@ export function standInClosedDetail(
  * primary price will check it, the admin's reason, how many recorded days used it (first to last
  * entry date) and that their signals stay as recorded (annotated, not changed), that from now on
  * the price is read as it is, and that it is not a new signal; with the data health of the
- * version's latest recorded day. Fitted to `max` (`fitMessage`): only the reason, the admin's own
- * text, may be cut; the rest is told whole or not at all (`needed`).
+ * version's latest recorded day. `state` as the stand-in is when told: `settled` as above;
+ * `resolved` (the primary delivered after the close): said so instead, without "no primary price
+ * will check it" and "from now on", as the correction alert tells the difference; `changed` (its
+ * canonical bar now has another price, checked again as unconfirmed): said so, without "from now
+ * on". Fitted to `max` (`fitMessage`): only the reason, the admin's own text, may be cut; the rest
+ * is told whole or not at all (`needed`).
  */
 export function standInClosedText(
   t: Translate,
@@ -922,9 +928,12 @@ export function standInClosedText(
     days: TradingDate[];
     /** The data health of the version's latest recorded day, or undefined without one. */
     health?: { status: string; date: TradingDate };
+    /** The stand-in as it is now (default `settled`). */
+    state?: 'settled' | 'resolved' | 'changed';
   },
   max: number,
 ): Pick<Alert, 'text' | 'needed'> {
+  const state = o.state ?? 'settled';
   const d = o.detail;
   const values = { strategy: o.name, ticker: d.ticker, standInDate: d.standInDate };
   // Unknown stays unknown: without a recorded day the status is `unknown`, never green.
@@ -932,8 +941,22 @@ export function standInClosedText(
     ? `${t(`alerts.health.${o.health.status}`)} ${t('alerts.standInCorrected.healthDate', { date: o.health.date })}`
     : t('alerts.health.unknown');
   const parts: Part[] = [
-    { keep: t('alerts.standInClosed.title', values) },
-    { keep: t('alerts.standInClosed.body', values) },
+    {
+      keep: t(
+        state === 'resolved' ? 'alerts.standInClosed.titleResolved' : 'alerts.standInClosed.title',
+        values,
+      ),
+    },
+    {
+      keep: t(
+        state === 'resolved'
+          ? 'alerts.standInClosed.bodyResolved'
+          : state === 'changed'
+            ? 'alerts.standInClosed.bodyChanged'
+            : 'alerts.standInClosed.body',
+        values,
+      ),
+    },
     t('alerts.standInClosed.reason', { reason: d.reason }),
     {
       keep: t('alerts.standInClosed.days', {
@@ -942,7 +965,7 @@ export function standInClosedText(
         last: o.days.at(-1)!,
       }),
     },
-    { keep: t('alerts.standInClosed.from') },
+    ...(state === 'settled' ? [{ keep: t('alerts.standInClosed.from') }] : []),
     { keep: t('alerts.standInClosed.pastDay') },
     { keep: healthLine },
   ];
@@ -963,6 +986,15 @@ export async function sendStandInClosures(db: Db, o: AlertOptions): Promise<Stan
   const summary: StandInAlertSummary = { sent: 0, failed: [], errors: [] };
   if (o.drill) return summary;
   const owners: Owners = new Map();
+  // Each closed stand-in as it is now: resolved after all, open again (its canonical bar changed)
+  // or settled.
+  const states = new Map<string, 'settled' | 'resolved' | 'changed'>();
+  for (const r of await standInList(db)) {
+    if (r.closedAt === null) continue;
+    const state =
+      r.resolvedAt !== null ? 'resolved' : isOpenStandIn(r, r.canonical) ? 'changed' : 'settled';
+    states.set(`${r.ticker}@${r.date}`, state);
+  }
   for (const version of await allVersions(db)) {
     const notes = await annotationsOf(db, version.id, 'stand_in_closed');
     if (notes.length === 0) continue;
@@ -996,7 +1028,13 @@ export async function sendStandInClosures(db: Db, o: AlertOptions): Promise<Stan
       const tell = async (t: Translate, channel: Target) => {
         const message = standInClosedText(
           t,
-          { name: version.name, detail: g.detail, days: g.days, ...(health && { health }) },
+          {
+            name: version.name,
+            detail: g.detail,
+            days: g.days,
+            state: states.get(k) ?? 'settled',
+            ...(health && { health }),
+          },
           roomOn(o, channel, t),
         );
         await deliver(db, o, channel, { key, ...message }, summary, t);
@@ -1391,7 +1429,9 @@ export function describeReason(t: Translate, code: string): string {
   } else if ((m = /^stand_in@(.+)$/.exec(rest))) {
     text = t('alerts.reason.standIn', { source: m[1]! });
   } else if (rest.startsWith('stand_in_refused:')) text = t('alerts.reason.standInRefused');
-  else if ((m = /^stand_in_lookback@(\d{4}-\d{2}-\d{2})$/.exec(rest))) {
+  else if ((m = /^stand_in_closed_changed@(.+)$/.exec(rest))) {
+    text = t('alerts.reason.standInClosedChanged', { source: m[1]! });
+  } else if ((m = /^stand_in_lookback@(\d{4}-\d{2}-\d{2})$/.exec(rest))) {
     text = t('alerts.reason.standInLookback', { date: m[1]! });
   } else if ((m = /^lookback_(red|ungraded|missing)@(\d{4}-\d{2}-\d{2})$/.exec(rest))) {
     const key =

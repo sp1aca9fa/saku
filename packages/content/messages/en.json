@@ -83,6 +83,7 @@
       "decision_margin": "a stand-in price is too close to a signal threshold",
       "standIn": "the main source was missing; {source} stands in",
       "standInRefused": "the main source was missing and no stand-in passed the checks",
+      "standInClosedChanged": "a stand-in an admin had closed now has another price (from {source}); it is checked again as an unconfirmed price",
       "standInLookback": "the signals read a secondary source's price for {date}, not yet confirmed by the main source",
       "lookbackRed": "the data of {date}, which the signals still read, is red (unreliable)",
       "lookbackUngraded": "the data of {date}, which the signals still read, has not been checked",
@@ -119,7 +120,10 @@
     },
     "standInClosed": {
       "title": "{strategy}: {ticker}'s price for {standInDate} stays a secondary price",
+      "titleResolved": "{strategy}: {ticker}'s stand-in for {standInDate} was closed, then the primary's price arrived",
       "body": "The primary source will not deliver {ticker}'s price for {standInDate}, so an admin closed its stand-in: the secondary source's price stays, and no primary price will check it.",
+      "bodyResolved": "The primary source was expected not to deliver {ticker}'s price for {standInDate}, so an admin closed its stand-in; the primary's price arrived later after all and was compared with it (a difference is told as a correction).",
+      "bodyChanged": "The primary source will not deliver {ticker}'s price for {standInDate}, so an admin closed its stand-in; since then the day has another secondary price, which is checked again as an unconfirmed price.",
       "reason": "Reason given: {reason}",
       "days": "Recorded days that used it: {count} ({first} to {last}). Their signals stay as recorded; the record is annotated, not changed.",
       "from": "From now on, signals read this price as it is: it no longer makes a day yellow or red as an unconfirmed price.",

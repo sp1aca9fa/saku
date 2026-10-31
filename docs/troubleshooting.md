@@ -104,15 +104,27 @@ undelivered alert does.
 
 The weekly run is incomplete because a correction waits for a stand-in the primary has not
 replaced (the alert names the ticker, the date and the days it holds back). See the open ones with
-`pnpm sources stand-in list --open` (age in sessions, and whether a canonical bar still uses it;
-"refused, no canonical bar" means a later run refused it, yet it still holds corrections back).
-If the primary is only late, wait: the next runs resolve it. If it will never deliver that day
-(the provider confirms, or several weekly refetches still lack it), close it with the reason:
+`pnpm sources stand-in list --open` (age in sessions, whether a canonical bar still uses it, and
+whether it can be closed yet). If the primary is only late, wait: the next runs resolve it. If it
+will never deliver that day (the provider confirms, or several weekly refetches still lack it),
+close it with the reason, on the server:
 `pnpm sources stand-in close <TICKER> <YYYY-MM-DD> --reason "primary will not deliver" --user <admin>`.
-Only an admin can; the stand-in's price stays, the corrections behind it proceed at the next run,
-the recorded days that used it are annotated (not changed) and their owners told once. Closing is
-never automatic and cannot be undone; if the primary delivers the day later anyway, it is still
-compared and any difference annotated and told.
+`--user` names you, the acting admin: only admins can reach the server, so shell access is the
+authentication, and the command checks that the account is an enabled admin (a web page will
+check the signed-in user instead). It is refused while the date is inside the daily refetch
+window (10 sessions before the latest complete daily run), while a job runs, and for a stand-in
+whose canonical bar is not that stand-in. The stand-in's price stays, the corrections behind it
+proceed at the next run, the recorded days that used it are annotated (not changed) and their
+owners told once. Closing is never automatic and cannot be undone; if the primary delivers the
+day later anyway, it is still compared and any difference annotated and told. If a later run
+builds the day from another price, the close no longer holds: the day reads `stand_in_closed_changed`
+and the stand-in is open again (see `docs/data-pipeline.md`).
+
+"Refused, no canonical bar": a later run refused that stand-in, so nothing reads its price (the
+day is missing). It cannot be closed; it keeps the corrections behind it waiting until the primary
+delivers the day. If the primary never will, it stays an open item: find a source for that day (a
+secondary, or `pnpm csv import` given a role; if the checks accept it, it becomes a stand-in that
+can be closed) and note it in the operations notes meanwhile.
 
 ## A failed run and catch-up
 

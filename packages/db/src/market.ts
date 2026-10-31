@@ -14,8 +14,9 @@ import {
   type Vintage,
   zonedInstant,
 } from '@saku/core';
-import { and, asc, between, desc, eq, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm';
+import { and, asc, between, desc, eq, isNotNull, lt, lte, sql } from 'drizzle-orm';
 import type { Db } from './client';
+import { unsettledStandIns } from './stand-ins';
 import {
   barRevisions,
   bars,
@@ -1040,17 +1041,12 @@ export async function resolvedStandIns(db: Db) {
 
 /**
  * Every stand-in still open (its ticker and date), oldest date first: the primary has not
- * replaced it and no admin has closed it (requirements 04 stand-in rule 5: nothing waits on a
- * closed one). A correction that would decide on such a price waits (the stand-in correction
- * step).
+ * replaced it and no admin's close settles it (requirements 04 stand-in rule 5: nothing waits on
+ * a closed one while its canonical bar is still that stand-in; `isOpenStandIn`). A correction
+ * that would decide on such a price waits (the stand-in correction step).
  */
 export async function unresolvedStandIns(db: Db) {
-  return db
-    .select({ ticker: symbols.ticker, date: standIns.date })
-    .from(standIns)
-    .innerJoin(symbols, eq(symbols.id, standIns.symbolId))
-    .where(and(isNull(standIns.resolvedAt), isNull(standIns.closedAt)))
-    .orderBy(asc(standIns.date), asc(symbols.ticker));
+  return unsettledStandIns(db);
 }
 
 /** What a run revised in stored raw bars: counts per ticker and field, with the date range. */

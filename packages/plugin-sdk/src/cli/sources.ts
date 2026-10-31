@@ -17,15 +17,18 @@
 //                                                         declared adjCloseRounding; default the
 //                                                         latest bootstrap or weekly run with any
 //   pnpm sources stand-in list [--open]                   stored stand-ins (or the open ones:
-//                                                         neither resolved nor closed), oldest
-//                                                         first: ticker, date, source, close,
-//                                                         band, age in sessions, state, and
-//                                                         whether a canonical bar uses it
+//                                                         neither resolved nor settled by a
+//                                                         close), oldest first: ticker, date,
+//                                                         source, close, band, age in sessions,
+//                                                         state, whether a canonical bar uses
+//                                                         it and whether it can be closed
 //   pnpm sources stand-in close <TICKER> <YYYY-MM-DD> --reason "<text>" --user <admin>
 //                                                         an admin closes one the primary will
 //                                                         never replace (requirements 04
 //                                                         stand-in rule 5): nothing waits on it
-//                                                         any more; its price stays
+//                                                         any more; its price stays. `--user`
+//                                                         names the acting admin (shell access
+//                                                         to the server is the authentication)
 //   pnpm csv import <file> --ticker <TICKER> --prices raw|split-adjusted [--source csv-<name>]
 //                                                         validated daily bars, stored as their
 //                                                         own source (default `csv`); give it a
@@ -34,7 +37,6 @@ import { SOURCE_ROLES, type SourceRole, tradingDateOf } from '@saku/core';
 import { Sessions, parseBarsCsv } from '@saku/data';
 import {
   activeSymbols,
-  closeStandIn,
   createDb,
   removeSourceRole,
   schema,
@@ -50,7 +52,7 @@ import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { describeCounts, issuerStats } from '../jobs/issuer';
 import { lock } from '../jobs/lock';
-import { ageInSessions, standInListText } from '../jobs/stand-ins';
+import { ageInSessions, closeStandIn, latestDailyTarget, standInListText } from '../jobs/stand-ins';
 import {
   defaultReadjustmentRun,
   parseReadjustmentArgs,
@@ -210,16 +212,19 @@ if (tool === 'sources' && command === 'list') {
 } else if (tool === 'sources' && command === 'stand-in' && rest[0] === 'list') {
   const open = rest.includes('--open');
   const today = tradingDateOf(new Date());
+  const sessions = xnys();
   for (const line of standInListText(await standInList(db, { open }), {
-    sessions: xnys(),
+    sessions,
     today,
     open,
+    latestDaily: await latestDailyTarget(db),
   })) {
     console.log(line);
   }
 } else if (tool === 'sources' && command === 'stand-in' && rest[0] === 'close') {
   // Requirements 04 stand-in rule 5: an admin closes it with a written reason, never automatic.
-  // The admin is checked by closeStandIn itself, before anything is read or written.
+  // closeStandIn checks the admin first (`--user` names the acting admin: this runs on a server
+  // only admins can reach), then takes the jobs lock itself. The calendar is resolved before.
   const [, ticker, date] = rest;
   if (!ticker || ticker.startsWith('--') || !date || date.startsWith('--')) {
     fail(
@@ -230,11 +235,16 @@ if (tool === 'sources' && command === 'list') {
   if (!username || username.startsWith('--')) fail('Name the admin: --user <username>.');
   const reasonArg = flag('reason');
   const reason = reasonArg && !reasonArg.startsWith('--') ? reasonArg : '';
-  const r = await withJobsLock(() =>
-    closeStandIn(db, { ticker: ticker!, date: date!, username: username!, reason }),
-  );
+  const sessions = xnys();
+  const r = await closeStandIn(db, {
+    ticker: ticker!,
+    date: date!,
+    username: username!,
+    reason,
+    sessions,
+  });
   if (!r.ok) fail(r.error);
-  const age = ageInSessions(xnys(), date!, tradingDateOf(new Date()));
+  const age = ageInSessions(sessions, date!, tradingDateOf(new Date()));
   console.log(
     `Closed the ${ticker} stand-in of ${date}${age === undefined ? '' : ` (${age} sessions ago)`}: ` +
       'its price stays and nothing waits on it any more. The next run annotates the recorded ' +

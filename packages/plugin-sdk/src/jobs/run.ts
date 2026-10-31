@@ -357,6 +357,17 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
           `${r.status ?? 'ungraded'}); the day is read through its grade`,
       );
     }
+    // A closed stand-in (rule 5) whose day the checks now build from another price, or refuse:
+    // no longer settled; the admins read it here and in the day's grade.
+    for (const c of checked.closedChanged) {
+      log.warn(
+        `${c.ticker} ${c.date}: the stand-in closed at ${c.closed.close} from ${c.closed.source} ` +
+          (c.now
+            ? `is now ${c.now.close} from ${c.now.source} (stand_in_closed_changed)`
+            : 'is now refused (no canonical bar)') +
+          '; it is open again for the decision-margin test and the corrections',
+      );
+    }
     for (const s of checked.standInsOff) {
       log.warn(
         `${s.ticker} ${s.date}: the stand-in was off the primary by ${(100 * s.deviation).toFixed(3)}%`,

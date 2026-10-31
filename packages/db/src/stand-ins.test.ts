@@ -1,21 +1,15 @@
-// Closing a stand-in (requirements 04 stand-in rule 5): only an admin, with a reason, once; the
-// stand-in's values stay; nothing waits on it any more.
-import { and, eq, sql } from 'drizzle-orm';
+// Closed stand-ins in the database (requirements 04 stand-in rule 5): set once with the admin and
+// reason, the row's values frozen; settled only while the canonical bar is that stand-in. The
+// close command itself (admin, lock, refetch window) is tested in the plug-in SDK.
+import { and, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { resolvedStandIns, unresolvedStandIns, upsertSymbols } from './market';
-import { activityLog, bars, standIns, symbols, users } from './schema';
-import { closeStandIn, closedStandIns, standInList } from './stand-ins';
+import { bars, standIns, symbols } from './schema';
+import { closedStandIns, isOpenStandIn, standInList, standInMatchesBar } from './stand-ins';
 import { testDb } from './testing';
 import { createUser } from './users';
 
-const account = (username: string, isAdmin: boolean) => ({
-  username,
-  passwordHash: 'scrypt:x',
-  totpSecretEnc: 'v1.x',
-  totpLastStep: 1,
-  backupCodeHashes: [username],
-  isAdmin,
-});
+const CLOSED_AT = '2026-02-01T10:00:00.000Z';
 
 async function setup() {
   const db = await testDb();
@@ -26,8 +20,14 @@ async function setup() {
   const ids = Object.fromEntries(
     (await db.select().from(symbols)).map((s) => [s.ticker, s.id] as const),
   ) as Record<string, number>;
-  const admin = await createUser(db, account('ada', true));
-  await createUser(db, account('bo', false));
+  const admin = await createUser(db, {
+    username: 'ada',
+    passwordHash: 'scrypt:x',
+    totpSecretEnc: 'v1.x',
+    totpLastStep: 1,
+    backupCodeHashes: ['a'],
+    isAdmin: true,
+  });
   const row = (ticker: string, date: string, over: Partial<typeof standIns.$inferInsert> = {}) => ({
     symbolId: ids[ticker]!,
     date,
@@ -54,105 +54,20 @@ async function setup() {
     source: 's',
     standIn: true,
   });
-  const close = (over: Partial<Parameters<typeof closeStandIn>[1]> = {}) =>
-    closeStandIn(db, {
-      ticker: 'AAA',
-      date: '2026-01-07',
-      username: 'ada',
-      reason: 'primary will not deliver',
-      now: new Date('2026-02-01T10:00:00Z'),
-      ...over,
-    });
-  return { db, ids, admin, close };
+  const where = (ticker: string, date = '2026-01-07') =>
+    and(eq(standIns.symbolId, ids[ticker]!), eq(standIns.date, date));
+  const close = (ticker = 'AAA') =>
+    db
+      .update(standIns)
+      .set({ closedAt: CLOSED_AT, closedBy: admin, closeReason: 'primary will not deliver' })
+      .where(where(ticker));
+  return { db, ids, admin, where, close };
 }
 
-describe('closing a stand-in', () => {
-  it('refuses a missing, disabled or non-admin account, an empty reason, an unknown stand-in', async () => {
-    const { db, close } = await setup();
-    const refused = async (over: Parameters<typeof close>[0], error: RegExp) => {
-      const r = await close(over);
-      expect(r.ok).toBe(false);
-      expect(!r.ok && r.error).toMatch(error);
-    };
-    // Wrong user: an account that is not an admin is refused before anything is read.
-    await refused({ username: 'bo' }, /bo is not an admin/);
-    await refused({ username: 'nobody' }, /No account nobody/);
-    await db
-      .update(users)
-      .set({ disabledAt: '2026-01-01T00:00:00Z' })
-      .where(eq(users.username, 'bo'));
-    await refused({ username: 'bo' }, /bo is disabled/);
-    await refused({ reason: '' }, /Give the reason/);
-    await refused({ reason: '   ' }, /Give the reason/);
-    await refused({ date: '2026-02-30' }, /not a date/);
-    await refused({ ticker: 'ZZZ' }, /No stand-in for ZZZ on 2026-01-07/);
-    await refused({ date: '2026-01-09' }, /No stand-in for AAA on 2026-01-09/);
-    await refused({ date: '2026-01-08' }, /the primary replaced it at 2026-01-09T21:30:00.000Z/);
-    // Nothing was written.
-    expect(
-      await db.select().from(activityLog).where(eq(activityLog.action, 'stand_in.close')),
-    ).toEqual([]);
-    expect(await closedStandIns(db)).toEqual([]);
-  });
-
-  it('records the close once, logged; the values stay; nothing waits on it any more', async () => {
-    const { db, ids, admin, close } = await setup();
-    const before = (await db.select().from(standIns).where(eq(standIns.symbolId, ids.AAA!)))[0];
-    expect(await close({ reason: '  primary will not deliver  ' })).toEqual({
-      ok: true,
-      closedAt: '2026-02-01T10:00:00.000Z',
-      userId: admin,
-    });
-    const [after] = await db
-      .select()
-      .from(standIns)
-      .where(and(eq(standIns.symbolId, ids.AAA!), eq(standIns.date, '2026-01-07')));
-    expect(after).toEqual({
-      ...before,
-      closedAt: '2026-02-01T10:00:00.000Z',
-      closedBy: admin,
-      closeReason: 'primary will not deliver',
-    });
-    const [log] = await db
-      .select()
-      .from(activityLog)
-      .where(eq(activityLog.action, 'stand_in.close'));
-    expect(log).toMatchObject({
-      actor: admin,
-      detail: {
-        username: 'ada',
-        ticker: 'AAA',
-        date: '2026-01-07',
-        source: 's',
-        close: 100,
-        reason: 'primary will not deliver',
-      },
-    });
-    // Settled: no longer among the open ones (corrections stop waiting on it).
-    expect(await unresolvedStandIns(db)).toEqual([{ ticker: 'BBB', date: '2026-01-07' }]);
-    expect(await closedStandIns(db)).toEqual([
-      {
-        ticker: 'AAA',
-        date: '2026-01-07',
-        runId: null,
-        createdAt: '2026-01-07T21:30:00.000Z',
-        closedAt: '2026-02-01T10:00:00.000Z',
-        closeReason: 'primary will not deliver',
-        resolvedAt: null,
-      },
-    ]);
-    // Once: a second close is refused, and the first stays.
-    const again = await close({ reason: 'other' });
-    expect(!again.ok && again.error).toMatch(/already closed at 2026-02-01T10:00:00.000Z/);
-    expect(
-      await db.select().from(activityLog).where(eq(activityLog.action, 'stand_in.close')),
-    ).toHaveLength(1);
-  });
-
+describe('closed stand-ins in the database', () => {
   it('a closed row is frozen (triggers), yet a primary arriving later still resolves it', async () => {
-    const { db, ids, close } = await setup();
+    const { db, where, close } = await setup();
     await close();
-    const where = and(eq(standIns.symbolId, ids.AAA!), eq(standIns.date, '2026-01-07'));
     for (const set of [
       { close: 101 },
       { band: 0.01 },
@@ -160,37 +75,33 @@ describe('closing a stand-in', () => {
       { closeReason: 'changed' },
       { closedAt: null },
     ] as const) {
-      await expect(db.update(standIns).set(set).where(where)).rejects.toThrow();
+      await expect(db.update(standIns).set(set).where(where('AAA'))).rejects.toThrow();
     }
-    await expect(db.delete(standIns).where(where)).rejects.toThrow();
+    await expect(db.delete(standIns).where(where('AAA'))).rejects.toThrow();
     // Resolution after the close: compared and recorded, the close untouched.
     await db
       .update(standIns)
       .set({ primaryClose: 100.5, deviation: 0.005, resolvedAt: '2026-02-02T21:30:00.000Z' })
-      .where(where);
+      .where(where('AAA'));
     const [r] = (await resolvedStandIns(db)).filter(
       (s) => s.ticker === 'AAA' && s.date === '2026-01-07',
     );
-    expect(r).toMatchObject({ closedAt: '2026-02-01T10:00:00.000Z', deviation: 0.005 });
+    expect(r).toMatchObject({ closedAt: CLOSED_AT, deviation: 0.005 });
     expect((await closedStandIns(db))[0]).toMatchObject({
       closeReason: 'primary will not deliver',
       resolvedAt: '2026-02-02T21:30:00.000Z',
     });
   });
 
-  it('a close without its admin or reason is refused by the database too', async () => {
-    const { db, ids, admin } = await setup();
-    const where = and(eq(standIns.symbolId, ids.BBB!), eq(standIns.date, '2026-01-07'));
-    const at = '2026-02-01T10:00:00.000Z';
-    await expect(
-      db.update(standIns).set({ closedAt: at, closedBy: admin }).where(where),
-    ).rejects.toThrow();
-    await expect(
-      db.update(standIns).set({ closedAt: at, closedBy: admin, closeReason: ' ' }).where(where),
-    ).rejects.toThrow();
-    await expect(
-      db.update(standIns).set({ closedAt: at, closeReason: 'x' }).where(where),
-    ).rejects.toThrow();
+  it('a close without its admin or reason is refused by the database', async () => {
+    const { db, ids, admin, where } = await setup();
+    for (const set of [
+      { closedAt: CLOSED_AT, closedBy: admin },
+      { closedAt: CLOSED_AT, closedBy: admin, closeReason: ' ' },
+      { closedAt: CLOSED_AT, closeReason: 'x' },
+    ]) {
+      await expect(db.update(standIns).set(set).where(where('BBB'))).rejects.toThrow();
+    }
     await expect(
       db.insert(standIns).values({
         symbolId: ids.BBB!,
@@ -199,15 +110,37 @@ describe('closing a stand-in', () => {
         close: 1,
         band: 0.001,
         basis: 'index',
-        closedAt: at,
+        closedAt: CLOSED_AT,
         closedBy: admin,
       }),
     ).rejects.toThrow();
     expect(await closedStandIns(db)).toEqual([]);
     // An open row still changes as before (a later run replaces an unresolved stand-in).
-    await db.update(standIns).set({ close: 51 }).where(where);
-    const [count] = await db.all<{ n: number }>(sql`select count(*) as n from stand_ins`);
-    expect(count!.n).toBe(3);
+    await db.update(standIns).set({ close: 51 }).where(where('BBB'));
+  });
+
+  it('settled only while the canonical bar is that stand-in', async () => {
+    const { db, ids, close } = await setup();
+    await close();
+    expect(await unresolvedStandIns(db)).toEqual([{ ticker: 'BBB', date: '2026-01-07' }]);
+    // A later run builds the day from a revised value: open again (the close stays on record).
+    const bar = and(eq(bars.symbolId, ids.AAA!), eq(bars.date, '2026-01-07'));
+    await db.update(bars).set({ close: 100.4 }).where(bar);
+    expect(await unresolvedStandIns(db)).toEqual([
+      { ticker: 'AAA', date: '2026-01-07' },
+      { ticker: 'BBB', date: '2026-01-07' },
+    ]);
+    // ...from another secondary, or refused (no canonical bar): open too.
+    await db.update(bars).set({ close: 100, source: 's2' }).where(bar);
+    expect((await unresolvedStandIns(db)).map((r) => r.ticker)).toEqual(['AAA', 'BBB']);
+    await db.delete(bars).where(bar);
+    expect((await unresolvedStandIns(db)).map((r) => r.ticker)).toEqual(['AAA', 'BBB']);
+    expect(await closedStandIns(db)).toHaveLength(1);
+    const row = { source: 's', close: 100 };
+    expect(standInMatchesBar(row, { standIn: true, source: 's', close: 100 })).toBe(true);
+    expect(standInMatchesBar(row, { standIn: false, source: 's', close: 100 })).toBe(false);
+    expect(standInMatchesBar(row, undefined)).toBe(false);
+    expect(isOpenStandIn({ ...row, resolvedAt: CLOSED_AT, closedAt: null }, undefined)).toBe(false);
   });
 
   it('lists every stand-in or the open ones, with its canonical bar', async () => {
@@ -215,7 +148,7 @@ describe('closing a stand-in', () => {
     await close();
     const all = await standInList(db);
     expect(all.map((r) => [r.ticker, r.date, r.closedBy, r.canonical])).toEqual([
-      ['AAA', '2026-01-07', 'ada', { source: 's', standIn: true, divCash: 0.25 }],
+      ['AAA', '2026-01-07', 'ada', { source: 's', standIn: true, close: 100, divCash: 0.25 }],
       ['BBB', '2026-01-07', null, null],
       ['AAA', '2026-01-08', null, null],
     ]);
