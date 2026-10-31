@@ -238,10 +238,28 @@ describe('layer C', () => {
     expect(dev(leverageCheck(wrong, spy, 2), 'leverage_track')).toBeCloseTo(1.02 / 52, 12);
   });
 
-  it('is not green when the underlying’s dividend is missing from the data', () => {
+  it('is not green when the underlying’s dividend of about 1% is missing from the data', () => {
+    // 1 on a close of 101 (0.98%): 2x that is beyond the 0.5pp base tolerance.
     const sso = [bar('2026-01-05', 50), bar('2026-01-06', 52), bar('2026-01-07', 52)];
     const noDiv = spy.map((b) => ({ ...b, divCash: 0 }));
     expect(statuses(leverageCheck(sso, noDiv, 2), 'leverage_track')[1]).toBe('2026-01-07 yellow');
+  });
+
+  it('stays green when the underlying’s dividend of 0.25% is missing (the index check catches it)', () => {
+    // 0.25 on a close of 101.75 (0.245%): 2x that (0.49pp) is inside the 0.5pp base tolerance, so
+    // leverage_track cannot see it; the underlying's own index_match does (0.245pp against 0.1pp:
+    // yellow), as adj_return_match does where a source sends adjusted closes. No tolerance changes.
+    const und = [
+      bar('2026-01-05', 100),
+      bar('2026-01-06', 102),
+      bar('2026-01-07', 101.75, { divCash: 0.25 }),
+    ];
+    const sso = [bar('2026-01-05', 50), bar('2026-01-06', 52), bar('2026-01-07', 52)];
+    const noDiv = und.map((b) => ({ ...b, divCash: 0 }));
+    expect(statuses(leverageCheck(sso, und, 2), 'leverage_track')[1]).toBe('2026-01-07 green');
+    expect(statuses(leverageCheck(sso, noDiv, 2), 'leverage_track')[1]).toBe('2026-01-07 green');
+    expect(statuses(indexCheck(und, index), 'index_match')[1]).toBe('2026-01-07 green');
+    expect(statuses(indexCheck(noDiv, index), 'index_match')[1]).toBe('2026-01-07 yellow');
   });
 
   it('is red after three days in a row outside tolerance', () => {

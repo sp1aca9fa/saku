@@ -13,7 +13,11 @@ export function totalReturn(prev: RawBar, bar: RawBar): number {
   return ((bar.close + bar.divCash) * split) / prev.close - 1;
 }
 
-/** The day's price return without dividends (what an index level or a fund's target tracks). */
+/**
+ * The day's price return: the price move without distributions. Not what a fund tracking an
+ * index matches on its ex-dividend day (it matches by total return; see `indexCheck` in
+ * packages/data/src/checks.ts).
+ */
 export function priceReturn(prev: RawBar, bar: RawBar): number {
   const split = bar.closeIsSplitAdjusted ? 1 : bar.splitFactor;
   return (bar.close * split) / prev.close - 1;

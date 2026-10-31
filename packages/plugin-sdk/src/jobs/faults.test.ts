@@ -32,6 +32,7 @@ import type {
   SeriesSource,
 } from '../types';
 import { seriesFetchOf } from './ingest';
+import { healthReport } from './health';
 import { runJob } from './run';
 import { cashRates, fakeHttp, fakeNotifier, quiet, testInfo } from './testkit';
 
@@ -45,6 +46,8 @@ const sessions = new Sessions({
 const TARGET = '2026-01-16';
 const DATES = sessions.between('2025-12-01', TARGET);
 const SECRET = 'f'.repeat(32);
+/** The session after the target (only `withNext` sources have a bar for it). */
+const NEXT = sessions.after(TARGET);
 
 /** Clean history: SPY rises 0.3-0.7% a day in total return (pays a dividend on the target day, its
  * close lower by it); SSO is 2x SPY's total return, as 2x the index that moves with it (layer C,
@@ -125,6 +128,31 @@ function source(
     },
   };
   return s;
+}
+
+/**
+ * `s` with one more session, `NEXT`, after the target: SPY up 0.5%, SSO up 1% (2x), no event; a
+ * provider adjusted close moves alike. For the next day's daily run.
+ */
+function withNext(s: BarSource): BarSource {
+  return {
+    info: s.info,
+    async fetchBars(ticker, from, to, ctx) {
+      const bars = await s.fetchBars(ticker, from < TARGET ? from : TARGET, TARGET, ctx);
+      const last = bars.at(-1);
+      const out = bars.filter((b) => b.date >= from && b.date <= to);
+      if (to < NEXT || !last || last.date !== TARGET) return out;
+      const m = ticker === 'SSO' ? 1.01 : 1.005;
+      return [
+        ...out,
+        bar(NEXT, last.close * m, {
+          ...(last.providerAdjClose !== undefined && {
+            providerAdjClose: last.providerAdjClose * m,
+          }),
+        }),
+      ];
+    },
+  };
 }
 
 /** A source's withdrawal of its published values for `dates`, from `at` (spec withdrawn-values). */
@@ -426,6 +454,8 @@ async function run(
     adminAlerts: sent.map((m) => m.text).filter((t) => t.startsWith('Saku:')),
     /** A later daily run for the same target (a catch-up run) with these sources. */
     again: (list: BarSource[], now: string) => job('daily', TARGET, now, list),
+    /** The next session's daily run (its window covers the target again) with these sources. */
+    next: (list: BarSource[], now: string) => job('daily', NEXT, now, list),
   };
 }
 
@@ -608,6 +638,64 @@ describe('fault injection (layer F)', () => {
         expect(alert).toMatch(new RegExp(`^Trend 2x: safe state for ${TARGET}`));
       });
     }
+
+    it("SPY's dividend missing, the index published the next session: caught by the next daily run", async () => {
+      // Production timing (the index value for a day arrives 18:00 New York the next session): the
+      // day's own run cannot compare SPY with its index on it (publication lag, left to the next
+      // run), layer B has nothing to compare (every source agrees) and leverage_track reads 2x
+      // SPY's total return as reported, 2x the missing 0.25% (0.5pp) inside its tolerance.
+      const everyNext = ['p', 's1', 's2'].map((key) =>
+        withNext(source(key, { fault: missedDividend })),
+      );
+      const { db, today, next } = await run(everyNext);
+      expect((await layerC(db)).filter((r) => r.startsWith('index_match'))).toEqual([]);
+      // What the day's own run recorded (observed: green; the forward record is append-only).
+      expect(today.dataStatus).toBe('green');
+      // The next session's daily run, after the target's index value is published: its window
+      // covers the target again and grades it with the index check.
+      const after = await next(everyNext, '2026-01-20T01:30:00Z');
+      const graded = await db
+        .select()
+        .from(schema.checkResults)
+        .where(eq(schema.checkResults.runId, after.runId));
+      expect(
+        graded
+          .filter((r) => r.date === TARGET && r.checkName === 'index_match')
+          .map((r) => r.status),
+      ).toEqual(['yellow']);
+      const [d] = await healthReport(db, { dates: [TARGET], sessions });
+      expect(d!.run?.id).toBe(after.runId);
+      expect(d!.overall.status).toBe('yellow');
+      expect(d!.symbols).toContainEqual({
+        ticker: 'SPY',
+        grade: { status: 'yellow', reasons: ['C.index_match@rates'] },
+      });
+    });
+
+    it("SPY's dividend missing, a secondary sends adjusted closes: caught on the day by adj_return_match", async () => {
+      // As Yahoo sends them: the secondary's adjusted closes come from its own books, which hold
+      // the dividend; our adjusted series from the primary lacks it (production index timing).
+      const { db, today, reasons } = await run(
+        ['p', 's1', 's2'].map((key) =>
+          source(key, { fault: missedDividend, adjusted: key === 's1' }),
+        ),
+      );
+      expect(reasons).toContain('SPY:B.adj_return_match@s1');
+      // SPY 0.245pp off against 0.02pp (more than 2x): red, as observed; SSO (no fault) green.
+      const spy = await symbolId(db, 'SPY');
+      const adj = await db
+        .select()
+        .from(schema.checkResults)
+        .where(eq(schema.checkResults.checkName, 'adj_return_match'));
+      expect(
+        adj
+          .filter((r) => r.date === TARGET)
+          .map((r) => `${r.symbolId === spy ? 'SPY' : 'SSO'} ${r.source} ${r.status}`)
+          .sort(),
+      ).toEqual(['SPY s1 red', 'SSO s1 green']);
+      expect(today.dataStatus).toBe('red');
+      expect(today).toMatchObject({ safeStateApplied: true, allocation: 'Safe state' });
+    });
 
     it("SPY's dividend missing (its close right): never green, caught by the index check", async () => {
       // A gain of comparing total returns: the correct ex-dividend day is green (the control), so
