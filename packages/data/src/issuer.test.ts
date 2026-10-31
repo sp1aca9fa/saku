@@ -5,6 +5,7 @@ import {
   LAYER_D_MAX_STATUS,
   layerD,
   navPremiums,
+  notComparedByCurrency,
   otherCurrency,
   premiumStats,
   quantile,
@@ -107,7 +108,77 @@ describe('layer D (issuer reconciliation)', () => {
     expect(otherCurrency(records[0]!, 'USD')).toBe(true);
     expect(otherCurrency(records[1]!, 'USD')).toBe(false);
     expect(otherCurrency(records[2]!, 'USD')).toBe(false);
-    expect(otherCurrency({ date: dates[0]!, currency: 'XXX' }, 'USD')).toBe(false);
+    // A record without a NAV is in its stated currency too (its distribution is not compared).
+    expect(otherCurrency({ date: dates[0]!, currency: 'XXX' }, 'USD')).toBe(true);
+  });
+
+  it('a NAV not positive is a mismatch whatever its currency', () => {
+    const records = navs().map((r, i) => (i === 1 ? { ...r, nav: 0, currency: 'XXX' } : r));
+    const rs = of(layerD(primary, records, { ...opts, tolerance: 0.01 }), 'nav_premium');
+    expect(rs.find((r) => r.date === dates[1])).toMatchObject({
+      status: 'yellow',
+      message: 'issuer NAV not positive',
+    });
+    // Its NAV was compared (a mismatch): only a distribution would go uncounted, and this source
+    // declares NAV only.
+    expect(
+      notComparedByCurrency(records, { currency: 'USD', to: TO, publishes: { nav: true } }),
+    ).toEqual({});
+    expect(notComparedByCurrency(records, { currency: 'USD', to: TO })).toEqual({ XXX: 1 });
+  });
+
+  it('a distribution on a record in another currency is not compared; a split is', () => {
+    // The issuer's records of the dividend's day (7th) and the split's day (8th) are in XXX.
+    const records = navs().map((r, i) => (i === 2 || i === 3 ? { ...r, currency: 'XXX' } : r));
+    const rs = layerD(primary, records, opts);
+    expect(of(rs, 'distribution_match')).toEqual([]);
+    expect(of(rs, 'split_match')).toEqual([
+      expect.objectContaining({ date: dates[3], status: 'green' }),
+    ]);
+    // Events-only, declared: the same.
+    const events = records.map(({ nav: _n, ...r }) => r).filter((r) => r.date >= dates[2]!);
+    const declared = layerD(primary, events, {
+      ...opts,
+      publishes: { distributions: true, splits: true },
+    });
+    expect(of(declared, 'distribution_match')).toEqual([]);
+    expect(of(declared, 'split_match')).toHaveLength(1);
+    expect(
+      notComparedByCurrency(events, {
+        currency: 'USD',
+        to: TO,
+        publishes: { distributions: true, splits: true },
+      }),
+    ).toEqual({ XXX: 2 });
+  });
+
+  it('counts the records not compared for another currency, in the window', () => {
+    const records = navs().map((r, i) =>
+      i === 0 ? { ...r, currency: 'YYY' } : i >= 2 ? { ...r, currency: 'XXX' } : r,
+    );
+    const o = { currency: 'USD', to: TO };
+    expect(notComparedByCurrency(records, o)).toEqual({ XXX: 3, YYY: 1 });
+    expect(Object.keys(notComparedByCurrency(records, o))).toEqual(['XXX', 'YYY']);
+    expect(notComparedByCurrency(records, { ...o, from: dates[1]!, to: dates[3]! })).toEqual({
+      XXX: 2,
+    });
+    // Nothing compared, nothing counted: splits only declared, or not loaded with no declaration.
+    expect(notComparedByCurrency(records, { ...o, publishes: { splits: true } })).toEqual({});
+    expect(notComparedByCurrency(records, { ...o, notLoaded: true })).toEqual({});
+    expect(
+      notComparedByCurrency(records, { ...o, notLoaded: true, publishes: { nav: true } }),
+    ).toEqual({ XXX: 3, YYY: 1 });
+    // No currency is unknown (a mismatch), never "another currency"; empty input counts nothing.
+    expect(notComparedByCurrency([{ date: dates[0]!, nav: 1 }], o)).toEqual({});
+    expect(notComparedByCurrency([], o)).toEqual({});
+  });
+
+  it('an invalid tolerance setting is told only when some NAV would be compared', () => {
+    const all = navs().map((r) => ({ ...r, currency: 'XXX' }));
+    const invalid = { ...opts, toleranceInvalid: true };
+    expect(of(layerD(primary, all, invalid), 'nav_tolerance_invalid')).toEqual([]);
+    const one = all.map((r, i) => (i === 4 ? { ...r, currency: 'USD' } : r));
+    expect(of(layerD(primary, one, invalid), 'nav_tolerance_invalid')).toHaveLength(1);
   });
 
   it('a NAV in another currency still counts as published for freshness', () => {

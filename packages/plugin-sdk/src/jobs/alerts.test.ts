@@ -695,6 +695,12 @@ describe('reason codes in words', () => {
     expect(describeReason(t, 'SPY:lookback_red@2026-11-03')).toBe(
       'SPY: the data of 2026-11-03, which the signals still read, is red (unreliable)',
     );
+    expect(describeReason(t, 'SPY:lookback_missing@2026-11-03')).toBe(
+      'SPY: the price of 2026-11-03, which the signals still read, is missing',
+    );
+    expect(describeReason(translator('ja'), 'SPY:lookback_missing@2026-11-03')).toBe(
+      'SPY: シグナルがまだ参照している 2026-11-03 の価格がありません',
+    );
     expect(describeReason(t, 'SPY:lookback_ungraded@2026-11-03')).toBe(
       'SPY: the data of 2026-11-03, which the signals still read, has not been checked',
     );

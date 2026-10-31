@@ -157,7 +157,7 @@ describe('healthReport', () => {
     });
   });
 
-  it("covers a daily run's window only: DAILY_OVERLAP sessions before its target", async () => {
+  it("covers a daily run's window: DAILY_OVERLAP sessions before its target", async () => {
     const { db, ids, health } = await setup();
     const target = '2026-01-20';
     const first = sessions.before(target, 10); // 2026-01-06
@@ -165,14 +165,33 @@ describe('healthReport', () => {
     for (const date of [D[0], first]) {
       await health(id, date, ids.AAA, 'green', []);
       await health(id, date, ids.BBB, 'green', []);
-      await health(id, date, null, 'green', []);
     }
+    await health(id, first, null, 'green', []);
     const [outside, inside] = await healthReport(db, { dates: [D[0], first], sessions });
     expect(first).toBe(D[1]);
-    // A row the run stored outside its window does not count (verify never stores one there).
+    // Before its window, symbol rows without the day's overall row do not count.
     expect(outside).toMatchObject({ overall: { status: 'not_graded' }, green: false });
     expect(outside!.run).toBeUndefined();
     expect(inside).toMatchObject({ overall: { status: 'green' }, green: true });
+  });
+
+  it('a daily run decides a date before its window when it stored that day (a removed bar)', async () => {
+    const { db, ids, health, daily } = await setup();
+    // An older daily run graded D[0] yellow inside its window.
+    const older = await daily(D[3], { [D[0]]: 'yellow' });
+    // A later one removed AAA's canonical bar of D[0] and stored every row of the day (verify),
+    // though D[0] is before its window.
+    const target = '2026-01-20';
+    const later = await run(db, 'daily', target);
+    await health(later, D[0], ids.AAA, 'red', ['primary_missing']);
+    await health(later, D[0], ids.BBB, 'green', []);
+    await health(later, D[0], null, 'red', ['AAA']);
+    const [day] = await healthReport(db, { dates: [D[0]], sessions });
+    expect(older).not.toBe(later);
+    expect(day).toMatchObject({ run: { id: later }, overall: { status: 'red' }, green: false });
+    expect(day!.symbols).toEqual([
+      { ticker: 'AAA', grade: { status: 'red', reasons: ['primary_missing'] } },
+    ]);
   });
 
   it('a run that failed before storing anything does not hide an older red', async () => {

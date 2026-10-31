@@ -203,6 +203,47 @@ describe('a daily run', () => {
     expect(disk!.text.split('\n').at(-1)).toMatch(/^Data health: (yellow|red)\. \(As of/);
   });
 
+  it('an undelivered disk alert holds the run only after the A1 gate', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'saku-run-'));
+    const file = join(dir, 'x.db');
+    writeFileSync(file, 'x');
+    const statfs = async () => ({ bsize: 1, blocks: 1000, bavail: 200 });
+    for (const gate of [false, true]) {
+      const { db } = await setup(gate);
+      if (gate) {
+        // The strategy alerts told first, so below only the disk alert is undelivered.
+        const first = options(fakeNotifier().notifier);
+        expect(await runJob(db, plugins([barSource('p'), barSource('s')]), first)).toMatchObject({
+          ok: true,
+        });
+      }
+      // The admin channel is down; the owner's ordinary one works.
+      const { notifier } = fakeNotifier(['ops']);
+      const warnings: string[] = [];
+      const log = { info() {}, warn: (m: string) => void warnings.push(m) };
+      const o = options(notifier, { databaseUrl: `file:${file}`, statfs, log });
+      const r = await runJob(db, plugins([barSource('p'), barSource('s')]), o);
+      const run = (await db.select().from(schema.jobRuns)).find((j) => j.id === r.runId);
+      if (gate) {
+        // After the gate: incomplete as before, rerun at the next hourly check, no heartbeat.
+        expect(r.ok).toBe(false);
+        expect(r.error).toBe('incomplete: alerts');
+        expect(o.hooks).toEqual(['backup']);
+        expect(run).toMatchObject({ heartbeatSent: false });
+      } else {
+        // Before the gate: logged only; the run completes and the heartbeat is sent.
+        expect(r).toMatchObject({ ok: true });
+        expect(o.hooks).toEqual(['backup', 'heartbeat:daily']);
+        expect(run).toMatchObject({ status: 'success', heartbeatSent: true });
+        expect(warnings).toContain(
+          'Disk alert not delivered (before the A1 gate; the run is not held for it)',
+        );
+        // Not recorded as sent: told again at the next daily run.
+        expect(await db.select().from(schema.alertsSent)).toEqual([]);
+      }
+    }
+  });
+
   it('a full disk is told to the admins; a failed measurement never fails the run', async () => {
     const { db } = await setup();
     const { notifier, sent } = fakeNotifier();
@@ -973,6 +1014,37 @@ describe('an issuer source declaring what it publishes', () => {
     expect(inferred('distribution_match')).toEqual([
       expect.objectContaining({ date: EX, message: 'event missing in issuer data' }),
     ]);
+  });
+
+  it('records in another currency are not compared, and the run says so', async () => {
+    const { db } = await setup();
+    // The NAV of the target day is in XXX (made-up): no result for it, a warning in the log.
+    const other: IssuerSource = {
+      ...issuer({ nav: true }),
+      async fetchRecords(ticker, from, to, ctx) {
+        return (await issuer().fetchRecords(ticker, from, to, ctx)).map((r) =>
+          r.date === TARGET ? { ...r, currency: 'XXX' } : r,
+        );
+      },
+    };
+    const warnings: string[] = [];
+    const log = { info() {}, warn: (m: string) => void warnings.push(m) };
+    const r = await runJob(
+      db,
+      { ...plugins([paying('p'), paying('s')]), issuers: [other] },
+      options(fakeNotifier().notifier, { log }),
+    );
+    expect(r.ok).toBe(true);
+    expect(warnings).toContain(
+      "AAA iss: 1 issuer record in XXX, not the fund's currency: NAV and distributions not " +
+        'compared (no conversion; layer D has no result for them)',
+    );
+    const premium = await db
+      .select()
+      .from(schema.checkResults)
+      .where(eq(schema.checkResults.checkName, 'nav_premium'));
+    expect(premium.length).toBeGreaterThan(0);
+    expect(premium.map((x) => x.date)).not.toContain(TARGET);
   });
 });
 

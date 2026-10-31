@@ -91,9 +91,14 @@ Until forward records start (`forward_records_from`), admin channels get only th
 alerts: a failed run, a failed self-update and the disk warning. Their last line is the
 data-health grade alone, such as `Data health: red.`; it says nothing about signals because no
 strategy is live yet. Data-health, revision, calculation-check and strategy alerts start at the
-gate. Delivery works as after the gate: each alert once per subject and day, and a disk warning
-that cannot be delivered leaves the daily run incomplete (tried again at the next hourly check), so
-a broken admin channel also stops the healthchecks.io ping.
+gate. A failed run's alert lists what failed, one line each (the check's name and the first 200
+characters of its reason, up to 5 lines, the rest counted), so a failed calculation check or
+testfol parity case (`pnpm checks`, the weekly run) shows up there before the gate; the full text
+is in `pnpm health` and the job log. Each alert is sent once per subject and day. A disk warning
+that cannot be delivered before the gate is logged only: the run still completes and pings
+healthchecks.io (a rerun would replace the day's run in the A1 gate count), and the warning is
+tried again at the next daily run. After the gate it leaves the run incomplete, as any
+undelivered alert does.
 
 ## A failed run and catch-up
 

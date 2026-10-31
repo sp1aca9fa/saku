@@ -44,6 +44,7 @@ import {
   supportedBy,
 } from './ingest';
 import { integrity } from './integrity';
+import { notComparedLines } from './issuer';
 import { parity } from './parity';
 import { type IssuerAvailability, storeRunChecks, verify } from './verify';
 
@@ -323,6 +324,8 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         `issuer_nav_tolerance names no active symbol: ${checked.toleranceUnmatched.join(', ')}`,
       );
     }
+    // Issuer values in another currency than the fund's: not compared (C15 (a)), told here.
+    for (const line of notComparedLines(checked.navNotCompared)) log.warn(line);
     log.info(`Data health on ${target}: ${checked.health}`, { standIns: checked.standIns });
     // Canonical bars are derived: one the build no longer produced was removed (verify), each
     // named here; its raw bars, revision log and stand-in record stay.
@@ -393,17 +396,17 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         if (!disk) log.warn('Disk space not measured (the database is not a file)');
         else if (diskWarns(disk)) {
           const sent = await sendDiskSpace(db, { ...alerting, disk });
-          if (sent.failed.length === 0) {
-            // Delivered (or no admin channel): nothing more to do.
-          } else if (await getSetting(db, 'forward_records_from')) markIncomplete('alerts');
-          else {
-            // Before the A1 gate an undelivered operational alert is only logged: an incomplete
-            // run is rerun hourly, and the latest run of a day is the one the gate counting
-            // (spike) judges, so a broken admin channel must not fail a gate day. It is told
-            // again at the next daily run (not recorded as sent).
-            log.warn('Disk alert not delivered (before the A1 gate; the run is not held for it)', {
-              failed: sent.failed,
-            });
+          if (sent.failed.length > 0) {
+            if (await getSetting(db, 'forward_records_from')) markIncomplete('alerts');
+            else {
+              // Before the A1 gate an undelivered operational alert is only logged: an
+              // incomplete run is rerun hourly, and the latest run of a day is the one the gate
+              // counting (spike) judges, so a broken admin channel must not fail a gate day.
+              // Not recorded as sent, so it is tried again at the next daily run.
+              const line =
+                'Disk alert not delivered (before the A1 gate; the run is not held for it)';
+              log.warn(line, { failed: sent.failed });
+            }
           }
         }
       } catch (e) {

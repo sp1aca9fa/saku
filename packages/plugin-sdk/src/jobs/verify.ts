@@ -26,6 +26,7 @@ import {
   layerB,
   layerD,
   leverageCheck,
+  notComparedByCurrency,
   seriesHealth,
   standIns,
   symbolHealth,
@@ -44,6 +45,7 @@ import {
   seriesPointInTime,
 } from '@saku/db';
 import { cashSeries } from './cash';
+import type { NotCompared } from './issuer';
 import { and, asc, eq, gte, isNull, lte, min, sql } from 'drizzle-orm';
 
 const CHUNK = 500;
@@ -102,6 +104,11 @@ export interface VerifySummary {
   toleranceInvalid: boolean;
   /** `issuer_nav_tolerance` keys that name no active symbol. */
   toleranceUnmatched: string[];
+  /**
+   * Issuer records dated in the run's window (`from` to `to`) that layer D did not compare for
+   * being in another currency than the fund's (C15 (a): "not compared", told in the run's log).
+   */
+  navNotCompared: NotCompared[];
 }
 
 type CanonicalBar = RawBar & { source: string; standIn: boolean };
@@ -436,6 +443,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   const nav = await navTolerances(db);
   const availability = new Map((o.issuers ?? []).map((a) => [a.source, a]));
   const notLoaded = (source: string) => o.issuers !== undefined && !availability.has(source);
+  const navNotCompared: NotCompared[] = [];
   for (const s of symbols) {
     const bySource = raw.get(s.id)!;
     // A primary that delivers split-adjusted closes is put back on the raw basis too.
@@ -504,6 +512,17 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       // Every source with a role, also one with nothing stored for the fund (it may have failed).
       for (const source of issuerSources) {
         const a = availability.get(source);
+        const publishes = o.issuerPublishes?.[source];
+        const notCompared = notComparedByCurrency(stored.get(source) ?? [], {
+          currency: s.currency,
+          to: o.to,
+          ...(o.from && { from: o.from }),
+          ...(publishes && { publishes }),
+          ...(notLoaded(source) && { notLoaded: true }),
+        });
+        for (const [currency, count] of Object.entries(notCompared)) {
+          navNotCompared.push({ ticker: s.ticker, source, currency, count });
+        }
         add(
           layerD(primary, stored.get(source) ?? [], {
             source,
@@ -671,10 +690,11 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
   for (const [date, h] of overall) healthRows.push({ symbolId: null, date, health: h });
 
   const inRange = (date: TradingDate) => date <= o.to && (!o.from || date >= o.from);
-  // A day whose canonical bar was removed is read through its stored grade: that symbol row is
-  // stored whatever the run's window or mode, so an older (greener) row is never the latest.
-  const ids = new Map(symbols.map((s) => [s.ticker, s.id]));
-  const removedKeys = new Set(removedCanonical.map((r) => `${ids.get(r.ticker)} ${r.date}`));
+  // A day whose canonical bar was removed is read through its stored grade (the forward step and
+  // `pnpm health`). Outside the run's window every row of that day is stored too, the overall
+  // row and each symbol's, as a daily run stores its window: the day reads as graded by this
+  // run, and an older (greener) row is never the latest.
+  const removedDates = new Set(removedCanonical.map((r) => r.date));
   const inWindow = results.filter((r) => inRange(r.date));
   const byStatus: Record<string, number> = {};
   for (const r of inWindow) byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;
@@ -699,7 +719,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       (h) =>
         (inRange(h.date) &&
           (o.mode === 'daily' || h.symbolId === null || h.health.status !== 'green')) ||
-        (h.symbolId !== null && removedKeys.has(`${h.symbolId} ${h.date}`)),
+        (!inRange(h.date) && h.date <= o.to && removedDates.has(h.date)),
     ),
   );
   return {
@@ -716,6 +736,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       nav.tolerances,
       symbols.map((s) => s.ticker),
     ),
+    navNotCompared,
   };
 }
 

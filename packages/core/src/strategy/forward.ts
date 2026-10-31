@@ -7,8 +7,8 @@
 // unresolved stand-in price up to the day is moved by the margin test.
 import type { HealthStatus, RawBar, TradingDate } from '../domain';
 import { CASH_USD, parseTicker } from './backtest';
-import { type StrategyDay, evaluate, signalLookbacks, signalTickers } from './engine';
-import type { Holding, Strategy } from './schema';
+import { type StrategyDay, evaluate, operandBars, signalLookbacks, signalTickers } from './engine';
+import type { Comparison, Holding, Strategy } from './schema';
 
 export const SAFE_STATE = 'Safe state';
 
@@ -27,11 +27,12 @@ export interface StandInPrice {
 
 /**
  * A day before the decision's date, inside the re-check window, that keeps a signal ticker red
- * (requirements 04 "Red in the lookback"): graded red, or a session with no grade at all.
+ * (requirements 04 "Red in the lookback"): graded red, a session with no grade at all, or a
+ * session with no price whose stored grade is not red (`missing`).
  */
 export interface LookbackFlag {
   date: TradingDate;
-  why: 'red' | 'ungraded';
+  why: 'red' | 'ungraded' | 'missing';
 }
 
 export interface TickerHealth {
@@ -94,18 +95,64 @@ function shifted(
   };
 }
 
+const comparisonsOf = (s: Strategy['signals'][number]): Comparison[] =>
+  s.type === 'compare' ? [s] : s.members;
+
+/**
+ * Each comparison's state on every evaluated date, keyed `${signal}#${index}`, with the bars of a
+ * ticker it reads. The engine keeps one state per comparison, set by that comparison alone, so
+ * running it on the comparisons as signals of their own gives the same states.
+ */
+function comparisonStates(strategy: Strategy, bars: Record<string, RawBar[]>) {
+  const comparisons = strategy.signals.flatMap((s) =>
+    comparisonsOf(s).map((c, i) => ({ key: `${s.id}#${i}`, c })),
+  );
+  const split: Strategy = {
+    ...strategy,
+    signals: comparisons.map(({ key, c }) => ({
+      id: key,
+      type: 'compare' as const,
+      left: c.left,
+      op: c.op,
+      right: c.right,
+      tolerancePct: c.tolerancePct,
+    })),
+    allocations: [{ name: 'states', holdings: strategy.safeState.holdings }],
+  };
+  return {
+    days: evaluate(split, bars),
+    comparisons: comparisons.map(({ key, c }) => ({
+      key,
+      bars: (ticker: string) =>
+        Math.max(
+          0,
+          ...[c.left, c.right].filter((o) => 'ticker' in o && o.ticker === ticker).map(operandBars),
+        ),
+    })),
+  };
+}
+
 /**
  * Whether the signals' values on `date` read the ticker's bar of a stand-in (requirements 04
- * stand-in rule 6: "inside a signal's lookback"): one of the ticker's last `bars` bars up to
- * `date` (`signalLookbacks`). A total-return series also reads an older close on a day with a
- * distribution: there it moves every later level of the index (elsewhere the shift cancels in the
- * next day's return), so such a stand-in counts at any age for an operand reading total return.
+ * stand-in rule 6: "inside a signal's lookback"):
+ * - one of the ticker's last `bars` bars up to `date` (`signalLookbacks`);
+ * - for an operand reading total return, a bar with a distribution at any age: its close moves
+ *   every later level of the index (elsewhere the shift cancels in the next day's return);
+ * - an older one a comparison's state may still carry: a tolerance band keeps the previous state
+ *   inside it, so a state set while the stand-in was in a comparison's window lasts until the
+ *   value leaves the band. Counted while a comparison reading the ticker has kept the same state
+ *   on every evaluated day from the last one whose value read the stand-in (or the last before
+ *   it) through `date`. A change after that is the value leaving the band on its own, so the
+ *   state no longer depends on the stand-in. (A state may also flip and flip back on a day the
+ *   engine does not evaluate; then it still counts: the reading errs toward counting.)
  */
 function readsStandIn(
+  ticker: string,
   list: RawBar[] | undefined,
   date: TradingDate,
   standIn: StandInPrice,
   lookback: { bars: number; totalReturn: boolean },
+  states: () => ReturnType<typeof comparisonStates> | null,
 ): boolean {
   if (!list) return false;
   let end = list.length;
@@ -113,7 +160,23 @@ function readsStandIn(
   const i = list.findIndex((b) => b.date === standIn.date);
   if (i < 0 || i >= end) return false;
   if (i >= end - lookback.bars) return true;
-  return lookback.totalReturn && list[i]!.divCash !== 0;
+  if (lookback.totalReturn && list[i]!.divCash !== 0) return true;
+  const known = states();
+  // The states could not be computed (the evaluation fails; the day is red anyway): counted.
+  if (!known) return true;
+  const { days, comparisons } = known;
+  return comparisons.some((c) => {
+    const n = c.bars(ticker);
+    if (n === 0) return false;
+    // The last bar whose value reads the stand-in (inside the window: handled above).
+    const lastRead = list[i + n - 1]!.date;
+    const since = days.filter((d) => d.date <= date);
+    let from = since.findIndex((d) => d.date > lastRead);
+    if (from < 0) return false;
+    from = Math.max(0, from - 1);
+    const seen = since.slice(from).map((d) => d.signals[c.key]);
+    return seen.every((v) => v === seen[0]);
+  });
 }
 
 const sameSignals = (a: StrategyDay, b: StrategyDay) =>
@@ -144,10 +207,28 @@ export function forwardDecision(
   };
   const reads = signalTickers(strategy);
   const lookbacks = signalLookbacks(strategy);
+  let states: ReturnType<typeof comparisonStates> | null | undefined;
+  const statesOnce = () => {
+    if (states === undefined) {
+      try {
+        states = comparisonStates(strategy, bars);
+      } catch {
+        states = null;
+      }
+    }
+    return states;
+  };
   /** The ticker's unresolved stand-ins the signals read on the day (none for a held ticker). */
   const standInsRead = (t: string) =>
     (health[t]?.standIns ?? []).filter((s) =>
-      readsStandIn(bars[t], date, s, lookbacks.get(t) ?? { bars: 0, totalReturn: false }),
+      readsStandIn(
+        t,
+        bars[t],
+        date,
+        s,
+        lookbacks.get(t) ?? { bars: 0, totalReturn: false },
+        statesOnce,
+      ),
     );
   for (const t of dependencies(strategy)) {
     const h = health[t];

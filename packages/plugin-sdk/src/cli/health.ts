@@ -7,6 +7,9 @@
 //   pnpm health --days <N>            the last N trading days (with --date: N days ending there)
 //   pnpm health --lang <code>         the reasons' language (default: primary_language, else en)
 //
+// Before the verdict, one "Not compared:" line per fund, issuer source and currency with records
+// dated in the shown days that layer D does not compare for being in another currency than the
+// fund's (decisions log 2026-11-01, C15 (a)), as stored now; it changes no grade or verdict.
 // It ends with a verdict in words: "Verdict: all green." when every shown date is green (overall
 // and every symbol), else "Verdict: not all green (N dates red, M yellow[, K not graded])."
 //
@@ -41,6 +44,7 @@ import { dbConfigFromEnv, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { eq } from 'drizzle-orm';
 import { describeReason, describeReasons } from '../jobs/alerts';
+import { issuerNotCompared, notComparedLines } from '../jobs/issuer';
 import {
   type DayReport,
   type Grade,
@@ -80,7 +84,7 @@ import {
   table,
 } from '../jobs/health-values';
 import { diskLine, measureDisk } from '../jobs/disk';
-import { loadPlugins } from '../registry';
+import { issuerPublishesOf, loadPlugins } from '../registry';
 import { assertServerOnly } from '../server-only';
 import { parseHealthArgs } from './health-args';
 
@@ -154,6 +158,15 @@ const report = await healthReport(db, { dates: dates!, sessions });
 for (const day of report) {
   for (const line of describeDay(t, day)) console.log(line);
 }
+// Issuer values in another currency than the fund's are not compared (C15 (a)): said here, as
+// the records are stored now; no grade changes.
+const notCompared = await issuerNotCompared(db, {
+  from: dates![0]!,
+  to: end,
+  publishes: issuerPublishesOf(plugins.issuers),
+  loaded: plugins.issuers.map((s) => s.info.key),
+});
+for (const line of notComparedLines(notCompared)) console.log(`Not compared: ${line}`);
 // The report was produced: exit 0 whatever the grades; the verdict says them.
 console.log(daysVerdict(report));
 process.exit(0);

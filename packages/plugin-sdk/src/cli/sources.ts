@@ -36,7 +36,7 @@ import { exitIfUnmigrated } from '@saku/db/migrate';
 import { eq } from 'drizzle-orm';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
-import { issuerStats } from '../jobs/issuer';
+import { describeCounts, issuerStats } from '../jobs/issuer';
 import { lock } from '../jobs/lock';
 import {
   defaultReadjustmentRun,
@@ -155,14 +155,13 @@ if (tool === 'sources' && command === 'list') {
     );
     console.log(
       'ticker  source  days  median  p99  max  left out (stand-in, red)  ' +
-        'not compared (NAV in another currency)  tolerance set',
+        'not compared (records in another currency)  tolerance set',
     );
     for (const r of stats.rows) {
-      const other = Object.entries(r.otherCurrency);
       console.log(
         `${r.ticker}  ${r.source}  ${r.days}  ${pct(r.median)}  ${pct(r.p99)}  ${pct(r.max)}  ` +
           `${r.leftOut.standIn}, ${r.leftOut.red}  ` +
-          `${other.length === 0 ? '0' : other.map(([c, n]) => `${n} ${c}`).join(', ')}  ` +
+          `${describeCounts(r.otherCurrency)}  ` +
           `${r.tolerance === undefined ? 'none (observed only)' : pct(r.tolerance)}`,
       );
     }

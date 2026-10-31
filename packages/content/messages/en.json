@@ -86,6 +86,7 @@
       "standInLookback": "the signals read a secondary source's price for {date}, not yet confirmed by the main source",
       "lookbackRed": "the data of {date}, which the signals still read, is red (unreliable)",
       "lookbackUngraded": "the data of {date}, which the signals still read, has not been checked",
+      "lookbackMissing": "the price of {date}, which the signals still read, is missing",
       "stale": "{days} business days behind ({source})",
       "seriesMissing": "no value yet ({source})",
       "issuerUnavailable": "issuer data could not be fetched ({source})",

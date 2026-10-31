@@ -482,9 +482,11 @@ export function recheckWindow(sessions: Sessions, date: TradingDate): TradingDat
  *   daily and full alike: the checks grade every session from the primary's first bar, only the
  *   stored `data_health` rows are limited to the run's window). `red` is red, NULL is ungraded,
  *   so red too ("not graded" is never clean); green and yellow are not;
- * - a session without a canonical bar: its latest symbol grade in `data_health`; red is red, none
- *   at all is ungraded (red); another grade is not (verify grades such a day red,
- *   `primary_missing` or a refused stand-in, so this is the day's own word on it);
+ * - a session without a canonical bar (from the ticker's first bar on): red whatever is stored,
+ *   since the signals read a series with that price missing. Its latest symbol grade in
+ *   `data_health` names why when it is red (`red`); none at all is `ungraded`; a stored grade
+ *   that is not red (an older row left by a run that stopped after removing the bar, say) is not
+ *   believed: `missing`;
  * - a session before the ticker's first canonical bar was never a session for it: nothing.
  * The window's canonical bars on days that are not sessions (graded red, `bar_valid`) are read
  * too, since the signals read every canonical bar. Days before `forward_records_from` are
@@ -512,8 +514,7 @@ export async function lookbackFlags(
       continue;
     }
     const graded = await latestHealth(db, symbolId, d);
-    if (!graded) out.push({ date: d, why: 'ungraded' });
-    else if (graded.status === 'red') out.push({ date: d, why: 'red' });
+    out.push({ date: d, why: !graded ? 'ungraded' : graded.status === 'red' ? 'red' : 'missing' });
   }
   return out;
 }

@@ -8,7 +8,9 @@
 //   rows and its window is not known; a run that failed before storing anything graded nothing
 //   and does not blank older grades.
 // - A daily run covers `DAILY_OVERLAP` sessions before its target through the target, and stores
-//   every row there: a stored row is the grade, no row is "not graded".
+//   every row there: a stored row is the grade, no row is "not graded". It also covers an earlier
+//   date it stored the overall row of: verify stores every row of a day whose canonical bar it
+//   removed (a stand-in refused later) whatever its window, so that grade is the newest.
 // - A bootstrap, weekly or checks run (full history) covers every date up to its target. It stores
 //   the overall row of every date it graded (green included), only the non-green symbol rows, and
 //   each symbol's graded range (`health_coverage`): no overall row is "not graded"; a missing
@@ -118,8 +120,8 @@ async function finishedRuns(db: Db, sessions: Sessions) {
     return stored;
   };
   /** The latest counted run matching `test`. */
-  const latest = async (test: (r: Covering) => boolean) => {
-    for (const r of runs) if (test(r) && (await counts(r))) return r;
+  const latest = async (test: (r: Covering) => boolean | Promise<boolean>) => {
+    for (const r of runs) if ((await test(r)) && (await counts(r))) return r;
     return undefined;
   };
   return { latest };
@@ -198,7 +200,14 @@ export async function healthReport(
 
   const out: DayReport[] = [];
   for (const date of o.dates) {
-    const run = await latest((r) => (r.from === undefined || r.from <= date) && date <= r.target);
+    // A daily run also decides a date before its window when it stored that date's overall row:
+    // it does so for a day whose canonical bar it removed, storing every row of the day as in
+    // its window (verify), so the newest stored grade wins.
+    const run = await latest(
+      async (r) =>
+        date <= r.target &&
+        (r.from === undefined || r.from <= date || (await overallRowOf(r.id, date)) !== undefined),
+    );
     if (!run) {
       out.push({ date, overall: NOT_GRADED, symbols: [], green: false });
       continue;

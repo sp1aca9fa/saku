@@ -286,73 +286,77 @@ describe('forwardDecision', () => {
     expect(older.reasons).toEqual([4, 5, 6].map((i) => `X:stand_in_lookback@${day(i)}`));
   });
 
+  // In these the state changes on day 4, so an older stand-in is not carried by a state either.
+  const one = (signal: object) =>
+    Strategy.parse({ ...strategy, signals: [{ id: 'A', ...signal }] });
+  const standInOn = (s: Strategy, input: Record<string, RawBar[]>, i: number) =>
+    forwardDecision(s, day(4), input, {
+      X: { ...green, standIns: [{ date: day(i), band: 1e-6 }] },
+      X3: green,
+    });
+
   it('the lookback is the bars the indicators read: price 1, SMA n, volatility n + 1', () => {
-    const vol = Strategy.parse({
-      ...strategy,
-      signals: [
-        {
-          id: 'A',
-          type: 'compare',
-          left: { indicator: 'volatility', ticker: 'X', length: 3 },
-          op: '<',
-          right: { threshold: 1000 },
-        },
-      ],
+    // Volatility of 3 returns on day 4 reads the closes of days 1-4: calm on day 3, not on day 4.
+    const vol = one({
+      type: 'compare',
+      left: { indicator: 'volatility', ticker: 'X', length: 3 },
+      op: '<',
+      right: { threshold: 100 },
     });
-    const input = { X: bars([100, 101, 100, 101, 100]) };
-    const at = (i: number) =>
-      forwardDecision(vol, day(4), input, {
-        X: { ...green, standIns: [{ date: day(i), band: 1e-6 }] },
-        X3: green,
-      });
-    // Volatility of 3 returns on day 4 reads the closes of days 1-4.
-    expect(at(1).reasons).toEqual([`X:stand_in_lookback@${day(1)}`]);
-    expect(at(0)).toMatchObject({ dataStatus: 'green', reasons: [] });
-    // Price alone reads the day only.
-    const price = Strategy.parse({
-      ...strategy,
-      signals: [
-        {
-          id: 'A',
-          type: 'compare',
-          left: { indicator: 'price', ticker: 'X' },
-          op: '>',
-          right: { threshold: 1 },
-        },
-      ],
+    const calm = { X: bars([100, 100, 100, 100, 130]) };
+    expect(standInOn(vol, calm, 1).reasons).toEqual([`X:stand_in_lookback@${day(1)}`]);
+    expect(standInOn(vol, calm, 0)).toMatchObject({ dataStatus: 'green', reasons: [] });
+    // Price alone reads the day only (off on day 3, on on day 4).
+    const price = one({
+      type: 'compare',
+      left: { indicator: 'price', ticker: 'X' },
+      op: '>',
+      right: { threshold: 105 },
     });
-    const p = (i: number) =>
-      forwardDecision(price, day(4), input, {
-        X: { ...green, standIns: [{ date: day(i), band: 1e-6 }] },
-        X3: green,
-      });
-    expect(p(3)).toMatchObject({ dataStatus: 'green', reasons: [] });
-    expect(p(4)).toMatchObject({ dataStatus: 'green' });
+    const up = { X: bars([100, 101, 100, 101, 110]) };
+    expect(standInOn(price, up, 3)).toMatchObject({ dataStatus: 'green', reasons: [] });
+    expect(standInOn(price, up, 4)).toMatchObject({ dataStatus: 'green' });
   });
 
   it('total return: an older stand-in on a day with a distribution counts at any age', () => {
-    const tr = Strategy.parse({
-      ...strategy,
-      signals: [
-        {
-          id: 'A',
-          type: 'compare',
-          left: { indicator: 'price', ticker: 'X', totalReturn: true },
-          op: '>',
-          right: { threshold: 0.5 },
-        },
-      ],
+    const tr = one({
+      type: 'compare',
+      left: { indicator: 'price', ticker: 'X', totalReturn: true },
+      op: '>',
+      right: { threshold: 1.1 },
     });
+    // The index: 1 on day 0, 1.01 from day 1 (a distribution of 1), 1.212 on day 4.
     const input = {
-      X: bars([100, 100, 100, 100, 100]).map((b, i) => (i === 1 ? { ...b, divCash: 1 } : b)),
+      X: bars([100, 100, 100, 100, 120]).map((b, i) => (i === 1 ? { ...b, divCash: 1 } : b)),
     };
-    const with1 = (i: number) =>
-      forwardDecision(tr, day(4), input, {
-        X: { ...green, standIns: [{ date: day(i), band: 1e-6 }] },
-        X3: green,
-      });
-    expect(with1(1).reasons).toEqual([`X:stand_in_lookback@${day(1)}`]);
-    expect(with1(2)).toMatchObject({ dataStatus: 'green', reasons: [] });
+    expect(standInOn(tr, input, 1).reasons).toEqual([`X:stand_in_lookback@${day(1)}`]);
+    expect(standInOn(tr, input, 2)).toMatchObject({ dataStatus: 'green', reasons: [] });
+  });
+
+  it('a state a tolerance band carries keeps an older stand-in in the margin test', () => {
+    // Price > 100 with a 3% band (on above 103, off below 97, else kept), off before. Day 2 is a
+    // stand-in at 103.05, band 0.1%: its low corner (102.95) keeps it off, so day 2 is red. The
+    // engine's state on day 2 is on; day 3's 102 is inside the band, so on is carried from day 2,
+    // whose stand-in is outside day 3's 1-bar window. With day 2's low corner day 3 is off.
+    const band = one({
+      type: 'compare',
+      left: { indicator: 'price', ticker: 'X' },
+      op: '>',
+      right: { threshold: 100 },
+      tolerancePct: 3,
+    });
+    const input = { X: bars([95, 95, 103.05, 102, 90]) };
+    const health = { X: { ...green, standIns: [{ date: day(2), band: 0.001 }] }, X3: green };
+    const onE = forwardDecision(band, day(2), input, health);
+    expect(onE).toMatchObject({ dataStatus: 'red', safeStateApplied: true });
+    expect(onE.signals).toEqual({ A: true });
+    const next = forwardDecision(band, day(3), input, health);
+    expect(next).toMatchObject({ dataStatus: 'red', safeStateApplied: true });
+    expect(next.reasons).toEqual([`X:stand_in_lookback@${day(2)}`, 'X:decision_margin']);
+    expect(next.signals).toEqual({ A: true });
+    // Day 4's 90 leaves the band (off whatever came before): the stand-in no longer counts.
+    const after = forwardDecision(band, day(4), input, health);
+    expect(after).toMatchObject({ dataStatus: 'green', allocation: 'Calm', reasons: [] });
   });
 
   it('red when the day cannot be evaluated (no bar that day)', () => {

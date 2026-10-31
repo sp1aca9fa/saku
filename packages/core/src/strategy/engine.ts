@@ -62,12 +62,18 @@ export function signalTickers(s: Strategy): string[] {
  * value through its tolerance band (the previous state is kept inside it); that is the state on
  * the day before, decided then.
  */
+/** Bars of its ticker an indicator operand's value on a date reads (0 for a threshold). */
+export function operandBars(o: Operand): number {
+  if (!('ticker' in o)) return 0;
+  return o.indicator === 'price' ? 1 : o.indicator === 'sma' ? o.length : o.length + 1;
+}
+
 export function signalLookbacks(s: Strategy): Map<string, { bars: number; totalReturn: boolean }> {
   const out = new Map<string, { bars: number; totalReturn: boolean }>();
   for (const c of s.signals.flatMap(comparisonsOf)) {
     for (const o of [c.left, c.right]) {
       if (!('ticker' in o)) continue;
-      const bars = o.indicator === 'price' ? 1 : o.indicator === 'sma' ? o.length : o.length + 1;
+      const bars = operandBars(o);
       const prev = out.get(o.ticker);
       out.set(o.ticker, {
         bars: Math.max(prev?.bars ?? 0, bars),

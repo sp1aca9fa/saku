@@ -17,7 +17,7 @@ import { testDb } from '@saku/db/testing';
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { savePluginInfos } from '../registry';
-import { issuerStats } from './issuer';
+import { issuerNotCompared, issuerStats } from './issuer';
 import { carriedReasonStatus, verify } from './verify';
 
 const sessions = new Sessions({
@@ -654,7 +654,11 @@ describe('verify', () => {
       from: '2026-01-06',
       to: '2026-01-08',
     });
-    expect(summary).toMatchObject({ toleranceInvalid: false, toleranceUnmatched: ['ZZZ'] });
+    expect(summary).toMatchObject({
+      toleranceInvalid: false,
+      toleranceUnmatched: ['ZZZ'],
+      navNotCompared: [],
+    });
     const d = await layerDResults(db);
     expect(d.every((r) => r.source === 'iss' && r.symbolId === aaa)).toBe(true);
     expect(d.every((r) => r.status !== 'red')).toBe(true);
@@ -724,7 +728,27 @@ describe('verify', () => {
       fetchedAt: 't',
     });
     const runId = await startRun(db, 'daily');
-    await verify(db, { runId, sessions, mode: 'daily', from: '2026-01-06', to: '2026-01-08' });
+    const summary = await verify(db, {
+      runId,
+      sessions,
+      mode: 'daily',
+      from: '2026-01-06',
+      to: '2026-01-08',
+    });
+    // Told for the run's window (the run's log says it).
+    expect(summary.navNotCompared).toEqual([
+      { ticker: 'AAA', source: 'iss', currency: 'XXX', count: 1 },
+    ]);
+    // Read from the stored records for a window (`pnpm health`): none before the 6th.
+    expect(await issuerNotCompared(db, { from: '2026-01-06', to: '2026-01-08' })).toEqual(
+      summary.navNotCompared,
+    );
+    expect(await issuerNotCompared(db, { from: '2026-01-07', to: '2026-01-08' })).toEqual([]);
+    // Declaring splits only, or not loaded with no declaration: nothing compared, none counted.
+    expect(
+      await issuerNotCompared(db, { to: '2026-01-08', publishes: { iss: { splits: true } } }),
+    ).toEqual([]);
+    expect(await issuerNotCompared(db, { to: '2026-01-08', loaded: [] })).toEqual([]);
     const d = await layerDResults(db);
     const premium = d.filter((r) => r.checkName === 'nav_premium');
     // The 6th (XXX) has no result, never a green one; the 7th and 8th (USD) are compared.

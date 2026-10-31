@@ -618,4 +618,28 @@ describe('parity on stored bars', () => {
     expect(told[0]!.text).toContain('bad: same_close (not achievable), 2024-07-01 to 2026-01-16:');
     expect(told[0]!.text).toContain('not achievable: it trades at a close that is not yet known');
   });
+
+  it('before the A1 gate a red case reaches the admins only in the failed-run alert', async () => {
+    const own = await seeded();
+    const admin = await createUser(own, {
+      username: 'alex',
+      passwordHash: 'x',
+      totpSecretEnc: 'x',
+      totpLastStep: 1,
+      backupCodeHashes: ['a'],
+      isAdmin: true,
+    });
+    await addChannel(own, admin, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const { notifier, sent } = fakeNotifier();
+    const e = expected();
+    const dir = casesDir({ bad: validCase({ ...e, switches: 9 }) });
+    const r = await runJob(own, plugins(), options('checks', dir, notifier));
+    expect(r.ok).toBe(false);
+    // No parity (integrity) alert before the gate; the job failure lists the failed case.
+    const types = (await own.select().from(schema.alertsSent)).map((a) => a.type);
+    expect(types).toEqual(['job_failure']);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.text).toMatch(/^Saku: the checks run for .* did not finish/);
+    expect(sent[0]!.text).toContain('\n- testfol_parity failed: bad: same_close (not achievable)');
+  });
 });

@@ -86,6 +86,7 @@
       "standInLookback": "シグナルが参照する {date} の価格は副ソースの値で、主ソースでまだ確認されていません",
       "lookbackRed": "シグナルがまだ参照している {date} のデータが赤(信頼できない)です",
       "lookbackUngraded": "シグナルがまだ参照している {date} のデータがまだ検証されていません",
+      "lookbackMissing": "シグナルがまだ参照している {date} の価格がありません",
       "stale": "{days} 営業日遅れています({source})",
       "seriesMissing": "まだ値がありません({source})",
       "issuerUnavailable": "発行体のデータを取得できませんでした({source})",

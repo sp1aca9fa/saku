@@ -5,6 +5,7 @@ import {
   annotate,
   annotationsOf,
   createUser,
+  finishRun,
   forwardRecord,
   registerVersion,
   schema,
@@ -33,6 +34,7 @@ import {
   standInCorrections,
   upTo,
 } from './forward';
+import { healthReport } from './health';
 import { verify } from './verify';
 
 const sessions = new Sessions({
@@ -893,13 +895,20 @@ describe('forward: red and stand-ins in the lookback', () => {
     });
   });
   it('a stand-in a later run refuses: its canonical bar is removed, the day and the days after it are red', async () => {
-    const D0 = S[18]!;
+    const D0 = S[10]!;
     const g = await graded({ gap: D0 });
-    // The first (full) check accepted s's bar for D0: a canonical stand-in, yellow.
+    // The first (full) check accepted s's bar for D0: a canonical stand-in, yellow. It counts as
+    // the bootstrap for the health report.
+    await g.db
+      .update(schema.jobRuns)
+      .set({ jobType: 'bootstrap' })
+      .where(eq(schema.jobRuns.id, g.runId));
+    await finishRun(g.db, g.runId, { ok: true, datesProcessed: [S.at(-1)!] });
     const [stood] = await g.db.select().from(schema.bars).where(g.bar('AAA', D0));
     expect(stood).toMatchObject({ standIn: true, source: 's', status: 'yellow' });
-    // A second secondary now disagrees on D0 by 1%: the stand-in is refused. The run's window
-    // (a daily run after T) leaves D0 out, so only the removal stores D0's red grade.
+    // A second secondary now disagrees on D0 by 1%: the stand-in is refused. The daily run's
+    // window (10 sessions before its target, S[14]) leaves D0 out, so only the removal stores
+    // D0's red grade.
     await storeRawBars(g.db, {
       symbolId: g.ids.AAA,
       source: 's2',
@@ -909,31 +918,57 @@ describe('forward: red and stand-ins in the lookback', () => {
       runId: null,
       fetchedAt: 't',
     });
+    const daily = await startRun(g.db, 'daily', new Date(Date.now() + 60_000));
     const checked = await verify(g.db, {
-      runId: await startRun(g.db, 'daily'),
+      runId: daily,
       sessions,
       mode: 'daily',
-      from: S[21]!,
+      from: sessions.before(S.at(-1)!, 10),
       to: S.at(-1)!,
     });
+    await finishRun(g.db, daily, { ok: true, datesProcessed: [S.at(-1)!] });
     expect(checked.removedCanonical).toEqual([
-      { ticker: 'AAA', date: D0, source: 's', standIn: true, close: 118, status: 'yellow' },
+      { ticker: 'AAA', date: D0, source: 's', standIn: true, close: 110, status: 'yellow' },
     ]);
     expect(await g.db.select().from(schema.bars).where(g.bar('AAA', D0))).toEqual([]);
     // The stand-in record and the raw bars stay.
     expect(
       await g.db.select().from(schema.standIns).where(eq(schema.standIns.symbolId, g.ids.AAA)),
     ).toHaveLength(1);
+    // `pnpm health` shows D0 as the daily run graded it now, not the bootstrap's yellow.
+    const [report] = await healthReport(g.db, { dates: [D0], sessions });
+    expect(report).toMatchObject({ run: { id: daily }, overall: { status: 'red' } });
+    expect(report!.symbols).toEqual([
+      {
+        ticker: 'AAA',
+        grade: { status: 'red', reasons: expect.arrayContaining(['primary_missing']) },
+      },
+    ]);
     // D0 itself (catch-up from D0) and every day after it in the window: the safe state.
     await setSetting(g.db, 'forward_records_from', D0);
     const record = await g.record();
-    expect(record.map((e) => [e.date, e.allocation, e.dataStatus])).toEqual([
-      [D0, 'Safe state', 'red'],
-      [S[19], 'Safe state', 'red'],
-      [T, 'Safe state', 'red'],
-    ]);
+    expect(record.map((e) => e.date)).toEqual(S.slice(10, 21));
+    expect(record.every((e) => e.allocation === 'Safe state' && e.dataStatus === 'red')).toBe(true);
     expect(record[0]!.reasons).toContain('AAA:primary_missing');
-    expect(record[2]!.reasons).toContain(`AAA:lookback_red@${D0}`);
+    expect(record.at(-1)!.reasons).toContain(`AAA:lookback_red@${D0}`);
+  });
+
+  it('a window session with no canonical bar is red whatever its stored grade says', async () => {
+    const { db, runId, ids, bar, record } = await graded();
+    // As if a run stopped after removing the bar: the latest stored grade is an older yellow.
+    await db.delete(schema.bars).where(bar('AAA', S[18]!));
+    await db.insert(schema.dataHealth).values({
+      runId,
+      date: S[18]!,
+      symbolId: ids.AAA,
+      status: 'yellow',
+      reasons: ['stand_in@s'],
+    });
+    expect((await record())[0]).toMatchObject({
+      allocation: 'Safe state',
+      dataStatus: 'red',
+      reasons: [`AAA:lookback_missing@${S[18]}`],
+    });
   });
 
   it("a window session before the ticker's first canonical bar counts for nothing", async () => {
