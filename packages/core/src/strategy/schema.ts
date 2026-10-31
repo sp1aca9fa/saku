@@ -2,26 +2,35 @@
 // Setup 1 needs: price, SMA and volatility operands, compare and ensemble signals with tolerance
 // bands, an allocation chain with fixed-weight holdings, and the safe state. Other parts of 05
 // join as later stages need them.
+//
+// Every object is strict: an unknown key (a typo such as `tolerencePct`) is refused, never
+// dropped, since a registered version must be exactly what its file says (requirements 05,
+// registered versions are immutable; spec 2026-11-01 yaml-strategies). Registration stores the
+// parsed output, so stored versions carry only known keys and re-parse unchanged.
 import { z } from 'zod';
 
 const ticker = z.string().min(1);
 
 export const IndicatorOperand = z.discriminatedUnion('indicator', [
-  z.object({ indicator: z.literal('price'), ticker, totalReturn: z.boolean().default(false) }),
-  z.object({
+  z.strictObject({
+    indicator: z.literal('price'),
+    ticker,
+    totalReturn: z.boolean().default(false),
+  }),
+  z.strictObject({
     indicator: z.literal('sma'),
     ticker,
     length: z.number().int().min(1),
     totalReturn: z.boolean().default(false),
   }),
-  z.object({
+  z.strictObject({
     indicator: z.literal('volatility'),
     ticker,
     length: z.number().int().min(2),
     totalReturn: z.boolean().default(false),
   }),
 ]);
-export const Operand = z.union([IndicatorOperand, z.object({ threshold: z.number() })]);
+export const Operand = z.union([IndicatorOperand, z.strictObject({ threshold: z.number() })]);
 
 const comparison = {
   left: Operand,
@@ -29,11 +38,11 @@ const comparison = {
   right: Operand,
   tolerancePct: z.number().min(0).default(0),
 };
-export const Comparison = z.object(comparison);
+export const Comparison = z.strictObject(comparison);
 
 export const Signal = z.discriminatedUnion('type', [
-  z.object({ id: z.string().min(1), type: z.literal('compare'), ...comparison }),
-  z.object({
+  z.strictObject({ id: z.string().min(1), type: z.literal('compare'), ...comparison }),
+  z.strictObject({
     id: z.string().min(1),
     type: z.literal('ensemble'),
     members: z.array(Comparison).min(1),
@@ -42,7 +51,7 @@ export const Signal = z.discriminatedUnion('type', [
   }),
 ]);
 
-export const Holding = z.object({ ticker, weight: z.number().gt(0).max(100) });
+export const Holding = z.strictObject({ ticker, weight: z.number().gt(0).max(100) });
 const holdings = z
   .array(Holding)
   .min(1)
@@ -66,7 +75,7 @@ const holdings = z
   });
 
 export const Condition = z
-  .object({
+  .strictObject({
     all: z.array(z.string()).optional(),
     any: z.array(z.string()).optional(),
     none: z.array(z.string()).optional(),
@@ -75,21 +84,21 @@ export const Condition = z
     message: 'a condition names at least one signal',
   });
 
-export const Allocation = z.object({
+export const Allocation = z.strictObject({
   name: z.string().min(1),
   when: Condition.optional(),
   holdings,
 });
 
 export const Strategy = z
-  .object({
+  .strictObject({
     name: z.string().min(1),
     account: z.string().min(1),
     execution: z.enum(['next_open', 'next_close', 'same_close']).default('next_open'),
-    safeState: z.object({ holdings }),
-    evaluation: z.object({ frequency: z.enum(['daily', 'weekly', 'monthly']) }),
+    safeState: z.strictObject({ holdings }),
+    evaluation: z.strictObject({ frequency: z.enum(['daily', 'weekly', 'monthly']) }),
     costs: z
-      .object({
+      .strictObject({
         slippageBps: z.number().min(0),
         feePct: z.number().min(0),
         fxSpreadPct: z.number().min(0),

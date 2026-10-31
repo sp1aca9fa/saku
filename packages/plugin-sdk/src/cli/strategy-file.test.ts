@@ -4,7 +4,15 @@ import { canonicalJson } from '@saku/core';
 import { registerVersion } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
-import { parseStrategyFile, parseStrategyYaml } from './strategy-file';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  parseStrategyFile,
+  parseStrategyYaml,
+  readStrategyFile,
+  strategySummary,
+} from './strategy-file';
 
 const JSON_TEXT = JSON.stringify({
   name: 'Example trend',
@@ -40,15 +48,16 @@ safeState:
     - { ticker: AAA, weight: 100 }
 costs: { feePct: 0.1, slippageBps: 5 }
 signals:
-  - id: up # the trend
+  # the trend
+  - id: up
+    tolerancePct: 3 # a trailing comment after a number is fine
     type: compare
     left: { indicator: price, ticker: AAA, totalReturn: true }
     op: '>'
-    right: { indicator: sma, ticker: AAA, length: 200, totalReturn: true }
-    tolerancePct: 3
+    right: { indicator: sma, ticker: AAA, length: 200, totalReturn: true } # brackets too
 allocations:
   - name: In
-    when: { all: [up] }
+    when: { all: [up] } # and here
     holdings:
       - { ticker: "AAA?L=3", weight: 100 }
   - name: Out
@@ -112,6 +121,8 @@ describe('strategy files', () => {
     expect(error('x.yaml', '[1, 2]\n')).toMatch(/expected object/);
     expect(error('x.yaml', '')).toBe('x.yaml:\nThe file is empty.');
     expect(error('x.yaml', '# only a comment\n')).toBe('x.yaml:\nThe file is empty.');
+    expect(error('x.yaml', '---\n')).toBe('x.yaml:\nThe file is empty.');
+    expect(error('x.yaml', '# a comment\n---\n...\n')).toBe('x.yaml:\nThe file is empty.');
   });
 
   it('YAML 1.2 core: on, yes, no, y stay strings; numbers stay numbers', () => {
@@ -214,5 +225,91 @@ describe('strategy files', () => {
     expect(yamlError('a: [1, 2\nb: 3\n')).toMatch(/line \d+, column \d+/);
     expect(yamlError('a: 1\n  b: 2\n')).toMatch(/at line 1, column 4/);
     expect(yamlError('a:\n\t- 1\n')).toMatch(/line 2/);
+  });
+
+  it('an unknown key is refused (the schema is strict), with its line', () => {
+    expect(
+      error(
+        'x.yaml',
+        YAML_TEXT.replace('    type: compare\n', '    type: compare\n    tolerencePct: 3\n'),
+      ),
+    ).toBe('signals.0: Unrecognized key: "tolerencePct" at line 15, column 5');
+    // Inside an operand (a union of an indicator and a threshold): the indicator's reason.
+    expect(
+      error(
+        'x.yaml',
+        YAML_TEXT.replace('length: 200, totalReturn', 'length: 200, lenght: 50, totalReturn'),
+      ),
+    ).toBe('signals.0.right: Unrecognized key: "lenght" at line 17, column 56');
+    const json = JSON.parse(JSON_TEXT) as { costs: Record<string, number> };
+    json.costs.slipageBps = 5;
+    expect(error('x.json', JSON.stringify(json, null, 2))).toMatch(
+      /^costs: Unrecognized key: "slipageBps" at line \d+, column \d+$/,
+    );
+    // "__proto__" in JSON is an own key like any other, so refused too.
+    expect(error('x.json', JSON_TEXT.replace('{"name"', '{"__proto__":{},"name"'))).toContain(
+      'Unrecognized key: "__proto__"',
+    );
+  });
+
+  it("the schema's reasons name the line where the file has the value", () => {
+    expect(error('x.yaml', YAML_TEXT.replace('length: 200', 'length: 0'))).toMatch(
+      /^signals\.0\.right\.length: .* at line 17, column 51$/,
+    );
+    // A missing key: the line of the object it belongs to.
+    expect(error('x.yaml', YAML_TEXT.replace("    op: '>'\n", ''))).toMatch(
+      /^signals\.0\.op: .* at line 12, column 5$/,
+    );
+  });
+
+  it('a duplicate key in a JSON file is refused with its line (JSON.parse would keep the last)', () => {
+    const text = '{\n  "name": "a",\n  "account": "taxable",\n  "name": "b"\n}';
+    expect(JSON.parse(text)).toEqual({ name: 'b', account: 'taxable' });
+    expect(error('x.json', text)).toMatch(/^x\.json: Map keys must be unique at line 4, column 3$/);
+    // JSON.parse stays the syntax gate.
+    expect(error('x.json', '{"name": "a",}')).toMatch(/^x\.json: .*JSON/);
+  });
+
+  it('a comment right after unquoted text is refused; after numbers, quotes, brackets it is fine', () => {
+    expect(yamlError('name: Setup #1\n')).toBe(
+      'A comment follows the unquoted text "Setup" at line 1, column 7: if the # belongs to it, ' +
+        'quote it ("Setup #..."); else put the comment on its own line',
+    );
+    expect(yamlError('items:\n  - SPY # the fund\n')).toMatch(/unquoted text "SPY" at line 2/);
+    expect(value('name: "Setup #1"\n')).toEqual({ name: 'Setup #1' });
+    expect(value("name: 'Setup #1' # quoted\n")).toEqual({ name: 'Setup #1' });
+    expect(value('name: Setup#1\n')).toEqual({ name: 'Setup#1' });
+    expect(value('a: 3 # pct\nb: true # yes\nc: [x, y] # list\nd: { e: f } # map\n')).toEqual({
+      a: 3,
+      b: true,
+      c: ['x', 'y'],
+      d: { e: 'f' },
+    });
+    // A key followed by a comment (its value on the next lines) is not text with a comment.
+    expect(value('holdings: # the list\n  - 1\n')).toEqual({ holdings: [1] });
+  });
+
+  it('reads a file from disk; a missing one says so in one line', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'saku-strategy-'));
+    const path = join(dir, 'example.yaml');
+    writeFileSync(path, YAML_TEXT);
+    expect(readStrategyFile(path)).toEqual(parseStrategyFile('example.yaml', YAML_TEXT));
+    expect(readStrategyFile(join(dir, 'gone.yaml'), 'gone.yaml')).toEqual({
+      error: 'No file gone.yaml.',
+    });
+    expect(readStrategyFile(dir, 'folder.yaml')).toEqual({
+      error: 'folder.yaml is a folder, not a strategy file.',
+    });
+  });
+
+  it('the summary shows what the file registers, as read', () => {
+    expect(strategySummary(ok('x.yaml', YAML_TEXT))).toEqual([
+      'Name: "Example trend"',
+      'Account: taxable; execution: next_open; evaluation: daily',
+      'Safe state: AAA 100%',
+      'Signals: up',
+      'Allocation "In" when {"all":["up"]}: AAA?L=3 100%',
+      'Allocation "Out" otherwise: CASH_USD 100%',
+    ]);
   });
 });

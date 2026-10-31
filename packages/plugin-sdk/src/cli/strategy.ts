@@ -45,7 +45,6 @@ import {
 } from '@saku/db';
 import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
-import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { sendUpdateFailed } from '../jobs/alerts';
@@ -58,7 +57,7 @@ import {
 } from '../jobs/strategy-commands';
 import { dailyAfterOf, dailyTarget } from '../jobs/target';
 import { parseCheckArgs } from './check-args';
-import { parseStrategyFile } from './strategy-file';
+import { readStrategyFile, strategySummary } from './strategy-file';
 import { codeVersion } from '../code-version';
 import { loadPlugins, notifierContexts, providerUsageStore } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -93,10 +92,7 @@ async function userId(): Promise<string> {
 /** A strategy file (YAML or JSON, `strategy-file.ts`), validated; exits with the reasons if not. */
 function load(file: string | undefined): Strategy {
   if (!file) fail('Name the strategy file (.yaml, .yml or .json).');
-  const read = parseStrategyFile(
-    file!,
-    readFileSync(resolve(process.env.INIT_CWD ?? findRepoRoot(), file!), 'utf8'),
-  );
+  const read = readStrategyFile(resolve(process.env.INIT_CWD ?? findRepoRoot(), file!), file!);
   if ('error' in read) fail(read.error);
   return (read as { strategy: Strategy }).strategy;
 }
@@ -128,6 +124,8 @@ if (tool === 'strategy' && command === 'check') {
   if ('error' in args) fail(args.error);
   const a = args as Exclude<typeof args, { error: string }>;
   const s = load(a.file);
+  // What the file says, as read: a misread value shows here, before anything is registered.
+  for (const line of strategySummary(s)) console.log(line);
   console.log(`${s.name}: valid; depends on ${dependencies(s).join(', ')}.`);
   if (a.registration) {
     // The same account lookup as register; without either flag the account is not checked.
@@ -141,6 +139,9 @@ if (tool === 'strategy' && command === 'check') {
 } else if (tool === 'strategy' && command === 'register') {
   const s = load(rest[0]);
   const ownerId = rest.includes('--library') ? null : await userId();
+  // What is about to become an immutable version, as read from the file.
+  console.log(`Registering "${s.name}":`);
+  for (const line of strategySummary(s).slice(1)) console.log(`  ${line}`);
   finish(await registerStrategy(db, { strategy: s, ownerId, ...(await registrationInput()) }));
 } else if (tool === 'strategy' && command === 'list') {
   for (const v of await allVersions(db)) {

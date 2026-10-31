@@ -9,7 +9,8 @@
 #   - leverage: Cheng and Madhavan (2009) leveraged ETF dynamics;
 #   - ensemble over 150/200/250 days instead of one length: requirements 09 (parameter ensembles
 #     preferred over single parameters).
-# A backtest of the single 200-day version: docs/evidence/backtests.md.
+# A backtest of the single 200-day version: docs/evidence/backtests.md (same-close execution,
+# simulated leverage, parameters chosen after seeing results; read its caveats).
 name: 'Setup 1: 3x on trend and calm, 1x on trend, else cash'
 account: taxable
 execution: next_open

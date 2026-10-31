@@ -88,11 +88,12 @@ const BUY_AND_HOLD_JSON = `{
 describe('strategy templates', () => {
   it('every template is a valid YAML strategy (no JSON templates left)', () => {
     const files = readdirSync(dir);
-    expect(files.filter((f) => f.endsWith('.json'))).toEqual([]);
-    const yaml = files.filter((f) => f.endsWith('.yaml'));
-    expect(yaml.sort()).toEqual(['setup-1.yaml', 'spy-buy-and-hold.yaml']);
-    for (const file of yaml)
+    // Every file is a YAML template (.yaml or .yml), each one valid.
+    expect(files.filter((f) => !/\.(ya?ml)$/.test(f))).toEqual([]);
+    expect(files).toEqual(expect.arrayContaining(['setup-1.yaml', 'spy-buy-and-hold.yaml']));
+    for (const file of files) {
       expect(parseStrategyFile(file, text(file)), file).not.toHaveProperty('error');
+    }
   });
 
   it.each([

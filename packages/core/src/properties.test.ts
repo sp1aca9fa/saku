@@ -5,10 +5,13 @@
 // - The forward total-return index (requirements 04, adjusted series): computed incrementally (in
 //   pieces, each continuing from the last level) it equals the full computation within 1e-9
 //   relative, and a new bar never changes earlier levels.
+// - The engine (requirements 13, incremental vs full): evaluated on the bars up to a day, the
+//   signals and allocations equal the full history's for those days (split-adjusted prices).
 // - The near-tie rule (requirements 06; CLAUDE.md "Near-ties"): a value within 1e-9 relative of
 //   a bound keeps the previous state, in core and in the reference implementation.
 // - `asOf` (requirements 04, point-in-time reads, no look-ahead): never returns a value that was
-//   not known at the asked moment, and versions known later never change an answer.
+//   not known at the asked moment, versions known later never change an answer, and it equals
+//   an independent oracle.
 import { refEvaluate, refTotalReturn } from '@saku/reference';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
@@ -75,7 +78,7 @@ const bars = fc
       ),
       closeIsSplitAdjusted: fc.boolean(),
     }),
-    { minLength: 1, maxLength: 120 },
+    { minLength: 1, maxLength: 120, size: 'max' },
   )
   .map((list): RawBar[] =>
     list.map((b, i) => ({
@@ -110,6 +113,100 @@ describe('forward total-return index', () => {
         refTotalReturn(list).forEach((x, i) =>
           expect(relClose(x, full[i]!), `ref ${i}`).toBe(true),
         );
+      }),
+      RUNS,
+    );
+  });
+});
+
+describe('evaluate: incremental equals full', () => {
+  /** A raw-price random walk with splits (the close drops by the split ratio that day). */
+  const walk = fc
+    .record({
+      steps: fc.array(
+        fc.record({
+          move: fc.double({ min: -0.05, max: 0.05, noNaN: true }),
+          split: fc.oneof(
+            { weight: 30, arbitrary: fc.constant(1) },
+            { weight: 1, arbitrary: fc.constantFrom(2, 3, 0.5) },
+          ),
+        }),
+        { minLength: 2, maxLength: 160, size: 'max' },
+      ),
+      start: fc.double({ min: 20, max: 500, noNaN: true }),
+    })
+    .map(({ steps, start }): RawBar[] => {
+      let close = start;
+      return steps.map((s, i) => {
+        close = (close * (1 + s.move)) / s.split;
+        return {
+          date: new Date(Date.UTC(2020, 0, 1) + i * 86_400_000).toISOString().slice(0, 10),
+          close,
+          divCash: 0,
+          splitFactor: s.split,
+          closeIsSplitAdjusted: false,
+        };
+      });
+    });
+  const params = fc.record({
+    smaLength: fc.integer({ min: 2, max: 40 }),
+    volLength: fc.integer({ min: 2, max: 30 }),
+    tolerancePct: fc.oneof(fc.constant(0), fc.double({ min: 0, max: 5, noNaN: true })),
+    volThreshold: fc.double({ min: 5, max: 60, noNaN: true }),
+    cut: fc.nat(),
+  });
+  const strategyOf = (p: {
+    smaLength: number;
+    volLength: number;
+    tolerancePct: number;
+    volThreshold: number;
+  }) =>
+    Strategy.parse({
+      name: 'Incremental example',
+      account: 'taxable',
+      safeState: { holdings: [{ ticker: 'AAA', weight: 100 }] },
+      evaluation: { frequency: 'daily' },
+      signals: [
+        {
+          id: 'trend',
+          type: 'compare',
+          left: { indicator: 'price', ticker: 'AAA' },
+          op: '>',
+          right: { indicator: 'sma', ticker: 'AAA', length: p.smaLength },
+          tolerancePct: p.tolerancePct,
+        },
+        {
+          id: 'calm',
+          type: 'compare',
+          left: { indicator: 'volatility', ticker: 'AAA', length: p.volLength },
+          op: '<',
+          right: { threshold: p.volThreshold },
+        },
+      ],
+      allocations: [
+        {
+          name: 'On',
+          when: { all: ['trend', 'calm'] },
+          holdings: [{ ticker: 'AAA', weight: 100 }],
+        },
+        { name: 'Off', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+      ],
+    });
+
+  // Price against its own average and volatility against a threshold: a later split rescales
+  // every earlier split-adjusted close by one factor, which neither changes. Price (totalReturn
+  // false) against a fixed level is left out: this property found that a later split does change
+  // its earlier days (a close of 15 above a level of 10 becomes 7.5 after a 2-for-1 split), which
+  // contradicts docs/indicators.md "Price"; reported to the owner (spec 2026-11-01
+  // yaml-strategies, review fix 8), not fixed here.
+  it('the days up to a cut match the full history', () => {
+    fc.assert(
+      fc.property(walk, params, (list, p) => {
+        const strategy = strategyOf(p);
+        const k = 1 + (p.cut % list.length);
+        const full = evaluate(strategy, { AAA: list });
+        const part = evaluate(strategy, { AAA: list.slice(0, k) });
+        expect(part).toEqual(full.filter((d) => d.date <= list[k - 1]!.date));
       }),
       RUNS,
     );
@@ -189,29 +286,75 @@ describe('near-tie rule', () => {
 });
 
 describe('asOf (point-in-time reads)', () => {
-  const DATES = Array.from({ length: 14 }, (_, i) => `2026-01-${String(i + 1).padStart(2, '0')}`);
+  // 24 dates and up to 80 versions, so reads reach past the 10-observation look-back.
+  const DATES = Array.from({ length: 24 }, (_, i) => `2026-01-${String(i + 1).padStart(2, '0')}`);
   const hour = (h: number) => new Date(Date.UTC(2026, 0, 1, h)).toISOString();
+  // Each version is published some hours after its date: usually soon, sometimes weeks later
+  // (a late source), so later-published observations sit between known ones.
   const rows = fc.array(
     fc
       .record({
-        date: fc.constantFrom(...DATES),
+        day: fc.nat(DATES.length - 1),
         value: fc.double({ min: -100, max: 100, noNaN: true }),
-        known: fc.nat(400),
+        lag: fc.oneof({ weight: 3, arbitrary: fc.nat(48) }, fc.nat(600)),
         // The vintage time is at or before the known time (the constructor refuses otherwise).
         vintageBack: fc.option(fc.nat(100)),
-        withdrawn: fc.oneof({ weight: 5, arbitrary: fc.constant(false) }, fc.constant(true)),
+        withdrawn: fc.oneof({ weight: 4, arbitrary: fc.constant(false) }, fc.constant(true)),
       })
-      .map((r): Vintage => ({
-        date: r.date,
-        knownAt: hour(r.known),
-        ...(r.vintageBack !== null && { vintageAt: hour(Math.max(0, r.known - r.vintageBack)) }),
-        ...(r.withdrawn ? { withdrawn: true } : { value: r.value }),
-      })),
-    { maxLength: 40 },
+      .map((r): Vintage => {
+        const known = r.day * 24 + r.lag;
+        return {
+          date: DATES[r.day]!,
+          knownAt: hour(known),
+          ...(r.vintageBack !== null && { vintageAt: hour(Math.max(0, known - r.vintageBack)) }),
+          ...(r.withdrawn ? { withdrawn: true } : { value: r.value }),
+        };
+      }),
+    // `size: 'max'`: lengths up to 80 (fast-check's default size keeps arrays near 10).
+    { maxLength: 80, size: 'max' },
   );
   const query = fc.record({
     date: fc.constantFrom('2025-12-31', ...DATES, '2026-02-01'),
-    at: fc.nat(420).map(hour),
+    at: fc.nat(1200).map(hour),
+  });
+
+  /**
+   * An oracle written apart from PointInTime (requirements 04, point-in-time reads): only the
+   * versions known at `at` and dated on or before `date`; per date the rank-latest one (latest
+   * vintage time, then latest known, then the later in the order given); of the latest 10 such
+   * dates (the look-back), the newest whose version is a value.
+   */
+  function oracle(list: Vintage[], date: string, at: string) {
+    const vintage = (v: Vintage) => v.vintageAt ?? v.knownAt;
+    const latest = new Map<string, Vintage>();
+    for (const v of list) {
+      if (v.knownAt > at || v.date > date) continue;
+      const best = latest.get(v.date);
+      if (
+        !best ||
+        vintage(v) > vintage(best) ||
+        (vintage(v) === vintage(best) && v.knownAt >= best.knownAt)
+      ) {
+        latest.set(v.date, v);
+      }
+    }
+    const window = [...latest.keys()].sort().reverse().slice(0, 10);
+    for (const d of window) {
+      const v = latest.get(d)!;
+      if (v.withdrawn !== true) {
+        return { date: v.date, value: v.value, knownAt: v.knownAt, firstKnown: false };
+      }
+    }
+    return undefined;
+  }
+
+  it('equals an independent oracle', () => {
+    fc.assert(
+      fc.property(rows, query, (list, q) => {
+        expect(new PointInTime(list).asOf(q.date, q.at)).toEqual(oracle(list, q.date, q.at));
+      }),
+      RUNS,
+    );
   });
 
   it('never returns a value known after the asked moment', () => {
@@ -237,13 +380,13 @@ describe('asOf (point-in-time reads)', () => {
     );
   });
 
-  it('versions known later never change an answer', () => {
+  it('versions known later never change an answer (nor remove one)', () => {
     fc.assert(
       fc.property(rows, query, (list, q) => {
-        const r = new PointInTime(list).asOf(q.date, q.at);
-        if (r === undefined) return;
-        const known = new PointInTime(list.filter((x) => x.knownAt <= q.at)).asOf(q.date, q.at);
-        expect(r).toEqual(known);
+        const known = list.filter((x) => x.knownAt <= q.at);
+        expect(new PointInTime(list).asOf(q.date, q.at)).toEqual(
+          new PointInTime(known).asOf(q.date, q.at),
+        );
       }),
       RUNS,
     );
@@ -258,8 +401,9 @@ describe('asOf (point-in-time reads)', () => {
           if (r) expect(r.knownAt <= q.at).toBe(true);
           expect(r).toEqual(pit.asOf(q.date, q.at));
         } else {
-          // Used only when the plain read has nothing (labeled look-ahead for backtests).
+          // Only when nothing dated on or before the date was known (labeled look-ahead).
           expect(pit.asOf(q.date, q.at)).toBeUndefined();
+          expect(list.some((x) => x.date <= q.date && x.knownAt <= q.at)).toBe(false);
         }
       }),
       RUNS,

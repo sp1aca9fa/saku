@@ -108,6 +108,52 @@ describe('PointInTime withdrawals', () => {
     });
   });
 
+  it('does not count observations published after the moment (later rows never remove an answer)', () => {
+    // 01-01 known on 01-01; 01-02 to 01-11 published only on 02-01 (review repro).
+    const late = Array.from({ length: 10 }, (_, k) => ({
+      date: `2026-01-${String(k + 2).padStart(2, '0')}`,
+      value: 2,
+      knownAt: '2026-02-01T00:00:00Z',
+    }));
+    const first = { date: '2026-01-01', value: 1, knownAt: '2026-01-01T00:00:00Z' };
+    const read = new PointInTime([first, ...late]).asOf('2026-01-11', '2026-01-20T00:00:00Z');
+    expect(read).toEqual({
+      date: '2026-01-01',
+      value: 1,
+      knownAt: '2026-01-01T00:00:00Z',
+      firstKnown: false,
+    });
+    // The same as a store holding only what was known then (what the live run had).
+    expect(new PointInTime([first]).asOf('2026-01-11', '2026-01-20T00:00:00Z')).toEqual(read);
+    // Once they are published, the latest of them.
+    expect(new PointInTime([first, ...late]).asOf('2026-01-11', '2026-02-02T00:00:00Z')).toEqual({
+      date: '2026-01-11',
+      value: 2,
+      knownAt: '2026-02-01T00:00:00Z',
+      firstKnown: false,
+    });
+  });
+
+  it('still counts a known withdrawal toward the look-back among unpublished observations', () => {
+    // 01-01 has a value; 01-02 to 01-11 are withdrawn (known); 01-12 to 01-20 not yet published.
+    const withdrawn = Array.from(
+      { length: 10 },
+      (_, k) => `2026-01-${String(k + 2).padStart(2, '0')}`,
+    );
+    const unpublished = Array.from({ length: 9 }, (_, k) => `2026-01-${String(k + 12)}`);
+    const p = new PointInTime([
+      { date: '2026-01-01', value: 1, knownAt: '2026-01-01T21:00:00Z' },
+      ...withdrawn.flatMap((date) => [
+        { date, value: 2, knownAt: '2026-01-12T21:00:00Z' },
+        { date, withdrawn: true as const, knownAt: '2026-01-13T21:00:00Z' },
+      ]),
+      ...unpublished.map((date) => ({ date, value: 3, knownAt: '2026-03-01T00:00:00Z' })),
+    ]);
+    // Ten known withdrawals within reach: no value (and no first-known one).
+    expect(p.asOf('2026-01-20', '2026-01-25T00:00:00Z')).toBeUndefined();
+    expect(p.asOf('2026-01-20', '2026-01-25T00:00:00Z', { firstKnown: true })).toBeUndefined();
+  });
+
   it('never gives a withdrawal as a first-known value', () => {
     const odd = new PointInTime([
       { date: '2026-01-05', value: 4.0, knownAt: '2026-01-06T21:00:00Z' },

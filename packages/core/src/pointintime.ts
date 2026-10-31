@@ -52,13 +52,24 @@ export interface AsOfValue {
   firstKnown: boolean;
 }
 
-/** How many observations back a read looks for one already known (older is stale anyway). */
+/**
+ * How many observations back a read looks for one with a value (older is stale anyway). Only
+ * observations with a version known at the asked moment count (a value or a withdrawal): one not
+ * yet published then is skipped, not counted, exactly as a store holding only what was known
+ * then would not have it. So the answer never depends on versions known later (requirements 04,
+ * no look-ahead; spec 2026-11-01 yaml-strategies review fix: counting stored observations let a
+ * later publication remove an answer the live run had).
+ */
 const LOOK_BACK = 10;
 
 export class PointInTime {
   private readonly dates: TradingDate[] = [];
   /** Versions per observation in rank order (see above): the last one known at a moment counts. */
   private readonly vintages: Vintage[][] = [];
+  /** Per observation, the earliest `knownAt` of its versions. */
+  private readonly firstKnownAt: string[] = [];
+  /** Per observation, the earliest `knownAt` of it and every older one (ends a scan early). */
+  private readonly firstKnownThrough: string[] = [];
 
   /**
    * Versions of one date are ranked by vintage time, then `knownAt`, then the order of `rows`
@@ -84,6 +95,11 @@ export class PointInTime {
           .get(date)!
           .sort((a, b) => compare(vintageOf(a), vintageOf(b)) || compare(a.knownAt, b.knownAt)),
       );
+      const list = this.vintages.at(-1)!;
+      const first = list.reduce((m, x) => (x.knownAt < m ? x.knownAt : m), list[0]!.knownAt);
+      const before = this.firstKnownThrough.at(-1);
+      this.firstKnownAt.push(first);
+      this.firstKnownThrough.push(before !== undefined && before < first ? before : first);
     }
   }
 
@@ -96,7 +112,8 @@ export class PointInTime {
    *
    * Withdrawals (spec 2026-10-30 withdrawn-values; requirements 04, point-in-time series): an
    * observation whose latest version known at `at` is a withdrawal has no value at `at`, so the
-   * read looks further back (within LOOK_BACK) as for an observation not yet published. When a
+   * read looks further back (within LOOK_BACK observations known at `at`), as it does past one
+   * not yet published (which is not counted: see LOOK_BACK). When a
    * withdrawal was known at `at`, the vintage history had started, so `firstKnown` is not used
    * (it would bring back a value the source no longer had). The `firstKnown` fallback itself
    * skips an observation whose first version is a withdrawal (it has no value to give).
@@ -114,20 +131,25 @@ export class PointInTime {
     }
     if (i < 0) return undefined;
     let withdrawalKnown = false;
-    for (let j = i; j >= 0 && j > i - LOOK_BACK; j--) {
+    let counted = 0;
+    // Nothing at or before j was known at `at` once firstKnownThrough[j] is later: stop there.
+    for (let j = i; j >= 0 && counted < LOOK_BACK && this.firstKnownThrough[j]! <= at; j--) {
+      if (this.firstKnownAt[j]! > at) continue;
       const v = latestKnown(this.vintages[j]!, at);
       if (!v) continue;
+      counted++;
       if (!isValue(v)) {
         withdrawalKnown = true;
         continue;
       }
       return { date: v.date, value: v.value, knownAt: v.knownAt, firstKnown: false };
     }
+    // Here nothing dated on or before `date` was known at `at` (a known value returned above, a
+    // known withdrawal set the flag): the vintage history had not started. The labeled fallback
+    // reads ahead by definition, over the latest LOOK_BACK stored observations.
     if (!o.firstKnown || withdrawalKnown) return undefined;
     for (let j = i; j >= 0 && j > i - LOOK_BACK; j--) {
-      const list = this.vintages[j]!;
-      const earliest = list.reduce((m, x) => (x.knownAt < m ? x.knownAt : m), list[0]!.knownAt);
-      const first = latestKnown(list, earliest);
+      const first = latestKnown(this.vintages[j]!, this.firstKnownAt[j]!);
       if (first && isValue(first)) {
         return { date: first.date, value: first.value, knownAt: first.knownAt, firstKnown: true };
       }
