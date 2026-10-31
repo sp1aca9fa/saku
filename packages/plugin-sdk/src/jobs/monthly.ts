@@ -1,6 +1,7 @@
 // The monthly job (`pnpm monthly`; stage-a A3, system design `saku-monthly`, the 1st at 11:47):
 // the audit report (jobs/audit.ts) of the latest month that can be audited (`monthReady`: over in
-// the install's time zone, its last trading day final and processed by a complete daily run),
+// the install's time zone and in UTC, its last trading day final and processed by a complete daily
+// run),
 // stored and sent in short form to the admin channels. The CLI adds the jobs lock and the
 // heartbeat (`onComplete`).
 //
@@ -22,6 +23,11 @@
 //   never sends pre-gate months.
 // - Complete when every due month is done; then the heartbeat. Otherwise the run failed, and the
 //   admins are told (a failed run, allowed before the gate).
+// - A latest month held back only by the clock (not over yet, its last trading day not final yet)
+//   is the normal wait: the run completes and pings. One held back because no complete daily run
+//   has processed its last trading day (`monthReady` kind `daily`) while this run did no month
+//   completes without the heartbeat and logs the reason as a warning, so the healthcheck's grace
+//   period alerts when the daily job stays stuck.
 import type { Sessions } from '@saku/data';
 import { type Db, finishRun, getSetting, schema, startRun } from '@saku/db';
 import { languages, translator } from '@saku/content';
@@ -38,6 +44,7 @@ import {
   auditVerdict,
   localTime,
   monthOf,
+  type NotReady,
   monthReady,
   monthWindow,
   previousMonth,
@@ -112,19 +119,29 @@ async function doneMonths(db: Db): Promise<Set<string>> {
 /**
  * The months to audit now, oldest first: the latest ready month and each earlier one back to the
  * first recorded run's month (at most CATCH_UP back), each unless done. `why`: why the latest
- * month is not ready yet (the one before is then the latest).
+ * month is not ready yet (the one before is then the latest); `waiting`: its kind (`daily` also
+ * when the month before is not ready for want of a daily run).
  */
 export async function monthsDue(
   db: Db,
   o: { now: Date; timeZone: string; sessions: Sessions; finalAfter: string },
-): Promise<{ months: string[]; why?: string }> {
+): Promise<{ months: string[]; why?: string; waiting?: NotReady['kind'] }> {
   let latest = previousMonth(o.now, o.timeZone);
   const ready = await monthReady(db, latest, o);
   let why: string | undefined;
+  let waiting: NotReady['kind'] | undefined;
   if (!ready.ok) {
     why = ready.why;
+    waiting = ready.kind;
     latest = addMonths(latest, -1);
-    if (!(await monthReady(db, latest, o)).ok) return { months: [], why };
+    const before = await monthReady(db, latest, o);
+    if (!before.ok) {
+      if (before.kind === 'daily' && waiting !== 'daily') {
+        why = `${why} ${before.why}`;
+        waiting = 'daily';
+      }
+      return { months: [], why, waiting };
+    }
   }
   const firstRun = (await db.select().from(schema.jobRuns))
     .filter((r) => r.jobType !== 'monthly' && Number.isFinite(Date.parse(r.startedAt)))
@@ -140,13 +157,18 @@ export async function monthsDue(
     }
   }
   if (!done.has(latest)) months.push(latest);
-  return { months, ...(why && { why }) };
+  return { months, ...(why && { why }), ...(waiting && { waiting }) };
 }
 
 export async function runMonthly(db: Db, o: MonthlyOptions): Promise<MonthlyResult> {
   const { log } = o;
   const due = await monthsDue(db, o);
-  if (due.why) log.info(due.why);
+  // Held back by the daily run (not by the clock): the daily job may be stuck.
+  const stuck = due.waiting === 'daily';
+  if (due.why) {
+    if (stuck) log.warn(due.why);
+    else log.info(due.why);
+  }
   const runId = await startRun(db, 'monthly', o.now, due.months.at(-1));
   const failures: string[] = [];
   const done: string[] = [];
@@ -194,7 +216,10 @@ export async function runMonthly(db: Db, o: MonthlyOptions): Promise<MonthlyResu
   }
   const ok = failures.length === 0;
   let heartbeatSent = false;
-  if (ok) heartbeatSent = (await o.onComplete?.()) ?? false;
+  // No heartbeat when this run did no month and the latest waits for a daily run: the
+  // healthcheck's grace period then alerts if the daily job stays stuck.
+  const held = stuck && done.length === 0;
+  if (ok && !held) heartbeatSent = (await o.onComplete?.()) ?? false;
   const error = ok ? undefined : failures.join('\n');
   await finishRun(db, runId, {
     ok,
@@ -215,6 +240,8 @@ export async function runMonthly(db: Db, o: MonthlyOptions): Promise<MonthlyResu
     } catch (e) {
       log.warn('Admin alert failed', { error: String(e) });
     }
+  } else if (held) {
+    log.warn('monthly done without the heartbeat: the latest month waits for a complete daily run');
   } else log.info(`monthly done: ${done.join(', ') || 'no month due'}`);
   return { runId, ok, months: done, ...(error && { error }) };
 }

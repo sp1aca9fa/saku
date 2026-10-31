@@ -133,42 +133,72 @@ export async function installTimeZone(db: Db): Promise<string> {
 }
 
 /**
- * Whether a month can be audited at `now`: it is over in the install's time zone, the data of its
- * last trading day is final (the daily target, `finalAfter` New York, has reached it), and a
- * complete daily run has processed that day (`latestDailyTarget` on or after it), so no day of it
- * is "not graded" or a forward record day "missing" only for being early; the timer's retry days
- * then audit it. A month with trading days but no complete daily run ever is not ready either
- * (fails closed). A month without sessions needs no daily run; a month the calendar does not
- * cover can be audited once over (its days then read "not known").
+ * Why a month cannot be audited yet: `clock`, only the time (not over in the zone or in UTC, its
+ * last trading day not final yet; the normal wait), or `daily`, no complete daily run has
+ * processed its last trading day although the clock allows it (the daily job may be stuck).
+ */
+export type NotReady = { ok: false; kind: 'clock' | 'daily'; why: string };
+
+/**
+ * Whether a month can be audited at `now`: it is over in the install's time zone, its last trading
+ * day's data is final (the daily target, `finalAfter` New York, has reached it), its last UTC day
+ * is over (the quota ledger counts UTC days, so a month audited earlier would always read its
+ * quota "not fully known", e.g. in zones at UTC+12 or more), and a complete daily run has
+ * processed that day (`latestDailyTarget` on or after it), so no day of it is "not graded" or a
+ * forward record day "missing" only for being early; the timer's retry days then audit it. A month
+ * with trading days but no complete daily run ever is not ready either (fails closed). A month
+ * without sessions needs no daily run; a month the calendar does not cover can be audited once
+ * over (its days then read "not known"). When the daily target cannot be computed (the calendar
+ * does not cover `now`), only the finality check is skipped: a complete daily run that processed
+ * the last trading day is still required (that run's own target was final).
  */
 export async function monthReady(
   db: Db,
   month: string,
   o: { now: Date; timeZone: string; sessions: Sessions; finalAfter: string },
-): Promise<{ ok: true } | { ok: false; why: string }> {
+): Promise<{ ok: true } | NotReady> {
   const w = monthWindow(month, o.timeZone);
   if (o.now.getTime() < Date.parse(w.to)) {
-    return { ok: false, why: `${month} is not over yet in ${o.timeZone}.` };
+    return { ok: false, kind: 'clock', why: `${month} is not over yet in ${o.timeZone}.` };
   }
   let last: TradingDate | undefined;
-  let target: TradingDate;
   try {
     last = o.sessions.between(w.firstDay, w.lastDay).at(-1);
-    target = dailyTarget(o.sessions, o.now, o.finalAfter);
   } catch {
-    return { ok: true };
+    last = undefined; // the calendar does not cover the month: its days read "not known"
   }
-  if (last === undefined) return { ok: true };
-  if (target < last) {
+  if (last !== undefined) {
+    let target: TradingDate | undefined;
+    try {
+      target = dailyTarget(o.sessions, o.now, o.finalAfter);
+    } catch {
+      target = undefined; // the calendar does not cover `now`: the finality check is skipped
+    }
+    if (target !== undefined && target < last) {
+      return {
+        ok: false,
+        kind: 'clock',
+        why: `The data of ${last}, the last trading day of ${month}, is not final until ${o.finalAfter} New York.`,
+      };
+    }
+  }
+  const [y, m] = month.split('-').map(Number) as [number, number];
+  const utcEnd = new Date(Date.UTC(y, m, 1)).toISOString();
+  if (o.now.getTime() < Date.parse(utcEnd)) {
     return {
       ok: false,
-      why: `The data of ${last}, the last trading day of ${month}, is not final until ${o.finalAfter} New York.`,
+      kind: 'clock',
+      why:
+        `${month} is not over yet in UTC, the quota ledger's days (until ` +
+        `${localTime(utcEnd, o.timeZone)} ${o.timeZone}).`,
     };
   }
+  if (last === undefined) return { ok: true };
   const daily = await latestDailyTarget(db);
   if (daily === undefined || daily < last) {
     return {
       ok: false,
+      kind: 'daily',
       why:
         `No complete daily run has processed ${last}, the last trading day of ${month}, yet ` +
         `(latest: ${daily ?? 'none'}).`,

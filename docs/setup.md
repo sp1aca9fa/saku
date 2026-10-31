@@ -112,7 +112,8 @@ time): the audit report of the previous month (`pnpm monthly`): its trading days
 the reasons, revisions and re-adjustments, quota use per provider, the forward records' chain
 verified, failed runs and stand-ins. It is stored in the activity log and, after the A1 gate, its
 short form goes to the admin channels once. The timer also fires on the 2nd and 3rd; those runs
-only retry a month that is not done (another job held the lock, an alert was not delivered) and
+only retry a month that is not done (another job held the lock, an alert was not delivered, no
+daily run had yet graded the month's last trading day) and
 change nothing otherwise. Set the server's time zone to the install's (`pnpm settings set
 time_zone`), or the month may be judged in another zone; a month missed is caught up by the next
 run. It can be installed before the gate.

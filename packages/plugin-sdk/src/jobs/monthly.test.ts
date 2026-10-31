@@ -241,6 +241,51 @@ describe('the monthly job', () => {
     const due = await monthsDue(db, o);
     expect(due.months).toEqual(['2026-02']);
     expect(due.why).toMatch(/No complete daily run has processed 2026-03-31/);
+    expect(due.waiting).toBe('daily');
+    // A month was done in this run: it completes with the heartbeat.
+    const run = options();
+    expect(await runMonthly(db, run.o)).toMatchObject({ ok: true, months: ['2026-02'] });
+    expect(run.beats()).toBe(1);
+  });
+
+  it('no month done and the latest waits for a daily run: complete without the heartbeat, a warning', async () => {
+    const { db } = await setup();
+    expect((await runMonthly(db, options().o)).months).toEqual(['2026-03']);
+    // May 1, 12:00 in Tokyo: April is over and final, but the latest complete daily run is
+    // still March 31 (the daily job is stuck); March is done.
+    const now = new Date('2026-05-01T03:00:00.000Z');
+    const due = await monthsDue(db, { now, timeZone: TZ, sessions, finalAfter: '20:00' });
+    expect(due).toMatchObject({ months: [], waiting: 'daily' });
+    const run = options([], now);
+    const warns: string[] = [];
+    const r = await runMonthly(db, {
+      ...run.o,
+      log: { info() {}, warn: (m: string) => void warns.push(m) },
+    });
+    expect(r).toMatchObject({ ok: true, months: [] });
+    expect(run.beats()).toBe(0);
+    expect(warns[0]).toMatch(/No complete daily run has processed 2026-04-30/);
+    const row = (await db.select().from(schema.jobRuns).where(eq(schema.jobRuns.id, r.runId)))[0]!;
+    expect(row).toMatchObject({ status: 'success', heartbeatSent: false, error: null });
+    expect(row.finishedAt).not.toBeNull();
+  });
+
+  it('no month done and the latest waits only for the clock: complete with the heartbeat', async () => {
+    const { db } = await setup();
+    expect((await runMonthly(db, options().o)).months).toEqual(['2026-03']);
+    // May 1, 01:00 in Tokyo: April 30 is 12:00 in New York, not final yet (the normal wait).
+    const now = new Date('2026-04-30T16:00:00.000Z');
+    const due = await monthsDue(db, { now, timeZone: TZ, sessions, finalAfter: '20:00' });
+    expect(due).toMatchObject({ months: [], waiting: 'clock' });
+    const run = options([], now);
+    const warns: string[] = [];
+    const r = await runMonthly(db, {
+      ...run.o,
+      log: { info() {}, warn: (m: string) => void warns.push(m) },
+    });
+    expect(r).toMatchObject({ ok: true, months: [] });
+    expect(run.beats()).toBe(1);
+    expect(warns).toEqual([]);
   });
 
   it('a month whose last trading day is not final yet waits; the one before is audited', async () => {

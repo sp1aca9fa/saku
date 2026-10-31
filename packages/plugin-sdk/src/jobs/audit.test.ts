@@ -36,6 +36,7 @@ import {
   relativeChange,
 } from './audit';
 import { fitMessage } from './alerts';
+import { dailyTarget } from './target';
 import { verifyChains } from './chain-verify';
 import type { ProviderLimits } from '../types';
 
@@ -168,6 +169,42 @@ describe('months', () => {
     expect(await monthReady(db, MONTH, o)).toEqual({ ok: true });
     // A month the calendar does not cover needs no daily run (its days read "not known").
     expect(await monthReady(db, '2024-06', o)).toEqual({ ok: true });
+  });
+
+  it('a calendar that does not cover now skips only the finality check, never the daily run', async () => {
+    const { db } = await setup();
+    // January 1, 07:00 in New York: the calendar ends on 2026-12-31, so the daily target cannot
+    // be computed; December is over in Tokyo and in UTC.
+    const now = new Date('2027-01-01T12:00:00.000Z');
+    expect(() => dailyTarget(sessions, now, '20:00')).toThrow();
+    const o = { now, timeZone: TZ, sessions, finalAfter: '20:00' };
+    await dailyDone(db, '2026-12-30');
+    const r = await monthReady(db, '2026-12', o);
+    expect(r).toMatchObject({ ok: false, kind: 'daily' });
+    expect(!r.ok && r.why).toMatch(
+      /No complete daily run has processed 2026-12-31.*latest: 2026-12-30/,
+    );
+    await dailyDone(db, '2026-12-31');
+    expect(await monthReady(db, '2026-12', o)).toEqual({ ok: true });
+  });
+
+  it('a month is not ready until its last UTC day is over (zones at UTC+12 or more)', async () => {
+    const { db } = await setup();
+    await dailyDone(db, '2026-10-30');
+    const o = { timeZone: 'Pacific/Auckland', sessions, finalAfter: '20:00' };
+    // November 1, 11:47 in Auckland (UTC+13): October is over there and its last session
+    // (Friday, October 30) is final, but October 31 runs in UTC until 13:00 Auckland.
+    const early = await monthReady(db, '2026-10', {
+      ...o,
+      now: new Date('2026-10-31T22:47:00.000Z'),
+    });
+    expect(early).toMatchObject({ ok: false, kind: 'clock' });
+    expect(!early.ok && early.why).toMatch(
+      /2026-10 is not over yet in UTC.*until 2026-11-01 13:00 Pacific\/Auckland/,
+    );
+    expect(
+      await monthReady(db, '2026-10', { ...o, now: new Date('2026-11-01T00:00:00.000Z') }),
+    ).toEqual({ ok: true });
   });
 });
 
