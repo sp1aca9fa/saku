@@ -22,6 +22,7 @@
     "@saku/data": "workspace:*",
     "@saku/db": "workspace:*",
     "@saku/reference": "workspace:*",
-    "drizzle-orm": "^0.45.4"
+    "drizzle-orm": "^0.45.4",
+    "yaml": "^2.9.1"
   }
 }

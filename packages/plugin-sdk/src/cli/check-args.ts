@@ -2,7 +2,7 @@
 // be tested. Anything not understood is refused with a message, never ignored.
 
 export const CHECK_USAGE =
-  'Usage: pnpm strategy check <file.json> [--registration [--user <username> | --library]]';
+  'Usage: pnpm strategy check <file.yaml> [--registration [--user <username> | --library]]';
 
 export interface CheckArgs {
   file: string;
@@ -33,7 +33,9 @@ export function parseCheckArgs(rest: string[]): CheckArgs | { error: string } {
     } else if (file === undefined) file = arg;
     else return { error: `Unexpected argument ${arg}.\n${CHECK_USAGE}` };
   }
-  if (file === undefined) return { error: `Name the strategy file (JSON).\n${CHECK_USAGE}` };
+  if (file === undefined) {
+    return { error: `Name the strategy file (.yaml, .yml or .json).\n${CHECK_USAGE}` };
+  }
   if ((user !== undefined || library) && !registration) {
     return { error: `--user and --library go with --registration.\n${CHECK_USAGE}` };
   }

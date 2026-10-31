@@ -1,13 +1,15 @@
 // Strategies and the journal from the server (A2; the web UI comes with D1).
 //
-//   pnpm strategy check <file.json> [--registration [--user <username> | --library]]
+//   pnpm strategy check <file.yaml> [--registration [--user <username> | --library]]
 //                                                          validate a definition (no record); with
 //                                                          --registration also every reason register
 //                                                          would refuse (writes nothing)
-//   pnpm strategy register <file.json> --user <username>   register: an immutable version whose
-//   pnpm strategy register <file.json> --library           forward record starts with the next close;
+//   pnpm strategy register <file.yaml> --user <username>   register: an immutable version whose
+//   pnpm strategy register <file.yaml> --library           forward record starts with the next close;
 //                                                          refused for same_close or a ticker whose
 //                                                          full history has not passed the checks
+//                                                          (a strategy file is YAML, .yaml or .yml,
+//                                                          or JSON; cli/strategy-file.ts)
 //   pnpm strategy list
 //   pnpm strategy show <version id> [--days 10]           the latest forward entries
 //   pnpm strategy verify                                   recompute every hash chain
@@ -22,7 +24,7 @@
 //   pnpm channel list|disable|enable|test [<channel id>] --user <username>
 //   pnpm alert update-failed --from <commit> --to <commit> --step <step> [--stuck]
 //                    (the update script, after going back)
-import { Strategy, dependencies, isTradingDate, tradingDateOf } from '@saku/core';
+import { type Strategy, dependencies, isTradingDate, tradingDateOf } from '@saku/core';
 import { translator } from '@saku/content';
 import { Sessions } from '@saku/data';
 import {
@@ -56,6 +58,7 @@ import {
 } from '../jobs/strategy-commands';
 import { dailyAfterOf, dailyTarget } from '../jobs/target';
 import { parseCheckArgs } from './check-args';
+import { parseStrategyFile } from './strategy-file';
 import { codeVersion } from '../code-version';
 import { loadPlugins, notifierContexts, providerUsageStore } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -87,15 +90,15 @@ async function userId(): Promise<string> {
   return user?.id ?? fail(`No account ${name}.`);
 }
 
-function load(file: string | undefined) {
-  if (!file) fail('Name the strategy file (JSON).');
-  const parsed = Strategy.safeParse(
-    JSON.parse(readFileSync(resolve(process.env.INIT_CWD ?? findRepoRoot(), file!), 'utf8')),
+/** A strategy file (YAML or JSON, `strategy-file.ts`), validated; exits with the reasons if not. */
+function load(file: string | undefined): Strategy {
+  if (!file) fail('Name the strategy file (.yaml, .yml or .json).');
+  const read = parseStrategyFile(
+    file!,
+    readFileSync(resolve(process.env.INIT_CWD ?? findRepoRoot(), file!), 'utf8'),
   );
-  if (!parsed.success) {
-    fail(parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('\n'));
-  }
-  return parsed.data!;
+  if ('error' in read) fail(read.error);
+  return (read as { strategy: Strategy }).strategy;
 }
 
 /** The market calendar (xnys), as the daily run reads it. */

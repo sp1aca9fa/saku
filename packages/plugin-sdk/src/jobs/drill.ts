@@ -189,7 +189,7 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
     return {
       refused:
         'No strategy is registered, so there is nothing to drill. Register one first ' +
-        '(pnpm strategy register <file.json> --user <username>; docs/running.md), then run ' +
+        '(pnpm strategy register <file.yaml> --user <username>; docs/running.md), then run ' +
         'pnpm drill red again.',
     };
   }

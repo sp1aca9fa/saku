@@ -1,0 +1,13 @@
+# SPY buy and hold: the benchmark other strategies are compared with. Always 100% SPY; no
+# signals. Research basis: none needed (a benchmark, not a timing strategy).
+name: SPY buy and hold (benchmark)
+account: taxable
+execution: next_open
+safeState:
+  holdings:
+    - { ticker: SPY, weight: 100 }
+evaluation: { frequency: daily }
+allocations:
+  - name: SPY
+    holdings:
+      - { ticker: SPY, weight: 100 }

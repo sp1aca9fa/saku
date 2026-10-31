@@ -1,8 +1,0 @@
-{
-  "name": "SPY buy and hold (benchmark)",
-  "account": "taxable",
-  "execution": "next_open",
-  "safeState": { "holdings": [{ "ticker": "SPY", "weight": 100 }] },
-  "evaluation": { "frequency": "daily" },
-  "allocations": [{ "name": "SPY", "holdings": [{ "ticker": "SPY", "weight": 100 }] }]
-}

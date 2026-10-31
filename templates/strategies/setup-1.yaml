@@ -1,0 +1,58 @@
+# Setup 1: 3x S&P 500 (UPRO) while SPY's trend is up and its volatility is calm, 1x SPY while the
+# trend is up only, else cash. Signals read SPY's total return at the close; trades the next day.
+#
+# Research basis: the candidate references requirements 09 lists for these parts (not yet
+# verified; the verified basis goes in docs/strategy-library.md, to be added at stage B):
+#   - trend filter (price above its moving average): Faber (2007) tactical asset allocation;
+#     Gayed and Bilello (2016) leverage with moving-average rules;
+#   - volatility filter: Moreira and Muir (2017) volatility-managed portfolios;
+#   - leverage: Cheng and Madhavan (2009) leveraged ETF dynamics;
+#   - ensemble over 150/200/250 days instead of one length: requirements 09 (parameter ensembles
+#     preferred over single parameters).
+# A backtest of the single 200-day version: docs/evidence/backtests.md.
+name: 'Setup 1: 3x on trend and calm, 1x on trend, else cash'
+account: taxable
+execution: next_open
+safeState:
+  holdings:
+    - { ticker: SPY, weight: 100 }
+evaluation: { frequency: daily }
+costs: { slippageBps: 5 }
+signals:
+  # Trend: true when at least two of the three comparisons hold (share >= 0.5). A price within 3%
+  # of its average keeps that comparison's previous state.
+  - id: trend
+    type: ensemble
+    members:
+      - left: { indicator: price, ticker: SPY, totalReturn: true }
+        op: '>'
+        right: { indicator: sma, ticker: SPY, length: 150, totalReturn: true }
+        tolerancePct: 3
+      - left: { indicator: price, ticker: SPY, totalReturn: true }
+        op: '>'
+        right: { indicator: sma, ticker: SPY, length: 200, totalReturn: true }
+        tolerancePct: 3
+      - left: { indicator: price, ticker: SPY, totalReturn: true }
+        op: '>'
+        right: { indicator: sma, ticker: SPY, length: 250, totalReturn: true }
+        tolerancePct: 3
+    threshold: 0.5
+  # Calm: SPY's 20-day volatility (annualized, percent) below 25.
+  - id: calm
+    type: compare
+    left: { indicator: volatility, ticker: SPY, length: 20, totalReturn: true }
+    op: '<'
+    right: { threshold: 25 }
+allocations:
+  - name: Risk on
+    when: { all: [trend, calm] }
+    holdings:
+      - { ticker: UPRO, weight: 100 }
+  - name: Trend only
+    when: { all: [trend] }
+    holdings:
+      - { ticker: SPY, weight: 100 }
+  # The last allocation has no condition: it applies when none above does.
+  - name: Cash
+    holdings:
+      - { ticker: CASH_USD, weight: 100 }
