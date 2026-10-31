@@ -355,6 +355,9 @@ describe('healthReport', () => {
     const [day] = await healthReport(db, { dates: [D[3]], sessions });
     expect(day!.overall.status).toBe('red');
     expect(await latestRun(db)).toMatchObject({ jobType: 'weekly', status: 'running' });
+    // A later monthly run (the audit report) is not the header's run.
+    await run(db, 'monthly', '2026-01');
+    expect(await latestRun(db)).toMatchObject({ jobType: 'weekly', status: 'running' });
     expect(await latestGradedDate(db, sessions)).toBe(D[3]);
   });
 

@@ -20,7 +20,15 @@ export async function verifyChains(
   const versions = await allVersions(db);
   const out: ChainCheck = { versions: [], anchors: [] };
   for (const v of versions) {
-    out.versions.push({ id: v.id, name: v.name, problems: await verifyChain(db, v) });
+    let problems: string[];
+    try {
+      problems = await verifyChain(db, v);
+    } catch {
+      // A stored entry the check cannot read (e.g. a payload that does not parse) is a problem
+      // to report for this version, never a crash of the whole verification or a pass.
+      problems = ['entries not readable'];
+    }
+    out.versions.push({ id: v.id, name: v.name, problems });
   }
   for (const a of await db.select().from(schema.chainAnchors)) {
     const problems: string[] = [];
@@ -33,7 +41,12 @@ export async function verifyChains(
     }
     if (sha256(a.heads) !== a.chainHeadHash) problems.push('hash');
     const listed = heads?.heads;
-    if (heads && (typeof listed !== 'object' || listed === null)) problems.push('no heads');
+    // Parsed but no heads object (also text that parses to null or a non-object): "no heads".
+    // Text that did not parse at all is already "heads not readable".
+    const parsed = !problems.includes('heads not readable');
+    if (parsed && (!heads || typeof listed !== 'object' || listed === null)) {
+      problems.push('no heads');
+    }
     for (const [versionId, hash] of Object.entries((listed ?? {}) as Record<string, unknown>)) {
       const known =
         (await forwardRecord(db, versionId)).some((e) => e.hash === hash) ||

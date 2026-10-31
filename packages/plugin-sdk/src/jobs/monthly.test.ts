@@ -15,7 +15,7 @@ import {
 import { testDb } from '@saku/db/testing';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
-import { monthsDue, runMonthly, storedAudits } from './monthly';
+import { CATCH_UP, monthsDue, runMonthly, storedAudits } from './monthly';
 import { fakeNotifier, quiet } from './testkit';
 import type { ProviderLimits } from '../types';
 
@@ -56,6 +56,9 @@ async function setup() {
       .values({ runId: run, date, symbolId: null, status: 'green', reasons: [] });
   }
   await finishRun(db, run, { ok: true, datesProcessed: [march.at(-1)!] });
+  // A complete daily run has processed March 31 (started April 1 in Tokyo).
+  const daily = await startRun(db, 'daily', new Date('2026-04-01T00:30:00.000Z'), march.at(-1));
+  await finishRun(db, daily, { ok: true, datesProcessed: [march.at(-1)!] });
   return { db };
 }
 
@@ -187,6 +190,57 @@ describe('the monthly job', () => {
     const rerun = options();
     expect(await runMonthly(db, rerun.o)).toMatchObject({ ok: true, months: [] });
     expect(await storedAudits(db)).toHaveLength(3);
+  });
+
+  it('catches up at most CATCH_UP earlier months, plus the latest due', async () => {
+    const { db } = await setup();
+    // The first run 14 months before March 2026: January 2025.
+    await startRun(db, 'daily', new Date('2025-01-15T00:00:00.000Z'));
+    const o = { now: NOW, timeZone: TZ, sessions, finalAfter: '20:00' };
+    const due = await monthsDue(db, o);
+    expect(due.months).toHaveLength(CATCH_UP + 1);
+    expect(due.months[0]).toBe('2025-03');
+    expect(due.months.at(-1)).toBe('2026-03');
+  });
+
+  it('a month done before the gate is not sent once the gate is set', async () => {
+    const { db } = await setup();
+    const before = options();
+    expect(await runMonthly(db, before.o)).toMatchObject({ ok: true, months: ['2026-03'] });
+    expect(before.sent).toEqual([]);
+    await setSetting(db, 'forward_records_from', '2026-03-02');
+    const after = options();
+    expect(await runMonthly(db, after.o)).toMatchObject({ ok: true, months: [] });
+    expect(after.sent).toEqual([]);
+  });
+
+  it('a catch-up after the gate stores pre-gate months without sending them', async () => {
+    const { db } = await setup();
+    await startRun(db, 'daily', new Date('2026-01-15T00:00:00.000Z'));
+    // The gate on March 2: January and February ended before it; March did not.
+    await setSetting(db, 'forward_records_from', '2026-03-02');
+    const { o, sent } = options();
+    const r = await runMonthly(db, o);
+    expect(r).toMatchObject({ ok: true, months: ['2026-01', '2026-02', '2026-03'] });
+    expect((await storedAudits(db)).map((a) => a.month)).toEqual(['2026-01', '2026-02', '2026-03']);
+    expect(sent.map((m) => m.text.split('\n')[0])).toEqual(['Saku: audit report for 2026-03']);
+    expect(
+      (await db.select().from(schema.alertsSent))
+        .filter((a) => a.type === 'monthly_audit')
+        .map((a) => a.subject),
+    ).toEqual(['audit:2026-03']);
+  });
+
+  it('a month the latest daily run has not processed waits for the retry days', async () => {
+    const db = (await setup()).db;
+    // The latest complete daily run is for March 30 (the setup's March 31 run removed).
+    await db.delete(schema.jobRuns).where(eq(schema.jobRuns.jobType, 'daily'));
+    const d = await startRun(db, 'daily', new Date('2026-04-01T00:30:00.000Z'), '2026-03-30');
+    await finishRun(db, d, { ok: true, datesProcessed: ['2026-03-30'] });
+    const o = { now: NOW, timeZone: TZ, sessions, finalAfter: '20:00' };
+    const due = await monthsDue(db, o);
+    expect(due.months).toEqual(['2026-02']);
+    expect(due.why).toMatch(/No complete daily run has processed 2026-03-31/);
   });
 
   it('a month whose last trading day is not final yet waits; the one before is audited', async () => {

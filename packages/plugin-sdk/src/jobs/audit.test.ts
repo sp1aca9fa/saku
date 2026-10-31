@@ -10,8 +10,11 @@ import {
   appendForward,
   createUser,
   finishRun,
+  pruneProviderUsage,
   registerVersion,
   schema,
+  setSetting,
+  sha256,
   startRun,
   symbolId,
   upsertSymbols,
@@ -33,6 +36,7 @@ import {
   relativeChange,
 } from './audit';
 import { fitMessage } from './alerts';
+import { verifyChains } from './chain-verify';
 import type { ProviderLimits } from '../types';
 
 const sessions = new Sessions({
@@ -92,6 +96,12 @@ async function graded(
   return run;
 }
 
+/** A complete daily run for `target` (started after March in Tokyo, so not one of its runs). */
+async function dailyDone(db: Db, target: string) {
+  const id = await startRun(db, 'daily', new Date('2026-04-01T00:30:00.000Z'), target);
+  await finishRun(db, id, { ok: true, datesProcessed: [target] });
+}
+
 async function setup() {
   const db = await testDb();
   await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
@@ -121,19 +131,43 @@ describe('months', () => {
     expect(monthWindow('2028-02', 'UTC').lastDay).toBe('2028-02-29');
   });
 
-  it('a month is ready once over in the zone and its last trading day is final', () => {
+  it('a month is ready once over in the zone and its last trading day is final', async () => {
+    const { db } = await setup();
+    await dailyDone(db, '2026-03-31');
     const o = { timeZone: TZ, sessions, finalAfter: '20:00' };
-    expect(monthReady(MONTH, { ...o, now: NOW })).toEqual({ ok: true });
+    expect(await monthReady(db, MONTH, { ...o, now: NOW })).toEqual({ ok: true });
     // March 31, 23:00 UTC: April 1, 08:00 in Tokyo (March is over there), but 19:00 in New York,
     // so March 31's data is not final yet.
-    const early = monthReady(MONTH, { ...o, now: new Date('2026-03-31T23:00:00.000Z') });
+    const early = await monthReady(db, MONTH, { ...o, now: new Date('2026-03-31T23:00:00.000Z') });
     expect(early.ok).toBe(false);
     expect(!early.ok && early.why).toMatch(/2026-03-31.*not final until 20:00 New York/);
-    const notOver = monthReady(MONTH, { ...o, now: new Date('2026-03-31T14:59:00.000Z') });
+    const notOver = await monthReady(db, MONTH, {
+      ...o,
+      now: new Date('2026-03-31T14:59:00.000Z'),
+    });
     expect(!notOver.ok && notOver.why).toMatch(/not over yet in Asia\/Tokyo/);
     expect(isMonth('2026-13')).toBe(false);
     expect(isMonth('2026-3')).toBe(false);
     expect(isMonth('2026-03')).toBe(true);
+  });
+
+  it('a month is not ready until a complete daily run has processed its last trading day', async () => {
+    const { db } = await setup();
+    const o = { now: NOW, timeZone: TZ, sessions, finalAfter: '20:00' };
+    // No complete daily run ever: not ready (fails closed).
+    const none = await monthReady(db, MONTH, o);
+    expect(!none.ok && none.why).toMatch(/No complete daily run has processed 2026-03-31.*none/);
+    // The latest complete daily run is behind (March 30), and a failed one for March 31 does not
+    // count: the timer's retry days audit the month later.
+    await dailyDone(db, '2026-03-30');
+    const failed = await startRun(db, 'daily', new Date('2026-04-01T01:00:00.000Z'), '2026-03-31');
+    await finishRun(db, failed, { ok: false, datesProcessed: ['2026-03-31'], error: 'down' });
+    const behind = await monthReady(db, MONTH, o);
+    expect(!behind.ok && behind.why).toMatch(/2026-03-31.*latest: 2026-03-30/);
+    await dailyDone(db, '2026-03-31');
+    expect(await monthReady(db, MONTH, o)).toEqual({ ok: true });
+    // A month the calendar does not cover needs no daily run (its days read "not known").
+    expect(await monthReady(db, '2024-06', o)).toEqual({ ok: true });
   });
 });
 
@@ -372,8 +406,8 @@ describe('the audit report', () => {
 
     const verdict =
       'Verdict: needs attention (1 trading day red, 1 trading day yellow, 1 trading day not ' +
-      'graded, 1 forward record day missing, 2 runs failed or unfinished, 1 provider above 80% ' +
-      'of a limit, 2 stand-ins open).';
+      'graded, 1 forward record day missing, 2 runs failed or unfinished, quota limits not known ' +
+      'for 1 provider, 1 provider above 80% of a limit, 2 stand-ins open).';
     expect(auditVerdict(r)).toBe(verdict);
     const text = auditText(t, r).split('\n');
     expect(text.at(-1)).toBe(verdict);
@@ -540,6 +574,146 @@ describe('the audit report', () => {
       '  alpha: at least 3 requests on 1 day; peak 2026-03-20 with 3 (3.0% of 100 a day); at least 0 symbols.',
     );
     expect(fitMessage(auditParts(t, r), 2000).text).toContain('the counts are incomplete');
+  });
+
+  it('quota of a month whose last UTC day is still going is partial, never complete', async () => {
+    const { db } = await setup();
+    await db.insert(schema.providerUsage).values({
+      provider: 'alpha',
+      windowType: 'day',
+      windowStart: '2026-10-30',
+      requestCount: 7,
+      symbols: [],
+    });
+    const limits = declaredLimits([{ key: 'alpha', kind: 'bars', limits: { perDay: 100 } }]);
+    // November 1, 00:30 in Tokyo: October is over there, but October 31 runs in UTC until 09:00.
+    const r = await auditReport(db, {
+      ...options({ now: new Date('2026-10-31T15:30:00.000Z') }),
+      month: '2026-10',
+      limits,
+    });
+    expect(r.quota).toMatchObject({ complete: false, utcOver: false, keptFrom: '2026-09-30' });
+    expect(auditIssues(r)).toContain('quota use not fully known');
+    const text = auditText(t, r);
+    expect(text).toContain(
+      "The month's last UTC day is not over yet (until 2026-11-01 09:00 Asia/Tokyo), so the " +
+        'counts below are partial: at least these.',
+    );
+    expect(text).not.toContain('The ledger keeps days from');
+    expect(text).toContain('  alpha: at least 7 requests on 1 day;');
+    expect(fitMessage(auditParts(t, r), 2000).text).toContain('the counts are incomplete');
+  });
+
+  it('quota at the timer (Nov 1 11:47 Tokyo) after the real prune: October 1 still counted, complete', async () => {
+    const { db } = await setup();
+    const now = new Date('2026-11-01T02:47:00.000Z');
+    for (const [windowStart, requestCount] of [
+      ['2026-09-30', 50],
+      ['2026-10-01', 3],
+      ['2026-10-31', 4],
+    ] as const) {
+      await db
+        .insert(schema.providerUsage)
+        .values({ provider: 'alpha', windowType: 'day', windowStart, requestCount, symbols: [] });
+    }
+    // The ledger prune each run does: day rows before 31 days back (October 1) go.
+    await pruneProviderUsage(db, now.getTime());
+    const days = await db.select().from(schema.providerUsage);
+    expect(days.map((d) => d.windowStart).sort()).toEqual(['2026-10-01', '2026-10-31']);
+    const limits = declaredLimits([{ key: 'alpha', kind: 'bars', limits: { perDay: 100 } }]);
+    const r = await auditReport(db, { ...options({ now }), month: '2026-10', limits });
+    expect(r.quota).toMatchObject({ complete: true, utcOver: true, keptFrom: '2026-10-01' });
+    expect(r.quota.providers).toMatchObject([{ provider: 'alpha', requests: 7, days: 2 }]);
+    expect(auditIssues(r)).not.toContain('quota use not fully known');
+    expect(auditText(t, r)).toContain('  alpha: 7 requests on 2 days;');
+  });
+
+  it('after the gate, a version without any entry has every day it should record missing', async () => {
+    const { db, aaa } = await setup();
+    await graded(db, aaa);
+    await setSetting(db, 'forward_records_from', '2026-03-02');
+    // Registered March 9 before the close (16:00 New York, 20:00 UTC): records March 9 on.
+    const version = await registerVersion(db, {
+      ownerId: null,
+      name: 'Silent',
+      strategy,
+      at: new Date('2026-03-09T12:00:00.000Z'),
+    });
+    // Registered after March: not part of it.
+    await registerVersion(db, {
+      ownerId: null,
+      name: 'Later',
+      strategy,
+      at: new Date('2026-04-01T00:00:00.000Z'),
+    });
+    const r = await auditReport(db, options());
+    const expected = MARCH.filter((d) => d >= '2026-03-09');
+    expect(expected).toHaveLength(17);
+    expect(r.forward.versions).toEqual([
+      {
+        id: version.id,
+        name: 'Silent',
+        entries: 0,
+        safe: 0,
+        statuses: { green: 0, yellow: 0, red: 0 },
+        missing: expected,
+      },
+    ]);
+    expect(auditVerdict(r)).toBe('Verdict: needs attention (17 forward record days missing).');
+    expect(auditText(t, r)).toContain(
+      `  Silent (${version.id}): 0 entries (green 0, yellow 0, red 0), 0 safe-state days, MISSING 17 (2026-03-09, 2026-03-10,`,
+    );
+
+    // The month before the gate and registration has nothing due: the version is not listed.
+    const february = await auditReport(db, {
+      ...options(),
+      month: '2026-02',
+    });
+    expect(february.forward.versions).toEqual([]);
+  });
+
+  it('chain verification: an unreadable entry and anchor heads that are null are problems, never a crash', async () => {
+    const { db } = await setup();
+    const version = await registerVersion(db, {
+      ownerId: null,
+      name: 'Library',
+      strategy,
+      at: new Date('2026-02-01T00:00:00.000Z'),
+    });
+    await db.insert(schema.forwardEntries).values({
+      versionId: version.id,
+      date: '2026-03-02',
+      payload: 'not json',
+      allocation: 'Calm',
+      holdings: [],
+      safeStateApplied: false,
+      dataStatus: 'green',
+      equity: 1,
+      prevHash: version.hash,
+      hash: sha256('not json'),
+    });
+    const anchor = (heads: string, date: string) =>
+      db.insert(schema.chainAnchors).values({
+        chainHeadHash: sha256(heads),
+        heads,
+        anchoredAt: `${date}T00:00:00.000Z`,
+        method: 'rfc3161',
+        authority: 'tsa.example',
+        proof: new Uint8Array([1]),
+      });
+    await anchor('null', '2026-03-03');
+    await anchor('{"date":"2026-03-04","heads":null}', '2026-03-04');
+    await anchor('not json', '2026-03-05');
+    const c = await verifyChains(db, { caFile: '/none', token });
+    expect(c.versions).toEqual([
+      { id: version.id, name: 'Library', problems: ['entries not readable'] },
+    ]);
+    expect(c.anchors.map((a) => [a.date, a.problems])).toEqual([
+      ['unknown date', ['no heads']],
+      ['2026-03-04', ['no heads']],
+      // Text that does not parse is reported once, not also as "no heads".
+      ['unknown date', ['heads not readable']],
+    ]);
   });
 
   it('a month the calendar does not cover has days not known, never green', async () => {

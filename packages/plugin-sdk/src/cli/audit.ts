@@ -69,7 +69,7 @@ try {
 } catch (e) {
   fail(e instanceof Error ? e.message : String(e));
 }
-const ready = monthReady(month, { now, timeZone, sessions, finalAfter: finalAfter! });
+const ready = await monthReady(db, month, { now, timeZone, sessions, finalAfter: finalAfter! });
 if (!ready.ok) fail(`${ready.why} The report covers whole months.`);
 
 const report = await auditReport(db, {

@@ -20,9 +20,10 @@
 //    rows are kept for a day only, so per-minute and per-hour use is not audited (said so).
 // 4. Forward records: every chain and anchor verified now (`verifyChains`, as `pnpm strategy
 //    verify`); per version the entries dated in the month (trading dates), their data status and
-//    safe-state days, and the sessions of the month from its first entry on without an entry (the
-//    daily record has one per trading day since the last entry, jobs/forward.ts); annotations
-//    added in the month by kind.
+//    safe-state days, and the sessions of the month the forward step records for it (`recordsDay`,
+//    jobs/forward.ts: on or after `forward_records_from`, a close after registration) without an
+//    entry, so a version with no entry at all counts every such day (before the gate: the
+//    sessions from its first entry on); annotations added in the month by kind.
 // 5. Runs: job runs started in the month by type and status; each failed or unfinished one with
 //    the first line of its error.
 // 6. Stand-ins dated in the month: resolved (the primary arrived), closed (an admin's latest close
@@ -34,7 +35,9 @@
 // trading days and forward entries by their New York trading date in the month; quota by UTC day.
 // The report ends with a verdict in words: "Verdict: all clear." only when every trading day is
 // green, every chain and anchor verifies, no forward record day is missing, no run failed or is
-// unfinished, the quota use is fully known and no provider is above 80% of a declared limit, and
+// unfinished, the quota use is fully known (the UTC month over and every day of it still in the
+// ledger), every provider that sent requests has known limits, no provider is above 80% of a
+// declared limit, and
 // no stand-in of the month is open or reopened; otherwise "Verdict: needs attention (...)" with
 // each item. Revisions and re-adjustments are listed, not judged (a provider correcting its data
 // is expected; the checks grade what it changed).
@@ -56,6 +59,8 @@ import { type DayReport, healthReport } from './health';
 import { describeDay } from './health-lines';
 import { fmt } from './health-values';
 import type { verifyToken } from './anchor';
+import { recordsDay } from './forward';
+import { latestDailyTarget } from './stand-ins';
 import { dailyTarget } from './target';
 import type { ProviderLimits } from '../types';
 
@@ -128,15 +133,19 @@ export async function installTimeZone(db: Db): Promise<string> {
 }
 
 /**
- * Whether a month can be audited at `now`: it is over in the install's time zone, and the data
- * of its last trading day is final (the daily target, `finalAfter` New York, has reached it), so
- * no day of it is "not graded" only for being early. A month the calendar does not cover can be
- * audited once over (its days then read "not known").
+ * Whether a month can be audited at `now`: it is over in the install's time zone, the data of its
+ * last trading day is final (the daily target, `finalAfter` New York, has reached it), and a
+ * complete daily run has processed that day (`latestDailyTarget` on or after it), so no day of it
+ * is "not graded" or a forward record day "missing" only for being early; the timer's retry days
+ * then audit it. A month with trading days but no complete daily run ever is not ready either
+ * (fails closed). A month without sessions needs no daily run; a month the calendar does not
+ * cover can be audited once over (its days then read "not known").
  */
-export function monthReady(
+export async function monthReady(
+  db: Db,
   month: string,
   o: { now: Date; timeZone: string; sessions: Sessions; finalAfter: string },
-): { ok: true } | { ok: false; why: string } {
+): Promise<{ ok: true } | { ok: false; why: string }> {
   const w = monthWindow(month, o.timeZone);
   if (o.now.getTime() < Date.parse(w.to)) {
     return { ok: false, why: `${month} is not over yet in ${o.timeZone}.` };
@@ -149,10 +158,20 @@ export function monthReady(
   } catch {
     return { ok: true };
   }
-  if (last !== undefined && target < last) {
+  if (last === undefined) return { ok: true };
+  if (target < last) {
     return {
       ok: false,
       why: `The data of ${last}, the last trading day of ${month}, is not final until ${o.finalAfter} New York.`,
+    };
+  }
+  const daily = await latestDailyTarget(db);
+  if (daily === undefined || daily < last) {
+    return {
+      ok: false,
+      why:
+        `No complete daily run has processed ${last}, the last trading day of ${month}, yet ` +
+        `(latest: ${daily ?? 'none'}).`,
     };
   }
   return { ok: true };
@@ -212,8 +231,13 @@ export interface AuditReport {
     }[];
   };
   quota: {
-    /** Every day of the month is still in the ledger (counts complete). */
+    /**
+     * The counts are complete: the month's last UTC day is over (`utcOver`) and every day of the
+     * month is still in the ledger (from `keptFrom`).
+     */
     complete: boolean;
+    /** The UTC month is over (now at or after the next month's first UTC midnight). */
+    utcOver: boolean;
     /** The first UTC day surely still stored. */
     keptFrom: string;
     providers: ProviderQuota[];
@@ -226,7 +250,12 @@ export interface AuditReport {
       entries: number;
       safe: number;
       statuses: Record<HealthStatus, number>;
-      /** Sessions of the month from its first entry on without an entry; undefined: no entry yet. */
+      /**
+       * Sessions of the month the forward step records (`recordsDay`) without an entry; before
+       * the A1 gate (no `forward_records_from`) or without a known registration, the sessions
+       * from its first entry on without one. Undefined: not known (no entry yet before the gate,
+       * or the month's trading days not known).
+       */
       missing?: TradingDate[];
     }[];
     annotations: { kind: string; count: number }[];
@@ -364,7 +393,11 @@ export async function auditReport(db: Db, o: AuditOptions): Promise<AuditReport>
     }))
     .sort((a, b) => compareText(a.detectedAt, b.detectedAt) || compareText(a.ticker, b.ticker));
 
-  // 3. Quota use (UTC days of the same YYYY-MM, as the ledger stores them).
+  // 3. Quota use (UTC days of the same YYYY-MM, as the ledger stores them). Complete only once
+  // the UTC month is over (an install zone ahead of UTC ends its month first: the last UTC day
+  // may still be counting) and its first day is still kept.
+  const [qy, qm] = o.month.split('-').map(Number) as [number, number];
+  const utcOver = o.now.getTime() >= Date.UTC(qy, qm, 1);
   const keptFrom = new Date(o.now.getTime() - USAGE_SYMBOL_WINDOW_MS).toISOString().slice(0, 10);
   const usage = await db
     .select()
@@ -420,7 +453,10 @@ export async function auditReport(db: Db, o: AuditOptions): Promise<AuditReport>
     })
     .sort((a, b) => compareText(a.provider, b.provider));
 
-  // 4. Forward records.
+  // 4. Forward records. Missing days: the days the forward step itself records for the version
+  // (`recordsDay`: on or after `forward_records_from`, a close after registration; requirements
+  // 05) that have no entry, so a version with no entry at all still has its days counted.
+  const recordsFrom = await getSetting(db, 'forward_records_from');
   const chain = await verifyChains(db, { caFile: o.caFile, ...(o.token && { token: o.token }) });
   const versions: AuditReport['forward']['versions'] = [];
   const registered = new Map(
@@ -440,17 +476,25 @@ export async function auditReport(db: Db, o: AuditOptions): Promise<AuditReport>
       .from(schema.forwardEntries)
       .where(eq(schema.forwardEntries.versionId, v.id));
     const first = all.map((e) => e.date).sort()[0];
-    // A version registered or first recorded after the month has nothing to show for it.
-    if (first !== undefined && first > w.lastDay) continue;
-    const at = Date.parse(registered.get(v.id) ?? '');
-    if (first === undefined && Number.isFinite(at) && at >= Date.parse(w.to)) continue;
+    const registeredAt = registered.get(v.id);
+    const at = Date.parse(registeredAt ?? '');
+    // A version registered after the month has nothing to show for it.
+    if (Number.isFinite(at) && at >= Date.parse(w.to)) continue;
     const inMonth = all.filter((e) => e.date >= w.firstDay && e.date <= w.lastDay);
+    const dated = new Set(inMonth.map((e) => e.date));
     const statuses: Record<HealthStatus, number> = { green: 0, yellow: 0, red: 0 };
     for (const e of inMonth) statuses[e.status]++;
     let missing: TradingDate[] | undefined;
-    if (first !== undefined && sessions) {
-      const dated = new Set(inMonth.map((e) => e.date));
-      missing = sessions.filter((d) => d >= first && !dated.has(d));
+    if (recordsFrom !== undefined && registeredAt !== undefined && sessions) {
+      const expected = sessions.filter((d) => recordsDay(d, recordsFrom, registeredAt, o.sessions));
+      // Nothing due in the month and nothing recorded in it (e.g. the month before the gate).
+      if (expected.length === 0 && inMonth.length === 0) continue;
+      missing = expected.filter((d) => !dated.has(d));
+    } else {
+      // Before the gate: counted from the first entry; first recorded after the month: nothing.
+      if (first !== undefined && first > w.lastDay) continue;
+      if (first !== undefined && sessions)
+        missing = sessions.filter((d) => d >= first && !dated.has(d));
     }
     versions.push({
       id: v.id,
@@ -532,7 +576,7 @@ export async function auditReport(db: Db, o: AuditOptions): Promise<AuditReport>
       largest: lines.slice(0, REVISIONS_LISTED),
       readjustments,
     },
-    quota: { complete: w.firstDay >= keptFrom, keptFrom, providers: quota },
+    quota: { complete: utcOver && w.firstDay >= keptFrom, utcOver, keptFrom, providers: quota },
     forward: { chain, versions, annotations },
     runs: {
       groups: [...runGroups.values()].sort(
@@ -584,6 +628,10 @@ export function auditIssues(r: AuditReport): string[] {
     issues.push(`${n(r.runs.problems.length, 'run', 'runs')} failed or unfinished`);
   }
   if (!r.quota.complete) issues.push('quota use not fully known');
+  const unknownLimits = r.quota.providers.filter((p) => !p.known && p.requests > 0).length;
+  if (unknownLimits) {
+    issues.push(`quota limits not known for ${n(unknownLimits, 'provider', 'providers')}`);
+  }
   const over = r.quota.providers.filter((p) => p.over.length > 0).length;
   if (over) issues.push(`${n(over, 'provider', 'providers')} above 80% of a limit`);
   const unsettled = r.standIns.open + r.standIns.reopened;
@@ -683,7 +731,13 @@ export function auditText(t: Translate, r: AuditReport): string {
   );
 
   out.push('', '3. Quota use per provider (UTC days, from the provider ledger)');
-  if (!r.quota.complete) {
+  if (!r.quota.utcOver) {
+    out.push(
+      `The month's last UTC day is not over yet (until ${localTime(`${addMonths(w.month, 1)}-01T00:00:00.000Z`, tz)} ` +
+        `${tz}), so the counts below are partial: at least these.`,
+    );
+  }
+  if (w.firstDay < r.quota.keptFrom) {
     out.push(
       `The ledger keeps days from ${r.quota.keptFrom} for sure; earlier days of the month may be ` +
         'gone, so the counts below are at least these.',
@@ -737,7 +791,9 @@ export function auditText(t: Translate, r: AuditReport): string {
     const s = v.statuses;
     const missing =
       v.missing === undefined
-        ? 'no entry yet'
+        ? r.days.known
+          ? 'no entry yet'
+          : 'missing days not known'
         : v.missing.length === 0
           ? 'no day missing'
           : `MISSING ${v.missing.length} (${v.missing.slice(0, 10).join(', ')}${v.missing.length > 10 ? ', ...' : ''})`;

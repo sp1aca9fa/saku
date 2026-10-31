@@ -38,7 +38,7 @@
 import type { HealthStatus, JobType, TradingDate } from '@saku/core';
 import { type Sessions, worst } from '@saku/data';
 import { type Db, schema } from '@saku/db';
-import { and, desc, eq, inArray, isNotNull, isNull, min } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, min, ne } from 'drizzle-orm';
 import { reasonsAsRead } from './health-reasons';
 import { DAILY_OVERLAP } from './ingest';
 import { carriedReasonStatus } from './verify';
@@ -142,11 +142,15 @@ export async function latestGradedDate(
   }
 }
 
-/** The latest run of any kind (also one still going), for the report's header. */
+/**
+ * The latest run (also one still going), for the report's header. A monthly run is left out: it
+ * only reports (the audit), so the header keeps naming the latest run that fetched or checked data.
+ */
 export async function latestRun(db: Db) {
   const [row] = await db
     .select()
     .from(schema.jobRuns)
+    .where(ne(schema.jobRuns.jobType, 'monthly'))
     .orderBy(desc(schema.jobRuns.startedAt))
     .limit(1);
   return row;

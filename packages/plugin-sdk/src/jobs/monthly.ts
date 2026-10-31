@@ -1,7 +1,8 @@
 // The monthly job (`pnpm monthly`; stage-a A3, system design `saku-monthly`, the 1st at 11:47):
 // the audit report (jobs/audit.ts) of the latest month that can be audited (`monthReady`: over in
-// the install's time zone, its last trading day final), stored and sent in short form to the
-// admin channels. The CLI adds the jobs lock and the heartbeat (`onComplete`).
+// the install's time zone, its last trading day final and processed by a complete daily run),
+// stored and sent in short form to the admin channels. The CLI adds the jobs lock and the
+// heartbeat (`onComplete`).
 //
 // - A month is done once a monthly run stored its report and delivered its alert to every admin
 //   channel (or the alert waits for the A1 gate): the run lists it in `dates_processed`. A done
@@ -15,7 +16,10 @@
 //   table is added. A month produced again (its alert was not delivered) is stored again only
 //   when its text differs from the latest stored one: kept beside the earlier, never over it.
 // - Sent through `sendMonthlyAudit`: once per month and admin channel (`alerts_sent`), after the
-//   A1 gate only, like every alert about data. A month done before the gate is not sent later.
+//   A1 gate only, like every alert about data. A month done before the gate is not sent later,
+//   and a month that ended before the gate (its last day before `forward_records_from`, or any
+//   month while that is unset) is stored and done without an alert, so a catch-up after the gate
+//   never sends pre-gate months.
 // - Complete when every due month is done; then the heartbeat. Otherwise the run failed, and the
 //   admins are told (a failed run, allowed before the gate).
 import type { Sessions } from '@saku/data';
@@ -115,12 +119,12 @@ export async function monthsDue(
   o: { now: Date; timeZone: string; sessions: Sessions; finalAfter: string },
 ): Promise<{ months: string[]; why?: string }> {
   let latest = previousMonth(o.now, o.timeZone);
-  const ready = monthReady(latest, o);
+  const ready = await monthReady(db, latest, o);
   let why: string | undefined;
   if (!ready.ok) {
     why = ready.why;
     latest = addMonths(latest, -1);
-    if (!monthReady(latest, o).ok) return { months: [], why };
+    if (!(await monthReady(db, latest, o)).ok) return { months: [], why };
   }
   const firstRun = (await db.select().from(schema.jobRuns))
     .filter((r) => r.jobType !== 'monthly' && Number.isFinite(Date.parse(r.startedAt)))
@@ -150,6 +154,7 @@ export async function runMonthly(db: Db, o: MonthlyOptions): Promise<MonthlyResu
     const primary = (await getSetting(db, 'primary_language')) ?? 'en';
     const t = translator(languages().includes(primary) ? primary : 'en');
     const stored = await storedAudits(db);
+    const gate = await getSetting(db, 'forward_records_from');
     for (const month of due.months) {
       try {
         const report = await auditReport(db, { ...o, month });
@@ -165,9 +170,15 @@ export async function runMonthly(db: Db, o: MonthlyOptions): Promise<MonthlyResu
           });
         }
         log.info(`Audit ${month}: ${verdict}`);
+        const lastDay = monthWindow(month, o.timeZone).lastDay;
+        if (gate === undefined || lastDay < gate) {
+          // Before the A1 gate: stored and done, never sent (not now, not after the gate).
+          done.push(month);
+          continue;
+        }
         const sent = await sendMonthlyAudit(db, {
           ...o.alerting,
-          date: monthWindow(month, o.timeZone).lastDay,
+          date: lastDay,
           month,
           lines: (tr) => auditParts(tr, report),
         });
