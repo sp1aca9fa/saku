@@ -288,6 +288,24 @@ describe('the monthly job', () => {
     expect(warns).toEqual([]);
   });
 
+  it('the latest month waits on the clock and the one before on a daily run: waiting daily, both reasons, no heartbeat', async () => {
+    const { db } = await setup();
+    await db.delete(schema.jobRuns).where(eq(schema.jobRuns.jobType, 'daily'));
+    const d = await startRun(db, 'daily', new Date('2026-10-01T00:30:00.000Z'), '2026-09-29');
+    await finishRun(db, d, { ok: true, datesProcessed: ['2026-09-29'] });
+    // Nov 1, 11:47 in Auckland: October is over there, but October 30 is 18:47 in New York.
+    const now = new Date('2026-10-31T22:47:00.000Z');
+    const tz = 'Pacific/Auckland';
+    const due = await monthsDue(db, { now, timeZone: tz, sessions, finalAfter: '20:00' });
+    expect(due).toMatchObject({ months: [], waiting: 'daily' });
+    expect(due.why).toMatch(/2026-10 is not over yet in UTC/);
+    expect(due.why).toMatch(/No complete daily run has processed 2026-09-30/);
+    const run = options([], now);
+    const r = await runMonthly(db, { ...run.o, timeZone: tz });
+    expect(r).toMatchObject({ ok: true, months: [] });
+    expect(run.beats()).toBe(0);
+  });
+
   it('a month whose last trading day is not final yet waits; the one before is audited', async () => {
     const { db } = await setup();
     // April 1, 01:00 in Tokyo: March is over there, but March 31 is 12:00 in New York.

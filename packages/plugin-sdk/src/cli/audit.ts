@@ -70,7 +70,10 @@ try {
   fail(e instanceof Error ? e.message : String(e));
 }
 const ready = await monthReady(db, month, { now, timeZone, sessions, finalAfter: finalAfter! });
-if (!ready.ok) fail(`${ready.why} The report covers whole months.`);
+if (!ready.ok) {
+  // The whole-months note only fits a month that is not over (or not final) yet.
+  fail(ready.kind === 'clock' ? `${ready.why} The report covers whole months.` : ready.why);
+}
 
 const report = await auditReport(db, {
   month,
