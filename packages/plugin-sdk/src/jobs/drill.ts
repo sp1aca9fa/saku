@@ -336,7 +336,7 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
       strategy,
       o.target,
       barsOf(rows),
-      await healthOf(db, symbolIds, rows, o.target),
+      await healthOf(db, symbolIds, rows, o.target, o.sessions),
     );
     const day: DayEntry = {
       date: o.target,

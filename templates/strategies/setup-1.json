@@ -34,7 +34,7 @@
     {
       "id": "calm",
       "type": "compare",
-      "left": { "indicator": "volatility", "ticker": "SPY", "length": 20 },
+      "left": { "indicator": "volatility", "ticker": "SPY", "length": 20, "totalReturn": true },
       "op": "<",
       "right": { "threshold": 25 }
     }

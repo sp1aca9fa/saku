@@ -17,7 +17,7 @@ import {
   verifyChain,
 } from '@saku/db';
 import { testDb } from '@saku/db/testing';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import type { Notifier } from '../types';
 import { sendRecomputeDiffers, sendStrategyAlerts } from './alerts';
@@ -660,5 +660,229 @@ describe('forward', () => {
     expect(texts[0]).toContain('Target: AAA 100%.');
     expect(texts[0]).toContain('Trade at the US open on 2026-01-12.');
     expect(texts[0]).toContain('Data health: red');
+  });
+});
+
+// Requirements 04 "Red in the lookback" and stand-in rule 6: what the signals read before the
+// day counts too. 25 sessions; the record has one day, T (the 21st), unless a test adds more.
+describe('forward: red and stand-ins in the lookback', () => {
+  const S = sessions.between('2026-01-05', '2026-02-06');
+  const T = S[20]!;
+  const series = (closes: number[]): RawBar[] =>
+    closes.map((close, i) => ({
+      date: S[i]!,
+      open: close,
+      high: close,
+      low: close,
+      close,
+      closeIsSplitAdjusted: false,
+      volume: 1000,
+      divCash: 0,
+      splitFactor: 1,
+    }));
+  // Signals read AAA only; BBB is only held. AAA rises 1 a day: above its 2-day SMA, Risk on.
+  const lookback = {
+    ...strategy,
+    allocations: [
+      { name: 'Risk on', when: { all: ['A'] }, holdings: [{ ticker: 'BBB', weight: 100 }] },
+      { name: 'Calm', holdings: [{ ticker: 'AAA', weight: 100 }] },
+    ],
+  };
+
+  async function graded() {
+    const db = await testDb();
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
+      { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' },
+    ]);
+    await seedSourceRoles(db, [
+      { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },
+      { key: 's', dataKind: 'bars', suggestedRole: 'secondary' },
+    ]);
+    for (const [ticker, base] of [
+      ['AAA', 100],
+      ['BBB', 50],
+    ] as const) {
+      const list = series(S.map((_, i) => base + i));
+      for (const source of ['p', 's']) {
+        await storeRawBars(db, {
+          symbolId: (await symbolId(db, ticker))!,
+          source,
+          bars: list,
+          runId: null,
+          fetchedAt: 't',
+        });
+      }
+    }
+    const owner = await createUser(db, {
+      username: 'alex',
+      passwordHash: 'scrypt:x',
+      totpSecretEnc: 'v1.x',
+      totpLastStep: 1,
+      backupCodeHashes: ['a'],
+      isAdmin: true,
+    });
+    const version = await registerVersion(db, {
+      ownerId: owner,
+      name: 'Trend',
+      strategy: lookback,
+      at: new Date('2026-01-02T00:00:00Z'),
+    });
+    const runId = await startRun(db, 'daily');
+    await verify(db, { runId, sessions, mode: 'full', to: S.at(-1)! });
+    await setSetting(db, 'forward_records_from', T);
+    const ids = { AAA: (await symbolId(db, 'AAA'))!, BBB: (await symbolId(db, 'BBB'))! };
+    const bar = (ticker: 'AAA' | 'BBB', date: string) =>
+      and(eq(schema.bars.symbolId, ids[ticker]), eq(schema.bars.date, date));
+    const record = async (to = T) => {
+      await forward(db, { runId, sessions, to });
+      return (await forwardRecord(db, version.id)).map((e) => ({
+        date: e.date,
+        allocation: e.allocation,
+        dataStatus: e.dataStatus,
+        safeStateApplied: e.safeStateApplied,
+        reasons: (JSON.parse(e.payload) as { reasons: string[] }).reasons,
+      }));
+    };
+    return { db, version, runId, ids, bar, record };
+  }
+
+  it('clean: the normal decision (the control)', async () => {
+    const { record } = await graded();
+    expect(await record()).toEqual([
+      { date: T, allocation: 'Risk on', dataStatus: 'green', safeStateApplied: false, reasons: [] },
+    ]);
+  });
+
+  it('a red day 3 sessions back on a signal ticker: the safe state, naming it; recompute agrees', async () => {
+    const { db, runId, bar, record } = await graded();
+    await db.update(schema.bars).set({ status: 'red' }).where(bar('AAA', S[17]!));
+    expect(await record()).toEqual([
+      {
+        date: T,
+        allocation: 'Safe state',
+        dataStatus: 'red',
+        safeStateApplied: true,
+        reasons: [`AAA:lookback_red@${S[17]}`],
+      },
+    ]);
+    // Recompute reads the same signals: no difference to annotate.
+    expect(await recompute(db, { runId, code: 'c1' })).toMatchObject({
+      checked: 1,
+      differences: [],
+    });
+  });
+
+  it('a red day of a ticker only held: the normal decision', async () => {
+    const { db, bar, record } = await graded();
+    await db.update(schema.bars).set({ status: 'red' }).where(bar('BBB', S[17]!));
+    expect((await record())[0]).toMatchObject({ allocation: 'Risk on', dataStatus: 'green' });
+  });
+
+  it('the window is the 10 sessions before the day: 10 back is red, 11 back is not', async () => {
+    const far = await graded();
+    await far.db.update(schema.bars).set({ status: 'red' }).where(far.bar('AAA', S[9]!));
+    expect((await far.record())[0]).toMatchObject({ allocation: 'Risk on', dataStatus: 'green' });
+    const edge = await graded();
+    await edge.db.update(schema.bars).set({ status: 'red' }).where(edge.bar('AAA', S[10]!));
+    expect((await edge.record())[0]).toMatchObject({
+      allocation: 'Safe state',
+      reasons: [`AAA:lookback_red@${S[10]}`],
+    });
+  });
+
+  it('clears by itself once a later run grades the day again as not red', async () => {
+    const { db, bar, record } = await graded();
+    await db.update(schema.bars).set({ status: 'red' }).where(bar('AAA', S[17]!));
+    await record();
+    // The next run's checks grade every canonical bar again (here: green).
+    await verify(db, {
+      runId: await startRun(db, 'daily'),
+      sessions,
+      mode: 'daily',
+      from: sessions.before(S[21]!, 10),
+      to: S[21]!,
+    });
+    const after = await record(S[21]!);
+    // T's entry stays as recorded (append-only); the next day decides normally.
+    expect(after.map((e) => [e.date, e.allocation, e.dataStatus])).toEqual([
+      [T, 'Safe state', 'red'],
+      [S[21], 'Risk on', 'green'],
+    ]);
+  });
+
+  it('a session in the window with no grade at all is red (not graded is never clean)', async () => {
+    const ungradedBar = await graded();
+    await ungradedBar.db
+      .update(schema.bars)
+      .set({ status: null })
+      .where(ungradedBar.bar('AAA', S[18]!));
+    expect((await ungradedBar.record())[0]).toMatchObject({
+      allocation: 'Safe state',
+      reasons: [`AAA:lookback_ungraded@${S[18]}`],
+    });
+    // No canonical bar and no grade for the session (a full pass stores no green row).
+    const noBar = await graded();
+    await noBar.db.delete(schema.bars).where(noBar.bar('AAA', S[18]!));
+    expect((await noBar.record())[0]).toMatchObject({
+      allocation: 'Safe state',
+      reasons: [`AAA:lookback_ungraded@${S[18]}`],
+    });
+    // No canonical bar, graded red (the primary missing, no stand-in).
+    const missing = await graded();
+    await missing.db.delete(schema.bars).where(missing.bar('AAA', S[18]!));
+    await missing.db.insert(schema.dataHealth).values({
+      runId: missing.runId,
+      date: S[18]!,
+      symbolId: missing.ids.AAA,
+      status: 'red',
+      reasons: ['primary_missing'],
+    });
+    expect((await missing.record())[0]).toMatchObject({
+      allocation: 'Safe state',
+      reasons: [`AAA:lookback_red@${S[18]}`],
+    });
+  });
+
+  it('an older unresolved stand-in: yellow when no signal can flip, red when one could; resolved: green', async () => {
+    // T reads AAA's S[19] close (119) in its 2-day SMA against T's 120: a band of 0.84% or
+    // more could flip it.
+    const standIn = async (band: number, resolved = false) => {
+      const g = await graded();
+      await g.db
+        .update(schema.bars)
+        .set({ standIn: true, source: 's' })
+        .where(g.bar('AAA', S[19]!));
+      await g.db.insert(schema.standIns).values({
+        symbolId: g.ids.AAA,
+        date: S[19]!,
+        source: 's',
+        close: 119,
+        band,
+        basis: 'index',
+        ...(resolved && {
+          primaryClose: 119,
+          deviation: 0,
+          resolvedAt: '2026-02-03T21:30:00.000Z',
+        }),
+      });
+      return (await g.record())[0]!;
+    };
+    expect(await standIn(0.001)).toMatchObject({
+      allocation: 'Risk on',
+      dataStatus: 'yellow',
+      reasons: [`AAA:stand_in_lookback@${S[19]}`],
+    });
+    expect(await standIn(0.05)).toMatchObject({
+      allocation: 'Safe state',
+      dataStatus: 'red',
+      reasons: [`AAA:stand_in_lookback@${S[19]}`, 'AAA:decision_margin'],
+    });
+    // Resolved (the primary arrived): no longer moved, nothing to say.
+    expect(await standIn(0.05, true)).toMatchObject({
+      allocation: 'Risk on',
+      dataStatus: 'green',
+      reasons: [],
+    });
   });
 });

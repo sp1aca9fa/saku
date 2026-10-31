@@ -557,6 +557,22 @@ describe('reason codes in words', () => {
       'UPRO: the main source was missing and no stand-in passed the checks',
     );
     expect(describeReason(t, 'DTB3:missing@none')).toBe('DTB3: no value yet (none)');
+    // What the signals read before the day (requirements 04 "Red in the lookback", stand-in 6).
+    expect(describeReason(t, 'SPY:lookback_red@2026-11-03')).toBe(
+      'SPY: the data of 2026-11-03, which the signals still read, is red (unreliable)',
+    );
+    expect(describeReason(t, 'SPY:lookback_ungraded@2026-11-03')).toBe(
+      'SPY: the data of 2026-11-03, which the signals still read, has not been checked',
+    );
+    expect(describeReason(t, 'SPY:stand_in_lookback@2026-11-03')).toBe(
+      "SPY: the signals read a secondary source's price for 2026-11-03, not yet confirmed by the main source",
+    );
+    expect(describeReason(translator('ja'), 'SPY:lookback_red@2026-11-03')).toBe(
+      'SPY: シグナルがまだ参照している 2026-11-03 のデータが赤(信頼できない)です',
+    );
+    expect(describeReason(translator('ja'), 'SPY:stand_in_lookback@2026-11-03')).toBe(
+      'SPY: シグナルが参照する 2026-11-03 の価格は副ソースの値で、主ソースでまだ確認されていません',
+    );
     expect(describeReason(t, 'SSO:decision_margin')).toBe(
       'SSO: a stand-in price is too close to a signal threshold',
     );

@@ -4,7 +4,9 @@
 // (the A1 gate). Stand-ins the primary later corrected are annotated, never edited, by their own
 // step (`annotateStandInCorrections`), caught up from the database before every recompute.
 import {
+  type LookbackFlag,
   type RawBar,
+  type StandInPrice,
   type StrategyDay,
   Strategy,
   type TickerHealth,
@@ -37,6 +39,7 @@ import {
   unresolvedStandIns,
 } from '@saku/db';
 import { cashRateReader } from './cash';
+import { DAILY_OVERLAP } from './ingest';
 
 export interface ForwardOptions {
   runId: string;
@@ -108,7 +111,8 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   const { symbolIds, loadRows, barsOf } = await reader(db);
   const cashRate = await cashRateReader(db);
 
-  const healthOn = (rows: Rows, date: TradingDate) => healthOf(db, symbolIds, rows, date);
+  const healthOn = (rows: Rows, date: TradingDate) =>
+    healthOf(db, symbolIds, rows, date, o.sessions);
 
   for (const version of await allVersions(db)) {
     const parsed = parseVersion(version);
@@ -411,33 +415,124 @@ export function standInCorrections(o: {
 /**
  * Each ticker's grade on the date: the canonical bar's status (set by every verify run). `rows`:
  * each ticker's canonical rows up to `date` (the last one is the day's bar when there is one).
+ * With it, what the decision needs about the days before (`forwardDecision` applies it to the
+ * tickers the signals read): the unresolved stand-ins up to the date (`openStandIns`) and the
+ * re-check window's red or ungraded days (`lookbackFlags`).
  */
 export async function healthOf(
   db: Db,
   symbolIds: Map<string, number>,
   rows: Rows,
   date: TradingDate,
+  sessions: Sessions,
 ): Promise<Record<string, TickerHealth>> {
   const out: Record<string, TickerHealth> = {};
+  const window = recheckWindow(sessions, date);
   for (const [t, list] of Object.entries(rows)) {
     const bar = list.at(-1);
     const id = symbolIds.get(t)!;
+    let day: TickerHealth;
     if (!bar || bar.date !== date || !bar.status) {
       // No bar that day: the grade says why (a refused stand-in), else it stays `no_data`.
       const graded = await latestHealth(db, id, date);
-      if (graded && graded.status !== 'green') {
-        out[t] = { status: graded.status, reasons: graded.reasons };
-      }
+      if (!graded || graded.status === 'green') continue;
+      day = { status: graded.status, reasons: graded.reasons };
+    } else {
+      const reasons =
+        bar.status === 'green' ? [] : ((await latestHealth(db, id, date))?.reasons ?? []);
+      day = { status: bar.status, reasons };
+    }
+    const standIns = await openStandIns(db, id, list);
+    const lookback = await lookbackFlags(db, id, list, window, date);
+    out[t] = {
+      ...day,
+      ...(standIns.length > 0 && { standIns }),
+      ...(lookback.length > 0 && { lookback }),
+    };
+  }
+  return out;
+}
+
+/**
+ * The re-check window before `date` (requirements 04 "Red in the lookback": the last 10 trading
+ * days before it, the sessions every daily run grades again, `DAILY_OVERLAP`), oldest first,
+ * `date` excluded. A calendar that starts inside the window gives the sessions from its start.
+ */
+export function recheckWindow(sessions: Sessions, date: TradingDate): TradingDate[] {
+  let start: TradingDate;
+  try {
+    start = sessions.before(date, DAILY_OVERLAP);
+  } catch {
+    start = sessions.calendar.validFrom;
+  }
+  return sessions.between(start, date).filter((d) => d < date);
+}
+
+/**
+ * The days in the re-check window that keep the ticker red (requirements 04 "Red in the
+ * lookback"), as graded now (each run rewrites the grades it checks, so a day graded again as not
+ * red clears by itself). The rule, per date:
+ * - a canonical bar: its `bars.status` (rewritten for every canonical bar by every verify run,
+ *   daily and full alike: the checks grade every session from the primary's first bar, only the
+ *   stored `data_health` rows are limited to the run's window). `red` is red, NULL is ungraded,
+ *   so red too ("not graded" is never clean); green and yellow are not;
+ * - a session without a canonical bar: its latest symbol grade in `data_health`; red is red, none
+ *   at all is ungraded (red); another grade is not (verify grades such a day red,
+ *   `primary_missing` or a refused stand-in, so this is the day's own word on it);
+ * - a session before the ticker's first canonical bar was never a session for it: nothing.
+ * The window's canonical bars on days that are not sessions (graded red, `bar_valid`) are read
+ * too, since the signals read every canonical bar. Days before `forward_records_from` are
+ * nothing special. `rows`: the ticker's canonical rows up to `date`, oldest first.
+ */
+export async function lookbackFlags(
+  db: Db,
+  symbolId: number,
+  rows: Rows[string],
+  window: TradingDate[],
+  date: TradingDate,
+): Promise<LookbackFlag[]> {
+  const first = rows[0]?.date;
+  if (first === undefined || window.length === 0) return [];
+  const byDate = new Map(
+    rows.filter((r) => r.date >= window[0]! && r.date < date).map((r) => [r.date, r]),
+  );
+  const dates = [...new Set([...window.filter((d) => d >= first), ...byDate.keys()])].sort();
+  const out: LookbackFlag[] = [];
+  for (const d of dates) {
+    const bar = byDate.get(d);
+    if (bar) {
+      if (bar.status === null) out.push({ date: d, why: 'ungraded' });
+      else if (bar.status === 'red') out.push({ date: d, why: 'red' });
       continue;
     }
-    const reasons =
-      bar.status === 'green' ? [] : ((await latestHealth(db, id, date))?.reasons ?? []);
-    const stood = bar.standIn ? await standInOn(db, id, date) : undefined;
-    out[t] = {
-      status: bar.status,
-      reasons,
-      ...(stood && !stood.resolvedAt && { standInBand: stood.band }),
-    };
+    const graded = await latestHealth(db, symbolId, d);
+    if (!graded) out.push({ date: d, why: 'ungraded' });
+    else if (graded.status === 'red') out.push({ date: d, why: 'red' });
+  }
+  return out;
+}
+
+/**
+ * Whether a stored stand-in still waits for the primary (requirements 04 stand-in rule): only
+ * those are moved by the decision-margin test. A resolved one (the primary's bar replaced it) is
+ * not. Rule 5's closing by an admin command (not built yet) is to count as resolved here too.
+ */
+export const isOpenStandIn = (row: { resolvedAt: string | null }) => row.resolvedAt === null;
+
+/**
+ * The ticker's unresolved stand-in prices up to the last of `rows` (requirements 04 stand-in rule
+ * items 2 and 6): every canonical stand-in bar whose stored stand-in is still open, with its band.
+ */
+export async function openStandIns(
+  db: Db,
+  symbolId: number,
+  rows: Rows[string],
+): Promise<StandInPrice[]> {
+  const out: StandInPrice[] = [];
+  for (const r of rows) {
+    if (!r.standIn) continue;
+    const stood = await standInOn(db, symbolId, r.date);
+    if (stood && isOpenStandIn(stood)) out.push({ date: r.date, band: stood.band });
   }
   return out;
 }

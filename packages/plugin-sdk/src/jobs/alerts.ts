@@ -1211,7 +1211,12 @@ export function describeReason(t: Translate, code: string): string {
   } else if ((m = /^stand_in@(.+)$/.exec(rest))) {
     text = t('alerts.reason.standIn', { source: m[1]! });
   } else if (rest.startsWith('stand_in_refused:')) text = t('alerts.reason.standInRefused');
-  else if ((m = /^stale\((\d+)\)@(.+)$/.exec(rest))) {
+  else if ((m = /^stand_in_lookback@(\d{4}-\d{2}-\d{2})$/.exec(rest))) {
+    text = t('alerts.reason.standInLookback', { date: m[1]! });
+  } else if ((m = /^lookback_(red|ungraded)@(\d{4}-\d{2}-\d{2})$/.exec(rest))) {
+    const key = m[1] === 'red' ? 'lookbackRed' : 'lookbackUngraded';
+    text = t(`alerts.reason.${key}`, { date: m[2]! });
+  } else if ((m = /^stale\((\d+)\)@(.+)$/.exec(rest))) {
     text = t('alerts.reason.stale', { days: m[1]!, source: m[2]! });
   } else if ((m = /^issuer_unavailable@(.+)$/.exec(rest))) {
     text = t('alerts.reason.issuerUnavailable', { source: m[1]! });
