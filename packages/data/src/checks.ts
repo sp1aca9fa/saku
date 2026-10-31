@@ -290,6 +290,49 @@ export function adjReturnCheck(
   return out;
 }
 
+/** One day's layer C comparison: the values a check grades (`deviation` against `tolerance`). */
+export interface DayComparison {
+  observed: number;
+  expected: number;
+  tolerance: number;
+  deviation: number;
+}
+
+/**
+ * One day of `leverageCheck`, shared with the stand-in rule (`standIns`): the fund's total return
+ * from its bar before to its bar on the day, against `leverage` times the underlying's total
+ * return over the same two dates; tolerance the base plus a share of the expected move.
+ */
+export function leverageDay(
+  fund: [before: RawBar, day: RawBar],
+  underlying: [before: RawBar, day: RawBar],
+  leverage: number,
+): DayComparison {
+  const expected = leverage * totalReturn(underlying[0], underlying[1]);
+  const observed = totalReturn(fund[0], fund[1]);
+  const tolerance = TOLERANCE.leverageBase + TOLERANCE.leverageShare * Math.abs(expected);
+  return { observed, expected, tolerance, deviation: Math.abs(observed - expected) };
+}
+
+/**
+ * One day of `indexCheck`, shared with the stand-in rule (`standIns`): the fund's total return
+ * from its bar before to its bar on the day, against the index's return over the same two dates
+ * (`index`: its values on them).
+ */
+export function indexDay(
+  fund: [before: RawBar, day: RawBar],
+  index: [before: number, day: number],
+): DayComparison {
+  const expected = index[1] / index[0] - 1;
+  const observed = totalReturn(fund[0], fund[1]);
+  return {
+    observed,
+    expected,
+    tolerance: TOLERANCE.index,
+    deviation: Math.abs(observed - expected),
+  };
+}
+
 /**
  * Layer C: a leveraged fund's daily total return against `leverage` times its underlying's total
  * return (requirements 04, layer C: "ex-dividend days adjusted (leveraged ETFs track the index, not
@@ -309,10 +352,12 @@ export function leverageCheck(
     const date = fund[i]!.date;
     const j = u.get(date);
     if (j === undefined || j === 0 || underlying[j - 1]!.date !== fund[i - 1]!.date) continue;
-    const expected = leverage * totalReturn(underlying[j - 1]!, underlying[j]!);
-    const observed = totalReturn(fund[i - 1]!, fund[i]!);
-    const tol = TOLERANCE.leverageBase + TOLERANCE.leverageShare * Math.abs(expected);
-    const dev = Math.abs(observed - expected);
+    const {
+      observed,
+      expected,
+      tolerance: tol,
+      deviation: dev,
+    } = leverageDay([fund[i - 1]!, fund[i]!], [underlying[j - 1]!, underlying[j]!], leverage);
     streak = dev > tol ? streak + 1 : 0;
     out.push({
       layer: 'C',
@@ -366,19 +411,22 @@ export function indexCheck(
       out.push(indexUnavailable(date, o.source));
       continue;
     }
-    const expected = b / a - 1;
-    const observed = totalReturn(fund[i - 1]!, fund[i]!);
-    const dev = Math.abs(observed - expected);
+    const {
+      observed,
+      expected,
+      tolerance,
+      deviation: dev,
+    } = indexDay([fund[i - 1]!, fund[i]!], [a, b]);
     out.push({
       layer: 'C',
       check: 'index_match',
       ...(o.source !== undefined && { source: o.source }),
       date,
-      status: statusC(dev, TOLERANCE.index),
+      status: statusC(dev, tolerance),
       deviation: dev,
       observed,
       expected,
-      tolerance: TOLERANCE.index,
+      tolerance,
     });
   }
   return out;

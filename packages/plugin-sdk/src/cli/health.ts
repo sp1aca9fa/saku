@@ -287,7 +287,9 @@ async function summary(
   });
   const asStoredNow =
     'Values as stored now, not necessarily what the run saw (raw bars may be revised since: ' +
-    '"revised" rows; series and FX rates: the version that holds now and how many are stored).';
+    '"revised" rows; series and FX rates: the version that holds now and how many are stored). ' +
+    "Source roles, a fund's underlying and its index series are read as set now; the returns " +
+    'and statuses are the checks recomputed on these values.';
 
   if (a.check === undefined) {
     console.log('');

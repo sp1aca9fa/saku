@@ -1,9 +1,9 @@
 // Data health (requirements 04, severity rules): check results rolled up per symbol and date, and
 // the stand-in rule for a day the primary has no bar but a secondary does. Pure functions; the
 // verify job stores what they return.
-import { type HealthStatus, type RawBar, type TradingDate, totalReturn } from '@saku/core';
+import type { HealthStatus, RawBar, TradingDate } from '@saku/core';
 import type { Sessions } from './calendar';
-import { type CheckResult, TOLERANCE, layerA } from './checks';
+import { type CheckResult, TOLERANCE, indexDay, layerA, leverageDay } from './checks';
 
 export const RANK: Record<HealthStatus, number> = { green: 0, yellow: 1, red: 2 };
 export const worst = (a: HealthStatus, b: HealthStatus): HealthStatus =>
@@ -173,32 +173,33 @@ export function standIns(o: StandInInput): { standIns: StandIn[]; refused: Stand
     }
     const before = o.sessions.before(date);
     if (prev && prev.date === before) {
-      // The same comparisons as `leverageCheck` and `indexCheck` (total returns on both sides of
-      // the leverage check, the fund's total return against the index: ex-dividend days adjusted).
+      // The same comparisons as `leverageCheck` and `indexCheck`, through their shared one-day
+      // functions (total returns on both sides of the leverage check, the fund's total return
+      // against the index: ex-dividend days adjusted).
       const ub = u?.get(date);
       const ua = u?.get(before);
       if (ub && ua) {
-        const expected = o.leverage * totalReturn(ua, ub);
-        const tol = TOLERANCE.leverageBase + TOLERANCE.leverageShare * Math.abs(expected);
-        if (Math.abs(totalReturn(prev, bar) - expected) > tol) {
+        const c = leverageDay([prev, bar], [ua, ub], o.leverage);
+        if (c.deviation > c.tolerance) {
           refuse('layer_c');
           continue;
         }
         if (basis === 'unchecked') {
           basis = 'layer_c';
-          band = tol;
+          band = c.tolerance;
         }
       }
       const ia = level?.get(before);
       const ib = level?.get(date);
       if (ia !== undefined && ib !== undefined) {
-        if (Math.abs(totalReturn(prev, bar) - (ib / ia - 1)) > TOLERANCE.index) {
+        const c = indexDay([prev, bar], [ia, ib]);
+        if (c.deviation > c.tolerance) {
           refuse('index');
           continue;
         }
         if (basis !== 'secondaries_agree') {
           basis = 'index';
-          band = TOLERANCE.index;
+          band = c.tolerance;
         }
       }
     }

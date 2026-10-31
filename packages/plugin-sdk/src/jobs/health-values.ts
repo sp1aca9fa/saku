@@ -9,10 +9,12 @@
 //   what the run itself computed (observed, expected, tolerance).
 // - The inputs are read the way verify.ts feeds the checks: each source's stored raw bars up to the
 //   run's target (`rawBars`), un-split (`unsplit`) for the comparisons; the primary is the bars
-//   primary of `source_roles`; returns use the checks' own functions (`totalReturn`,
-//   `totalReturnIndex`) and tolerances (`TOLERANCE`). Series and FX values are read
-//   through `PointInTime` at `now` (withdrawals and restatements applied, as `asOf` does), on the
-//   exact date: a value the source no longer has reads `-`.
+//   primary of `source_roles`. The returns, differences, tolerances and statuses come from the
+//   checks themselves (`adjReturnCheck`, `leverageCheck`, `indexCheck` of checks.ts, run on the
+//   same arrays verify gives them), never from a copy of their math, so the view cannot drift from
+//   what the checks compare. Series and FX values are read through `PointInTime` at `now`
+//   (withdrawals and restatements applied, as `asOf` does), on the exact date: a value the source
+//   no longer has reads `-`. A result naming another source than the one read now says so.
 // - Unknown stays unknown: a missing value prints `-` (never 0); a comparison the stored data no
 //   longer allows says so instead of a number. A check this file does not know shows its result
 //   line only (no guessed inputs).
@@ -22,9 +24,8 @@ import {
   type RawBar,
   type TradingDate,
   totalReturn,
-  totalReturnIndex,
 } from '@saku/core';
-import { TOLERANCE, unsplit } from '@saku/data';
+import { type CheckResult, adjReturnCheck, indexCheck, leverageCheck, unsplit } from '@saku/data';
 import { type Db, fxPointInTime, schema, seriesPointInTime } from '@saku/db';
 import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import type { DateRow } from './health-summary';
@@ -143,6 +144,17 @@ const before = (list: RawBar[] | undefined, date: TradingDate) => {
   }
   return out;
 };
+
+/** A check's result for `date` recomputed now, with the results before it (in the check's order). */
+function onDate(results: CheckResult[], date: TradingDate) {
+  const k = results.findIndex((x) => x.date === date);
+  return k < 0 ? undefined : { result: results[k]!, earlier: results.slice(0, k) };
+}
+
+/** `difference D; tolerance T; status S (message)` of a result recomputed now. */
+const graded = (c: CheckResult) =>
+  `difference ${fmt(c.deviation)}; tolerance ${fmt(c.tolerance)}; status now ${c.status}` +
+  (c.message ? ` (${c.message})` : '');
 
 /**
  * Reads the values behind check results for one run. `to`: the run's target (bars after it are
@@ -362,9 +374,10 @@ export class ValuesReader {
   }
 
   /**
-   * adj_return_match (checks.ts `adjReturnCheck`): our total-return index over the un-split
-   * primary, its return from the primary's previous bar, against the provider's adjusted closes'
-   * return over the same two dates.
+   * adj_return_match: `adjReturnCheck` run now on what verify gives it (the un-split bars primary,
+   * the result's source un-split), its result for the date: our total-return index's return
+   * (the result's expected) against the provider's adjusted closes' return (its observed) over the
+   * primary's previous date and the date.
    */
   private async adjReturnLines(r: DateRow): Promise<string[]> {
     const id = r.symbolId!;
@@ -372,33 +385,38 @@ export class ValuesReader {
     const p = await this.primary();
     const { compared } = await this.barsOf(id);
     const primary = p ? (compared.get(p) ?? []) : [];
-    const i = primary.findIndex((b) => b.date === r.date);
-    if (!p || i < 1) {
-      out.push(`  returns: not comparable now (no primary bar on ${r.date} or before it)`);
+    const provider = r.source === null ? undefined : compared.get(r.source);
+    const now =
+      p && r.source !== null && provider
+        ? onDate(adjReturnCheck(primary, provider, r.source), r.date)?.result
+        : undefined;
+    if (!p) out.push('  no bars primary is set now');
+    if (!now) {
+      out.push(
+        `  returns: not comparable now (no result for ${r.date}: the primary lacks the date or ` +
+          'the bar before it, or the provider an adjusted close on either)',
+      );
       return out;
     }
-    const prev = primary[i - 1]!.date;
-    const ours = totalReturnIndex(primary);
-    const our = ours[i]! / ours[i - 1]! - 1;
-    const provider = r.source === null ? undefined : compared.get(r.source);
-    const t = byDate(provider, r.date)?.providerAdjClose;
-    const tp = byDate(provider, prev)?.providerAdjClose;
-    const their = t === undefined || tp === undefined ? undefined : t / tp - 1;
+    const prev = before(primary, r.date)!.date;
     out.push(
-      `  returns ${prev} to ${r.date}: ours ${fmt(our)}; ${r.source ?? '-'} adjusted ` +
-        `${fmt(tp)} to ${fmt(t)}, return ${fmt(their)}; difference ` +
-        `${fmt(their === undefined ? undefined : Math.abs(our - their))}; tolerance ` +
-        `${fmt(TOLERANCE.adjReturn)}`,
+      `  returns ${prev} to ${r.date}: ours ${fmt(now.expected)}; ${r.source} adjusted ` +
+        `${fmt(byDate(provider, prev)?.providerAdjClose)} to ` +
+        `${fmt(byDate(provider, r.date)?.providerAdjClose)}, return ${fmt(now.observed)}; ` +
+        graded(now),
     );
     return out;
   }
 
   /**
-   * leverage_track (checks.ts `leverageCheck`): the fund's total return against the leverage
-   * times its underlying's total return, both from the un-split primary bars on the fund's
-   * previous date and the date; tolerance base plus a share of the expected move. A result stored
-   * before the check compared total returns (spec 2026-11-01 layer-c-dividends) carries the
-   * underlying's price return in its expected value; the line below reads as the check does now.
+   * leverage_track: `leverageCheck` run now on what verify gives it (the fund's and its
+   * underlying's un-split bars primary, the leverage set now), its result for the date: the
+   * fund's total return against the leverage times the underlying's total return, the tolerance
+   * and the status, the three-days-in-a-row rule included (the whole history up to the run's
+   * target is passed, as verify passes it). For a streak, the earlier days of the streak too. A
+   * result stored before the check compared total returns (spec 2026-11-01 layer-c-dividends)
+   * carries the underlying's price return in its expected value; the line below reads as the
+   * check does now.
    */
   private async leverageLines(r: DateRow): Promise<string[]> {
     const id = r.symbolId!;
@@ -406,8 +424,7 @@ export class ValuesReader {
     const p = await this.primary();
     if (!p) return ['  no bars primary is set now'];
     const fund = (await this.barsOf(id)).compared.get(p) ?? [];
-    const i = fund.findIndex((b) => b.date === r.date);
-    const prev = i >= 1 ? fund[i - 1]!.date : before(fund, r.date)?.date;
+    const prev = before(fund, r.date)?.date;
     const dates = prev ? [prev, r.date] : [r.date];
     const uid = s?.underlyingSymbolId ?? null;
     const under = uid === null ? [] : ((await this.barsOf(uid)).compared.get(p) ?? []);
@@ -428,25 +445,53 @@ export class ValuesReader {
     }
     const out = table(rows, '  ');
     if (uid === null) out.push('  no underlying is set now');
-    const j = under.findIndex((b) => b.date === r.date);
-    if (i < 1 || j < 1 || under[j - 1]!.date !== fund[i - 1]!.date) {
+    const day =
+      s && uid !== null ? onDate(leverageCheck(fund, under, s.leverageFactor), r.date) : undefined;
+    if (!day) {
       out.push(
         '  returns: not comparable now (the fund and its underlying lack the same two dates)',
       );
     } else {
-      const leverage = s!.leverageFactor;
-      const expected = leverage * totalReturn(under[j - 1]!, under[j]!);
-      const observed = totalReturn(fund[i - 1]!, fund[i]!);
-      const tol = TOLERANCE.leverageBase + TOLERANCE.leverageShare * Math.abs(expected);
+      const c = day.result;
+      const ua = before(under, r.date);
+      const ub = byDate(under, r.date);
       out.push(
-        `  fund total return ${fmt(observed)}; underlying total return ` +
-          `${fmt(totalReturn(under[j - 1]!, under[j]!))}; leverage ${fmt(leverage)}; ` +
-          `expected ${fmt(expected)}; difference ${fmt(Math.abs(observed - expected))}; ` +
-          `tolerance ${fmt(tol)}`,
+        `  fund total return ${fmt(c.observed)}; underlying total return ` +
+          `${fmt(ua && ub ? totalReturn(ua, ub) : undefined)}; leverage ${fmt(s!.leverageFactor)}; ` +
+          `expected ${fmt(c.expected)}; ${graded(c)}`,
       );
+      // A streak (the stored result's message or the check's now): the two days before it, the
+      // rule's three in a row (04 layer C).
+      if (/in a row/.test(r.message ?? '') || /in a row/.test(c.message ?? '')) {
+        const earlier = day.earlier.slice(-2);
+        out.push(
+          earlier.length > 0
+            ? `  streak, the days before as compared now: ${earlier
+                .map(
+                  (x) =>
+                    `${x.date} difference ${fmt(x.deviation)}, tolerance ${fmt(x.tolerance)}, ${x.status}`,
+                )
+                .join('; ')}`
+            : '  streak: no earlier day compared now',
+        );
+      }
     }
     out.push(...(await this.revisionTable(uid === null ? [id] : [id, uid], dates)));
     return out;
+  }
+
+  /**
+   * A line when an index result names another series source than the series primary this view
+   * reads now (the roles changed since the run). The run stores no source for index_match when it
+   * had no series primary, and `none` for index_unavailable.
+   */
+  private otherSeriesSource(r: DateRow, now: string | undefined): string[] {
+    const named = r.source === null || r.source === 'none' ? undefined : r.source;
+    if (named === now) return [];
+    return [
+      `  the run compared ${named ?? 'no series source'}; read here: ${now ?? 'none'} ` +
+        '(the series primary now)',
+    ];
   }
 
   private async seriesOf(id: string, source: string) {
@@ -459,16 +504,11 @@ export class ValuesReader {
     return pit;
   }
 
-  /** The value of a series on exactly `date` as read now, or undefined (none, or withdrawn). */
-  private async seriesValue(id: string, source: string, date: TradingDate) {
-    const v = (await this.seriesOf(id, source)).asOf(date, this.o.now);
-    return v && v.date === date ? v : undefined;
-  }
-
   /**
-   * index_match / index_unavailable (checks.ts `indexCheck`): the fund's total return from the
-   * un-split primary bars against its index series' return over the same two dates (the series
-   * primary's values; every source's shown). A result stored before the check compared total
+   * index_match / index_unavailable: `indexCheck` run now on what verify gives it (the fund's
+   * un-split bars primary, the series primary's values known at `now`, the run's target), its
+   * result for the date: the fund's total return against the index's return over the same two
+   * dates (every source's values shown). A result stored before the check compared total
    * returns (spec 2026-11-01 layer-c-dividends) carries the fund's price return as observed; the
    * line below reads as the check does now.
    */
@@ -477,8 +517,7 @@ export class ValuesReader {
     const s = await this.symbol(id);
     const p = await this.primary();
     const fund = p ? ((await this.barsOf(id)).compared.get(p) ?? []) : [];
-    const i = fund.findIndex((b) => b.date === r.date);
-    const prev = i >= 1 ? fund[i - 1]!.date : before(fund, r.date)?.date;
+    const prev = before(fund, r.date)?.date;
     const dates = prev ? [prev, r.date] : [r.date];
     const rows = [['compared', 'date', 'close', 'split', 'div']];
     for (const date of dates) {
@@ -515,28 +554,47 @@ export class ValuesReader {
     }
     out.push(`  index series ${series}, as read now:`);
     out.push(...table(vrows, '  '));
+    out.push(...this.otherSeriesSource(r, sp));
     if (!sp) out.push('  no series primary is set now');
-    else if (i < 1)
-      out.push(`  returns: not comparable now (no primary bar on ${r.date} or before it)`);
-    else {
-      const observed = totalReturn(fund[i - 1]!, fund[i]!);
-      let expected: number | undefined;
-      try {
-        const a = await this.seriesValue(series, sp, prev!);
-        const b = await this.seriesValue(series, sp, r.date);
-        expected = a && b ? b.value / a.value - 1 : undefined;
-      } catch {
-        // A history PointInTime refuses: no index return (the table above says why).
-        expected = undefined;
-      }
-      out.push(
-        `  fund total return ${fmt(observed)}; index return (${sp}) ${fmt(expected)}; difference ` +
-          `${fmt(expected === undefined ? undefined : Math.abs(observed - expected))}; tolerance ` +
-          `${fmt(TOLERANCE.index)}`,
-      );
-    }
+    else out.push(await this.indexReturns(fund, series, sp, r.date, prev));
     out.push(...(await this.revisionTable([id], dates)));
     return out;
+  }
+
+  /** The line of `indexCheck`'s result for `date`, recomputed now. */
+  private async indexReturns(
+    fund: RawBar[],
+    series: string,
+    sp: string,
+    date: TradingDate,
+    prev: TradingDate | undefined,
+  ): Promise<string> {
+    let index: { date: TradingDate; value: number }[];
+    try {
+      index = (await this.seriesOf(series, sp)).knownAt(this.o.now);
+    } catch (e) {
+      // A stored history PointInTime refuses: no index return (never a guess).
+      return `  returns: not comparable now (${sp} is not readable: ${e instanceof Error ? e.message : String(e)})`;
+    }
+    if (index.length === 0) return `  returns: not comparable now (no ${sp} value as read now)`;
+    const c = onDate(
+      indexCheck(fund, index, { source: sp, ...(this.o.to !== undefined && { to: this.o.to }) }),
+      date,
+    )?.result;
+    if (!c) {
+      return (
+        `  returns: not compared now (no result for ${date}: no fund bar on it or before it, the ` +
+        "bar before is older than the index's first value, or the run's date waits for that " +
+        "day's value)"
+      );
+    }
+    if (c.check !== 'index_match') {
+      return `  index return (${sp}) ${prev ?? '-'} to ${date}: ${c.message ?? c.check} as read now; status now ${c.status}`;
+    }
+    return (
+      `  fund total return ${fmt(c.observed)}; index return (${sp}) ${fmt(c.expected)}; ` +
+      graded(c)
+    );
   }
 
   /** The sources with a role, then those with stored rows of the series or pair, sorted. */
@@ -690,8 +748,9 @@ export class ValuesReader {
 
   /**
    * fx_match / fx_unavailable (checks.ts `fxCheck`): every stored rate on the date, per pair,
-   * source and kind. The pair is read from the run's overall health row of the date
-   * (`<pair>:B.<check>@<source>`, verify.ts); without one, every pair stored that day.
+   * source and kind; the header says which kind the run compared (valuation). The pair is read
+   * from the run's overall health row of the date (`<pair>:B.<check>@<source>`, verify.ts);
+   * without one, every pair stored that day.
    */
   private async fxLines(r: DateRow): Promise<string[]> {
     // The run's overall row of the date (no symbol).
@@ -726,10 +785,13 @@ export class ValuesReader {
       named.size > 0 ? [...named].sort() : [...new Set(stored.map((x) => x.pair))].sort();
     this.fxRoles ??= await roles(this.db, 'fx');
     const fp = this.fxRoles.primary;
+    // verify's fxCheck compares only the `valuation` kind (fxPointInTime's default); other kinds
+    // are listed for context.
     const out = [
       named.size > 0
-        ? `  FX rates on ${r.date}, as read now (the pair from the run's reason):`
-        : `  FX rates on ${r.date}, as read now (every pair stored; the run's reason names none):`,
+        ? `  FX rates on ${r.date}, as read now (the pair from the run's reason; compared: valuation):`
+        : `  FX rates on ${r.date}, as read now (every pair stored; the run's reason names none; ` +
+          'compared: valuation):',
     ];
     const rows = [
       ['fx', 'pair', 'source', 'kind', 'value', 'known_at', 'published_at', 'vintages'],
