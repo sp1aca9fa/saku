@@ -30,6 +30,7 @@ last two only when every source answered for every item. Details: `docs/data-pip
 | `pnpm sources list` | Source roles per data kind. `pnpm sources set <bars\|series\|fx\|issuer> <key> <primary\|secondary\|check>`, `pnpm sources remove <kind> <key>`, `pnpm sources issuer-stats [--years N]`, `pnpm sources readjustments [--source <key>] [--run <id>]` (see `docs/data-pipeline.md`) |
 | `pnpm csv import <file> --ticker <T> --prices raw\|split-adjusted [--source csv-<name>]` | Imports daily bars from a CSV as their own source (give it a role to use it) |
 | `pnpm health [--date <D>] [--days <N>] [--lang <code>]` | The data-health report; the last 5 trading days by default. Its second line is the database size and the disk used and free (`Database 3.0 MB; disk 41.2% used, 20.1 GB free.`); the daily run alerts the admins once a day when the disk is 70% full or more |
+| `pnpm health --summary [--run <id>] [--check <name> [--symbol <T>] [--source <id>]] [--values [--per-group <N>] [--status red\|yellow\|all]]` | The non-green results of one full-history run, grouped; `--values` adds the stored values behind up to N dates per group (default 5, red groups) or behind each `--check` date, as stored now (see `docs/data-pipeline.md`) |
 | `pnpm strategy check\|register\|list\|show\|verify\|recompute` | Strategy definitions, versions and the forward record (`templates/strategies/` has examples). `register` refuses `same_close` execution and any ticker the strategy reads or holds (safe state included) whose full history has not passed the checks: the latest full check (`pnpm verify`, weekly or bootstrap; an interrupted or failed one refuses) must have succeeded, graded it from its first stored bar through the latest final session and found no red day, and no stored bar may be red, ungraded, or on a day the market was closed. `check <file> --registration` prints every reason `register` would refuse (or "Ready to register."; exit 1 with problems) and writes nothing. `register`, `check --registration` and `recompute` refuse while a job runs (they take the jobs lock) |
 | `pnpm journal add\|list` | What you did with a signal |
 | `pnpm channel add\|list\|disable\|enable\|test` | Alert channels (Discord, Telegram) |
@@ -88,7 +89,7 @@ weekly run is not repeated for it.
 | Command | 0 | 1 |
 |---|---|---|
 | `pnpm daily`, `bootstrap`, `weekly` | The run completed (or nothing was due, or another job holds the lock) | The run could not start or did not complete |
-| `pnpm health` | Every shown date is green overall and per symbol | Anything not green, not graded, or a wrong argument |
+| `pnpm health` (also `--summary`) | The report was produced, whatever the grades (its last line, `Verdict: ...`, says them) | An error: a wrong argument, no database, an unknown run, check, symbol or source, nothing graded yet |
 | `pnpm drill red` | The day was red, every registered strategy applied its safe state and its alert reached a channel | Anything else, or a refusal (no registered strategy, CI or Vercel set, another job running) |
 | Other commands | Done | An error or wrong usage, with a message |
 

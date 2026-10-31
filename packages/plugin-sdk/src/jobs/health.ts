@@ -297,3 +297,29 @@ export async function healthReport(
   }
   return out;
 }
+
+/**
+ * The verdict line of `pnpm health` (spec 2026-11-01 health-values): the report was produced, so
+ * the command exits 0 and says the grade in words. A date counts red when its overall grade or a
+ * symbol's is red, else yellow when one is yellow; any other date that is not green (a date or
+ * symbol nobody graded) counts as not graded, never as green. No date shown is never all green.
+ */
+export function daysVerdict(report: DayReport[]): string {
+  // No date shown confirms nothing.
+  if (report.length === 0) return 'Verdict: no date shown.';
+  let red = 0;
+  let yellow = 0;
+  let notGraded = 0;
+  for (const d of report) {
+    if (d.green) continue;
+    const statuses = [d.overall.status, ...d.symbols.map((s) => s.grade.status)];
+    if (statuses.includes('red')) red++;
+    else if (statuses.includes('yellow')) yellow++;
+    else notGraded++;
+  }
+  if (red + yellow + notGraded === 0) return 'Verdict: all green.';
+  return (
+    `Verdict: not all green (${red} ${red === 1 ? 'date' : 'dates'} red, ${yellow} yellow` +
+    `${notGraded > 0 ? `, ${notGraded} not graded` : ''}).`
+  );
+}

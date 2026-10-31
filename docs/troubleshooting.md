@@ -1,6 +1,7 @@
 # Troubleshooting
 
-First look: `pnpm health` (the data-health report, exit code 1 when anything is not green) and
+First look: `pnpm health` (the data-health report; its last line is the verdict, `Verdict: all
+green.` or what is not; exit code 1 only for an error, not for a grade) and
 `journalctl -u saku-daily -n 100`. Job logs are in `~/.local/state/saku/logs/`. See
 `docs/running.md`.
 

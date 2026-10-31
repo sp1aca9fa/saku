@@ -7,7 +7,8 @@
 //   pnpm health --days <N>            the last N trading days (with --date: N days ending there)
 //   pnpm health --lang <code>         the reasons' language (default: primary_language, else en)
 //
-// Exit code 0 when every shown date is green (overall and every symbol), 1 otherwise.
+// It ends with a verdict in words: "Verdict: all green." when every shown date is green (overall
+// and every symbol), else "Verdict: not all green (N dates red, M yellow[, K not graded])."
 //
 // The summary of one run (jobs/health-summary.ts): its non-green check results grouped by
 // (status, layer, check, symbol or the day, source), and its non-green health rows grouped by
@@ -17,10 +18,21 @@
 //   pnpm health --summary --check <name> [--symbol <ticker>] [--source <id>]
 //                                               that check's non-green dates (at most 200 shown;
 //                                               --symbol day: the results about the day, FX)
+//   pnpm health --summary --values [--per-group <N>] [--status red|yellow|all]
+//                                               the stored values behind up to N dates (default
+//                                               5, 1 to 50) of each non-green group (default red
+//                                               ones), first and last included, evenly spread
+//   pnpm health --summary --check <name> --values  the values behind each listed date (at most 50)
 //
-// Exit code 0 only when the run succeeded and stored the overall row of its target (complete),
-// its per-check counts agree with its stored results, and it has no non-green check result and
-// no non-green health row (`runSummary(...).allGreen`); 1 otherwise.
+// The values are read as stored now (jobs/health-values.ts), not necessarily what the run saw.
+// It ends with a verdict: "Verdict: all green." only when the run succeeded and stored the
+// overall row of its target (complete), its per-check counts agree with its stored results, and
+// it has no non-green check result and no non-green health row (`runSummary(...).allGreen`);
+// "Verdict: incomplete run." when it is not complete; "Verdict: not all green." otherwise.
+//
+// Exit code (both modes): 0 when the report was produced, whatever the grades (the verdict line
+// says them); 1 only for an error: a wrong argument, no database, an unknown run, check, symbol or
+// source, a symbol the run did not grade, or nothing graded yet.
 import { type Translate, languages, translator } from '@saku/content';
 import { Sessions } from '@saku/data';
 import { existsSync } from 'node:fs';
@@ -32,6 +44,7 @@ import { describeReason, describeReasons } from '../jobs/alerts';
 import {
   type DayReport,
   type Grade,
+  daysVerdict,
   healthReport,
   latestGradedDate,
   latestRun,
@@ -53,7 +66,19 @@ import {
   runHasCheck,
   runSummary,
   sourceRefusal,
+  summaryGroupDates,
+  summaryGroupRows,
+  summaryVerdict,
 } from '../jobs/health-summary';
+import {
+  PER_GROUP_DEFAULT,
+  VALUES_CAP,
+  ValuesReader,
+  fmt,
+  resultLine,
+  sampleDates,
+  table,
+} from '../jobs/health-values';
 import { diskLine, measureDisk } from '../jobs/disk';
 import { loadPlugins } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -129,7 +154,9 @@ const report = await healthReport(db, { dates: dates!, sessions });
 for (const day of report) {
   for (const line of describeDay(t, day)) console.log(line);
 }
-process.exit(report.every((d) => d.green) ? 0 : 1);
+// The report was produced: exit 0 whatever the grades; the verdict says them.
+console.log(daysVerdict(report));
+process.exit(0);
 
 function header(r: Awaited<ReturnType<typeof latestRun>>): string {
   if (!r) return 'Latest run: none.';
@@ -155,21 +182,6 @@ function describeDay(t: Translate, d: DayReport): string[] {
     `${d.date}  ${describeGrade(t, d.overall)}${by}`,
     ...d.symbols.map((s) => `  ${s.ticker}  ${describeGrade(t, s.grade)}`),
   ];
-}
-
-/** Rows as columns padded to their widest cell; the last column is not padded. */
-function table(rows: string[][]): string[] {
-  const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
-  return rows.map((r) =>
-    r
-      .map((cell, i) => (i === r.length - 1 ? cell : cell.padEnd(widths[i]!)))
-      .join('  ')
-      .trimEnd(),
-  );
-}
-
-function num(x: number | null): string {
-  return x === null ? '-' : String(x);
 }
 
 async function summary(
@@ -261,7 +273,21 @@ async function summary(
     `Health rows not green: days red ${s.health.day.red}, yellow ${s.health.day.yellow}; ` +
       `symbol-days red ${s.health.symbol.red}, yellow ${s.health.symbol.yellow}.`,
   );
-  const exit = s.allGreen ? 0 : 1;
+  // The report is produced from here on: it ends with the verdict and exits 0 (an error before
+  // this point exits 1).
+  const done = () => {
+    console.log('');
+    console.log(summaryVerdict(s));
+    return 0;
+  };
+  const reader = new ValuesReader(db, {
+    runId: run.id,
+    ...(run.target && { to: run.target }),
+    now: new Date().toISOString(),
+  });
+  const asStoredNow =
+    'Values as stored now, not necessarily what the run saw (raw bars may be revised since: ' +
+    '"revised" rows; series and FX rates: the version that holds now and how many are stored).';
 
   if (a.check === undefined) {
     console.log('');
@@ -307,14 +333,47 @@ async function summary(
       ];
       for (const line of table(rows)) console.log(line);
     }
-    return exit;
+    if (a.values) {
+      const status = a.status ?? 'red';
+      const perGroup = a.perGroup ?? PER_GROUP_DEFAULT;
+      const groups = s.groups.filter((g) => status === 'all' || g.status === status);
+      console.log('');
+      console.log(
+        `Values behind the ${status === 'all' ? 'non-green' : status} check results: up to ` +
+          `${perGroup} dates per group, the first and the last included, evenly spread.`,
+      );
+      console.log(asStoredNow);
+      if (groups.length === 0) console.log(`No ${status === 'all' ? 'non-green' : status} group.`);
+      for (const g of groups) {
+        const dates = await summaryGroupDates(db, run.id, g);
+        const shown = sampleDates(dates, perGroup);
+        console.log('');
+        console.log(
+          `${g.status}  ${g.layer}  ${g.check}  ${g.symbol}  ${g.source ?? '-'}: ` +
+            `${dates.length} ${dates.length === 1 ? 'date' : 'dates'}, ${shown.length} shown`,
+        );
+        const rows = await summaryGroupRows(db, run.id, g, shown);
+        for (const date of shown) {
+          const mine = rows.filter((r) => r.date === date);
+          for (const r of mine) console.log(resultLine(r));
+          // The rows of one date share the group's check, symbol and source: one values block.
+          if (mine[0]) for (const line of await reader.lines(mine[0])) console.log(line);
+        }
+      }
+    }
+    return done();
   }
 
-  const { rows, total } = await groupDates(db, run.id, {
-    check: a.check,
-    ...(symbolId !== undefined && { symbolId }),
-    ...(a.source !== undefined && { source: a.source }),
-  });
+  const { rows, total } = await groupDates(
+    db,
+    run.id,
+    {
+      check: a.check,
+      ...(symbolId !== undefined && { symbolId }),
+      ...(a.source !== undefined && { source: a.source }),
+    },
+    a.values ? VALUES_CAP : DATE_CAP,
+  );
   console.log('');
   const what = [
     `check ${a.check}`,
@@ -329,32 +388,58 @@ async function summary(
         return 1;
       }
       console.log(`No non-green result for ${what} (graded ${range.from} to ${range.to}).`);
-      return exit;
+      return done();
     }
     console.log(`No non-green result for ${what}.`);
-    return exit;
+    return done();
   }
   console.log(`Non-green results for ${what}: ${total}.`);
-  const lines = table([
-    ['date', 'status', 'layer', 'symbol', 'source', 'observed', 'expected', 'tolerance', 'message'],
-    ...rows.map((r) => [
-      r.date,
-      r.status,
-      r.layer,
-      r.symbol,
-      r.source ?? '-',
-      num(r.observed),
-      num(r.expected),
-      num(r.tolerance),
-      r.message ?? '-',
-    ]),
-  ]);
-  for (const line of lines) console.log(line);
+  if (a.values) {
+    console.log(asStoredNow);
+    // Each result, then the values behind it; a block the same as the one just shown (the same
+    // date and symbol) is not repeated.
+    let last: string | undefined;
+    for (const r of rows) {
+      console.log(resultLine(r, { full: true }));
+      const block = await reader.lines(r);
+      const key = block.join('\n');
+      if (block.length > 0 && key === last) console.log('  (values as above)');
+      else for (const line of block) console.log(line);
+      last = key;
+    }
+  } else {
+    const lines = table([
+      [
+        'date',
+        'status',
+        'layer',
+        'symbol',
+        'source',
+        'observed',
+        'expected',
+        'tolerance',
+        'message',
+      ],
+      ...rows.map((r) => [
+        r.date,
+        r.status,
+        r.layer,
+        r.symbol,
+        r.source ?? '-',
+        fmt(r.observed),
+        fmt(r.expected),
+        fmt(r.tolerance),
+        r.message ?? '-',
+      ]),
+    ]);
+    for (const line of lines) console.log(line);
+  }
   if (total > rows.length) {
+    const cap = a.values ? VALUES_CAP : DATE_CAP;
     console.log(
-      `... ${total - rows.length} more (the first ${DATE_CAP} by date are shown; ` +
+      `... ${total - rows.length} more (the first ${cap} by date are shown; ` +
         'narrow with --symbol or --source).',
     );
   }
-  return exit;
+  return done();
 }

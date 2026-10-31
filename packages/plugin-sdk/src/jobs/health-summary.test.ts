@@ -659,6 +659,7 @@ describe('helpers', () => {
       layer: 'A' as const,
       check: 'c',
       symbol: 'AAA',
+      symbolId: 1,
       source: null,
       count,
       first: '2026-01-05',

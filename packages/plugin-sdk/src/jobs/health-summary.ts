@@ -80,6 +80,8 @@ export interface SummaryGroup {
   check: string;
   /** The symbol's ticker, or `DAY` for results about the day (FX checks). */
   symbol: string;
+  /** The symbol's id, or null for results about the day. */
+  symbolId: number | null;
   source: string | null;
   count: number;
   first: TradingDate;
@@ -140,7 +142,7 @@ export interface RunSummary {
   healthGroups: HealthGroup[];
   /**
    * True only when the run is complete, its counts agree, and it has no non-green check result
-   * and no non-green health row (the exit code 0 of `pnpm health --summary`).
+   * and no non-green health row (the verdict "all green" of `pnpm health --summary`).
    */
   allGreen: boolean;
 }
@@ -234,6 +236,7 @@ export async function runSummary(db: Db, run: SummaryRun): Promise<RunSummary> {
     layer: g.layer,
     check: g.check,
     symbol: g.symbolId === null ? DAY : (names.get(g.symbolId) ?? `#${g.symbolId}`),
+    symbolId: g.symbolId,
     source: g.source,
     count: g.count,
     first: g.first!,
@@ -500,7 +503,11 @@ export interface DateRow {
   date: TradingDate;
   status: HealthStatus;
   layer: CheckLayer;
+  /** The check's name as read (`CHECK_AS_READ`). */
+  check: string;
   symbol: string;
+  /** The symbol's id, or null for results about the day. */
+  symbolId: number | null;
   source: string | null;
   observed: number | null;
   expected: number | null;
@@ -567,18 +574,86 @@ export async function groupDates(
     .limit(cap);
   return {
     total: total?.n ?? 0,
-    rows: rows.map((x) => ({
-      date: x.date,
-      status: x.status,
-      layer: x.layer,
-      symbol: x.symbolId === null ? DAY : (names.get(x.symbolId) ?? `#${x.symbolId}`),
-      source: x.source,
-      observed: x.observed,
-      expected: x.expected,
-      tolerance: x.tolerance,
-      message: x.message,
-    })),
+    rows: rows.map((x) => dateRow(x, f.check, names)),
   };
+}
+
+function dateRow(
+  x: typeof schema.checkResults.$inferSelect,
+  check: string,
+  names: Map<number, string>,
+): DateRow {
+  return {
+    date: x.date,
+    status: x.status,
+    layer: x.layer,
+    check,
+    symbol: x.symbolId === null ? DAY : (names.get(x.symbolId) ?? `#${x.symbolId}`),
+    symbolId: x.symbolId,
+    source: x.source,
+    observed: x.observed,
+    expected: x.expected,
+    tolerance: x.tolerance,
+    message: x.message,
+  };
+}
+
+/** One summary group, as `runSummary` groups the results. */
+export type GroupKey = Pick<SummaryGroup, 'status' | 'layer' | 'check' | 'symbolId' | 'source'>;
+
+function groupWhere(runId: string, g: GroupKey) {
+  const r = schema.checkResults;
+  return and(
+    eq(r.runId, runId),
+    eq(r.status, g.status),
+    eq(r.layer, g.layer),
+    eq(CHECK_AS_READ, g.check),
+    g.symbolId === null ? isNull(r.symbolId) : eq(r.symbolId, g.symbolId),
+    g.source === null ? isNull(r.source) : eq(r.source, g.source),
+  );
+}
+
+/** The distinct dates of one summary group's results in the run, ascending. */
+export async function summaryGroupDates(
+  db: Db,
+  runId: string,
+  g: GroupKey,
+): Promise<TradingDate[]> {
+  const r = schema.checkResults;
+  const rows = await db
+    .selectDistinct({ date: r.date })
+    .from(r)
+    .where(groupWhere(runId, g))
+    .orderBy(asc(r.date));
+  return rows.map((x) => x.date);
+}
+
+/** One summary group's results on the given dates, by date (then id). */
+export async function summaryGroupRows(
+  db: Db,
+  runId: string,
+  g: GroupKey,
+  dates: TradingDate[],
+): Promise<DateRow[]> {
+  if (dates.length === 0) return [];
+  const r = schema.checkResults;
+  const names = await tickers(db);
+  const rows = await db
+    .select()
+    .from(r)
+    .where(and(groupWhere(runId, g), inArray(r.date, dates)))
+    .orderBy(asc(r.date), asc(r.id));
+  return rows.map((x) => dateRow(x, g.check, names));
+}
+
+/**
+ * The verdict line of `pnpm health --summary` (spec 2026-11-01 health-values): the report was
+ * produced, so the command exits 0 and says the grade in words. An incomplete run confirms
+ * nothing (`complete`); otherwise all green only as `allGreen` says.
+ */
+export function summaryVerdict(s: Pick<RunSummary, 'complete' | 'allGreen'>): string {
+  if (!s.complete) return 'Verdict: incomplete run.';
+  return s.allGreen ? 'Verdict: all green.' : 'Verdict: not all green.';
 }
 
 /** The latest runs of any kind (by start), for the message refusing an unknown run id. */

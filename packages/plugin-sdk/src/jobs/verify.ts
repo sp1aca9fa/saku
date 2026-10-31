@@ -177,7 +177,8 @@ function missingPrimaryDates(
   return from > o.to ? [] : sessions.between(from, o.to);
 }
 
-async function roles(db: Db, dataKind: string) {
+/** The sources with a role for a data kind, as stored now (primary, secondaries, checks). */
+export async function roles(db: Db, dataKind: string) {
   const rows = await db
     .select()
     .from(schema.sourceRoles)
@@ -190,7 +191,8 @@ async function roles(db: Db, dataKind: string) {
   };
 }
 
-async function rawBars(db: Db, symbolId: number): Promise<Map<string, RawBar[]>> {
+/** A symbol's stored raw bars by source, sorted by date, as the checks read them. */
+export async function rawBars(db: Db, symbolId: number): Promise<Map<string, RawBar[]>> {
   const rows = await db
     .select()
     .from(schema.barsRaw)
