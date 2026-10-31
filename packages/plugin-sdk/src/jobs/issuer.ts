@@ -2,7 +2,13 @@
 // owner to set `issuer_nav_tolerance` from (requirements 04, "Per-ETF thresholds set in A3").
 // Read-only: `pnpm sources issuer-stats [--years N]` prints it.
 import type { TradingDate } from '@saku/core';
-import { type IssuerPublishes, type PremiumStats, navPremiums, premiumStats } from '@saku/data';
+import {
+  type IssuerPublishes,
+  type PremiumStats,
+  navPremiums,
+  otherCurrency,
+  premiumStats,
+} from '@saku/data';
 import {
   type Db,
   activeSymbols,
@@ -17,8 +23,16 @@ export interface IssuerStatsRow extends PremiumStats {
   source: string;
   /** The tolerance set for the fund, if any. */
   tolerance?: number;
-  /** Days with a NAV left out: a stand-in close (not the primary's), or a day graded red. */
+  /**
+   * Days with a NAV in the fund's currency left out: a stand-in close (not the primary's), or a
+   * day graded red.
+   */
   leftOut: { standIn: number; red: number };
+  /**
+   * NAVs in the period not compared because they are in another known currency (decisions log
+   * 2026-11-01, C15 (a); layer D has no result for them), counted per currency (ISO 4217).
+   */
+  otherCurrency: Record<string, number>;
 }
 
 export interface IssuerStats {
@@ -34,6 +48,8 @@ export interface IssuerStats {
  * an issuer NAV in the fund's currency from `from` to `to`, and the median, 99th percentile and
  * largest |close / NAV - 1|. Closes are the canonical bars from the primary; stand-in days and
  * days graded red are left out (counted), since their close is not a trusted primary value.
+ * NAVs in another known currency are not compared (C15 (a)): counted per currency, never in the
+ * premiums or the days left out.
  * A source whose declaration (`publishes`, by source key) has no NAV has no row: it makes no NAV
  * claim (as layer D); a source without a declaration has a row from the NAVs its records hold.
  */
@@ -67,7 +83,12 @@ export async function issuerStats(
       if (declared !== undefined && declared.nav !== true) continue;
       const inPeriod = list.filter((r) => r.date >= o.from && r.date <= o.to);
       const leftOut = { standIn: 0, red: 0 };
+      const other = new Map<string, number>();
       for (const r of inPeriod) {
+        if (otherCurrency(r, s.currency)) {
+          other.set(r.currency!, (other.get(r.currency!) ?? 0) + 1);
+          continue;
+        }
         const why = r.nav !== undefined ? excluded.get(r.date) : undefined;
         if (why) leftOut[why]++;
       }
@@ -78,6 +99,7 @@ export async function issuerStats(
         ...premiumStats(premiums),
         ...(Object.hasOwn(nav.tolerances, s.ticker) && { tolerance: nav.tolerances[s.ticker]! }),
         leftOut,
+        otherCurrency: Object.fromEntries([...other].sort(([a], [b]) => a.localeCompare(b))),
       });
     }
   }

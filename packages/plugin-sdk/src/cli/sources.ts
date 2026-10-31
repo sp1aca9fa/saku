@@ -153,11 +153,16 @@ if (tool === 'sources' && command === 'list') {
       `|close / NAV - 1| from ${from} to ${to} (primary closes; stand-in days and days graded ` +
         'red left out)',
     );
-    console.log('ticker  source  days  median  p99  max  left out (stand-in, red)  tolerance set');
+    console.log(
+      'ticker  source  days  median  p99  max  left out (stand-in, red)  ' +
+        'not compared (NAV in another currency)  tolerance set',
+    );
     for (const r of stats.rows) {
+      const other = Object.entries(r.otherCurrency);
       console.log(
         `${r.ticker}  ${r.source}  ${r.days}  ${pct(r.median)}  ${pct(r.p99)}  ${pct(r.max)}  ` +
           `${r.leftOut.standIn}, ${r.leftOut.red}  ` +
+          `${other.length === 0 ? '0' : other.map(([c, n]) => `${n} ${c}`).join(', ')}  ` +
           `${r.tolerance === undefined ? 'none (observed only)' : pct(r.tolerance)}`,
       );
     }

@@ -1,7 +1,14 @@
 import type { IssuerRecord, RawBar } from '@saku/core';
 import { describe, expect, it } from 'vitest';
 import { Sessions } from './calendar';
-import { LAYER_D_MAX_STATUS, layerD, navPremiums, premiumStats, quantile } from './issuer';
+import {
+  LAYER_D_MAX_STATUS,
+  layerD,
+  navPremiums,
+  otherCurrency,
+  premiumStats,
+  quantile,
+} from './issuer';
 
 const sessions = new Sessions({
   id: 't',
@@ -78,19 +85,44 @@ describe('layer D (issuer reconciliation)', () => {
     expect(navPremiums(primary, records, 'USD')).toHaveLength(4);
   });
 
-  it("compares a NAV only in the fund's currency: another or none is a mismatch (capped)", () => {
-    const records = navs().map((r, i) =>
+  it("compares a NAV only in the fund's currency: another is not compared, none a mismatch", () => {
+    // Every NAV 10% off the close: a comparison of the XXX one would be a premium.
+    const records = navs(0.1).map((r, i) =>
       i === 0 ? { ...r, currency: 'XXX' } : i === 1 ? { date: r.date, nav: r.nav! } : r,
     );
     const rs = of(layerD(primary, records, { ...opts, tolerance: 0.01 }), 'nav_premium');
+    // Another known currency (C15 (a)): no result for that date, never a green one.
+    expect(rs.map((r) => r.date)).toEqual(dates.slice(1));
+    // No currency is unknown, not "another currency": a mismatch (capped), never a premium.
     expect(rs[0]).toMatchObject({
+      date: dates[1],
       status: 'yellow',
-      message: 'NAV currency differs (XXX, the fund trades in USD)',
+      message: 'NAV currency missing (the fund trades in USD)',
     });
     expect(rs[0]!.deviation).toBeUndefined();
-    expect(rs[1]!.message).toMatch(/differs \(none,/);
-    expect(rs[2]!.status).toBe('green');
+    // The fund's currency: compared as before.
+    expect(rs[1]).toMatchObject({ status: 'yellow', tolerance: 0.01 });
+    expect(rs[1]!.deviation).toBeCloseTo(0.1, 12);
     expect(navPremiums(primary, records, 'USD').map((p) => p.date)).toEqual(dates.slice(2));
+    expect(otherCurrency(records[0]!, 'USD')).toBe(true);
+    expect(otherCurrency(records[1]!, 'USD')).toBe(false);
+    expect(otherCurrency(records[2]!, 'USD')).toBe(false);
+    expect(otherCurrency({ date: dates[0]!, currency: 'XXX' }, 'USD')).toBe(false);
+  });
+
+  it('a NAV in another currency still counts as published for freshness', () => {
+    const all = navs().map((r) => ({ ...r, currency: 'XXX' }));
+    const rs = layerD(primary, all, { ...opts, tolerance: 0.01, publishes: { nav: true } });
+    expect(of(rs, 'nav_premium')).toEqual([]);
+    expect(of(rs, 'issuer_stale')).toEqual([
+      expect.objectContaining({ date: TO, status: 'green', observed: 0 }),
+    ]);
+    // Only the older NAVs in the fund's currency: the latest NAV (in XXX) is what counts.
+    const mixed = navs().map((r, i) => (i >= 2 ? { ...r, currency: 'XXX' } : r));
+    expect(of(layerD(primary, mixed, opts), 'issuer_stale')[0]).toMatchObject({
+      status: 'green',
+      observed: 0,
+    });
   });
 
   it('a split-adjusted NAV history (not as published that day) shows as a mismatch', () => {

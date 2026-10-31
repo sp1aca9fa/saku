@@ -29,7 +29,8 @@ const statusD = (deviation: number, tol: number): HealthStatus =>
  * The market close's premium (+) or discount (-) to the issuer's NAV, close / NAV - 1, on dates
  * the primary has a bar and the issuer a NAV in the fund's currency. Both are per share as traded
  * that day (the primary un-split). Dates where either value is not positive, or the NAV is in
- * another (or no) currency, have no premium (layer D flags them).
+ * another (or no) currency, have no premium (layer D flags a NAV not positive or without a
+ * currency; one in another known currency is not compared, counted by `issuer-stats`).
  */
 export function navPremiums(
   primary: RawBar[],
@@ -43,6 +44,14 @@ export function navPremiums(
     if (!(r.nav > 0) || !(c > 0)) return [];
     return [{ date: r.date, close: c, nav: r.nav, premium: c / r.nav - 1 }];
   });
+}
+
+/**
+ * The record's NAV is in a known currency other than the fund's (decisions log 2026-11-01, C15
+ * (a)): not compared, without an FX conversion. A NAV without a currency is not this (unknown).
+ */
+export function otherCurrency(r: IssuerRecord, currency: string): boolean {
+  return r.nav !== undefined && r.currency !== undefined && r.currency !== currency;
 }
 
 /** The kinds an issuer source can declare it publishes (the one list; the registry validates). */
@@ -92,8 +101,9 @@ export interface LayerDOptions {
  * `distribution_match` with distributions; `split_match` with splits); an undeclared kind has no
  * result, never a green one. Without a declaration, as below (inferred from the records):
  * - `nav_premium`: |close / NAV - 1| against the fund's tolerance (no tolerance: green, the
- *   deviation recorded). A NAV that is not positive, or not in the fund's currency, is a
- *   mismatch and never a premium.
+ *   deviation recorded). A NAV that is not positive, or without a currency, is a mismatch and
+ *   never a premium. A NAV in another known currency has no result (not compared, C15 (a); it
+ *   still counts for `issuer_stale`).
  * - `distribution_match`, `split_match`: the issuer's events against the primary's on the same
  *   dates (an event on one side only is a mismatch; amounts within the layer B event tolerance,
  *   1%), within the dates both cover. A source that publishes NAV is compared on the dates it
@@ -160,9 +170,14 @@ export function layerD(
   for (const r of navs) {
     const b = mine.get(r.date);
     if (!b || r.nav === undefined) continue;
+    // A NAV in another known currency is not compared (decisions log 2026-11-01, C15 (a)): no
+    // result, never a green one; `pnpm sources issuer-stats` counts it. It is still a NAV the
+    // issuer published, so it counts for `issuer_stale` below. A NAV without a currency is
+    // unknown, not "another currency": a mismatch.
+    if (otherCurrency(r, o.currency)) continue;
     const bad =
-      r.currency !== o.currency
-        ? `NAV currency differs (${r.currency ?? 'none'}, the fund trades in ${o.currency})`
+      r.currency === undefined
+        ? `NAV currency missing (the fund trades in ${o.currency})`
         : !(r.nav > 0)
           ? 'issuer NAV not positive'
           : undefined;

@@ -689,9 +689,53 @@ describe('verify', () => {
       { days: 1 },
     ]);
     expect((await issuerStats(db, { from: '2026-02-01', to: '2026-02-08' })).rows).toEqual([
-      { ticker: 'AAA', source: 'iss', days: 0, tolerance: 0.01, leftOut: { standIn: 0, red: 0 } },
-      { ticker: 'AAA', source: 'other', days: 0, tolerance: 0.01, leftOut: { standIn: 0, red: 0 } },
+      {
+        ticker: 'AAA',
+        source: 'iss',
+        days: 0,
+        tolerance: 0.01,
+        leftOut: { standIn: 0, red: 0 },
+        otherCurrency: {},
+      },
+      {
+        ticker: 'AAA',
+        source: 'other',
+        days: 0,
+        tolerance: 0.01,
+        leftOut: { standIn: 0, red: 0 },
+        otherCurrency: {},
+      },
     ]);
+  });
+
+  it('a NAV in another currency is not compared: no layer D result, counted in the stats', async () => {
+    const { db } = await setup();
+    await seedSourceRoles(db, [{ key: 'iss', dataKind: 'issuer', suggestedRole: 'check' }]);
+    // The 6th in XXX (made-up), the rest in USD; every NAV 10% off the close, so a comparison of
+    // the XXX one would show. (A NAV without a currency is refused when stored.)
+    await storeIssuerRecords(db, {
+      symbolId: (await symbolId(db, 'AAA'))!,
+      source: 'iss',
+      records: [100, 101, 101.51, 100.4949].map((close, i) => ({
+        date: dates[i]!,
+        nav: close / 1.1,
+        currency: i === 1 ? 'XXX' : 'USD',
+      })),
+      fetchedAt: 't',
+    });
+    const runId = await startRun(db, 'daily');
+    await verify(db, { runId, sessions, mode: 'daily', from: '2026-01-06', to: '2026-01-08' });
+    const d = await layerDResults(db);
+    const premium = d.filter((r) => r.checkName === 'nav_premium');
+    // The 6th (XXX) has no result, never a green one; the 7th and 8th (USD) are compared.
+    expect(premium.map((r) => r.date)).toEqual(['2026-01-07', '2026-01-08']);
+    expect(premium[0]!.observed! / premium[0]!.expected! - 1).toBeCloseTo(0.1, 12);
+    const row = (await issuerStats(db, { from: '2026-01-01', to: '2026-01-08' })).rows[0]!;
+    expect(row.otherCurrency).toEqual({ XXX: 1 });
+    // The 5th and 7th compared, the 8th graded red (a secondary's close is off) left out; the XXX
+    // NAV is neither a premium nor a day left out.
+    expect(row).toMatchObject({ days: 2, leftOut: { standIn: 0, red: 1 } });
+    expect(row.max).toBeCloseTo(0.1, 12);
   });
 
   it('stats leave out stand-in days and records before the period', async () => {
