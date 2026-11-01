@@ -334,7 +334,9 @@ export function backtestOverfitting(
     s2.push(q);
   }
   // The floor scales with the returns' size: for a constant return the subtraction leaves only
-  // rounding of the order of 1e-16 x S2, which a fixed floor would read as a spread.
+  // rounding, growing with the rows (about m x 1e-16 of S2 / m: 4e-13 at m = 4,000), which a
+  // fixed floor would read as a spread. 1e-9 leaves a wide margin; a real spread below about
+  // 3e-5 of the mean return (a daily Sharpe above about 30,000) is lost, none is invented.
   const floor2 = DISPERSION_FLOOR * DISPERSION_FLOOR;
   /** Each trial's Sharpe over the blocks (ascending); undefined when any has no dispersion. */
   const sharpesOver = (blocks: readonly number[]): number[] | undefined => {
@@ -348,7 +350,7 @@ export function backtestOverfitting(
         S2 += s2[j]![k]!;
       }
       const variance = (S2 - (S1 * S1) / m) / (m - 1);
-      if (!(variance > Math.max(floor2, (1e-14 * S2) / m))) return undefined;
+      if (!(variance > Math.max(floor2, (1e-9 * S2) / m))) return undefined;
       out.push(S1 / m / Math.sqrt(variance));
     }
     return out;

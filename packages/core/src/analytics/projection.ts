@@ -5,17 +5,30 @@
 // float64 analytics: a projection, never a booked amount; amounts carry their currency.
 import type { RawBar, TradingDate } from '../domain';
 import { isTradingDate } from '../time';
-import type { EquitySample } from './metrics';
+import type { MetricsPoint } from './metrics';
 import { DEFAULT_MEAN_BLOCK, createRng, stationaryBootstrap } from './random';
 import { type Statistic, noValue, ok } from './statistic';
+
+/**
+ * One date of the caller's run: its equity, and optionally the weights held at the close (as
+ * metrics reads them) and the decision made at the close (target shares by ticker, traded later
+ * per the strategy's execution). The look-ahead guard compares all three on the history dates.
+ */
+export interface ProjectionPoint extends MetricsPoint {
+  decision?: Record<string, number>;
+}
 
 export interface GoalProjectionInput {
   /** Raw bars of every series the strategy reads or may hold, all ending on the same date (h). */
   history: Record<string, readonly RawBar[]>;
   /** The simulated sessions after h, strictly ascending; the last is the goal date. */
   future: readonly TradingDate[];
-  /** The caller's strategy run on history plus simulated bars: equity on h and every future session. */
-  run: (bars: Record<string, RawBar[]>) => readonly EquitySample[];
+  /**
+   * The caller's strategy run on history plus simulated bars: equity on h and every future
+   * session. Return `decision` (and `weights`) too: without them the look-ahead guard sees only
+   * equity and misses a one-day look-ahead.
+   */
+  run: (bars: Record<string, RawBar[]>) => readonly ProjectionPoint[];
   /** Amount at h's close (>= 0), monthly contribution (>= 0) and goal (> 0), all in `currency`. */
   initial: number;
   monthly: number;
@@ -192,6 +205,21 @@ function sample(input: GoalProjectionInput, names: readonly string[]) {
 
 const monthOf = (date: TradingDate) => date.slice(0, 7);
 
+/** Exactly the same shares (same tickers, values compared with ===), or both absent. */
+function sameShares(a: Record<string, number> | undefined, b: Record<string, number> | undefined) {
+  if (a === undefined || b === undefined) return a === b;
+  const ka = Object.keys(a).sort();
+  const kb = Object.keys(b).sort();
+  return ka.length === kb.length && ka.every((k, i) => k === kb[i] && a[k] === b[k]);
+}
+
+/** One history date of the run is the same on two paths (the look-ahead guard). */
+const samePoint = (a: ProjectionPoint, b: ProjectionPoint) =>
+  a.date === b.date &&
+  a.equity === b.equity &&
+  sameShares(a.weights, b.weights) &&
+  sameShares(a.decision, b.decision);
+
 /** The nearest-rank percentile: the ceil(q x n / 100)-th smallest. */
 function nearestRank(sorted: readonly number[], q: number): number {
   const k = Math.floor((q * sorted.length + 99) / 100);
@@ -213,7 +241,7 @@ export function goalProjection(input: GoalProjectionInput): Statistic<GoalProjec
   const L = input.future.length;
   const ends: number[] = [];
   let reached = 0;
-  let firstPast: readonly EquitySample[] = [];
+  let firstPast: readonly ProjectionPoint[] = [];
   for (let p = 0; p < paths; p++) {
     const draw = stationaryBootstrap(createRng(input.seed, p), days.length, L, meanBlock);
     const bars: Record<string, RawBar[]> = {};
@@ -249,10 +277,10 @@ export function goalProjection(input: GoalProjectionInput): Statistic<GoalProjec
     if (p === 0) firstPast = past;
     else if (
       past.length !== firstPast.length ||
-      past.some((e, i) => e.date !== firstPast[i]!.date || e.equity !== firstPast[i]!.equity)
+      past.some((e, i) => !samePoint(e, firstPast[i]!))
     ) {
       throw new Error(
-        `goalProjection: path ${p} changes the run's equity on or before ${h}: the run reads simulated bars before they happen.`,
+        `goalProjection: path ${p} changes the run's equity, weights or decisions on or before ${h}: the run reads simulated bars before they happen.`,
       );
     }
     const at = (date: TradingDate) => {

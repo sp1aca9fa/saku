@@ -327,18 +327,24 @@ describe('probability of backtest overfitting', () => {
   });
 
   it('the dispersion floor scales with the returns: a constant return has no Sharpe', () => {
-    // Constant c over a set of m rows: the variance is 0 up to rounding of the order of
-    // 1e-16 x S2; the floor max(1e-24, 1e-14 x S2 / m) = max(1e-24, 1e-14 x c^2) catches it.
+    // Constant c over a set of m rows: the variance is 0 up to rounding that grows with m (about
+    // m x 1e-16 of c^2); the floor max(1e-24, 1e-9 x S2 / m) = max(1e-24, 1e-9 x c^2) catches it.
     const noise = (n: number) => normals(31, n, 0, 0.01);
-    // S = 2: m = 400 rows per set (T = 800), c = 0.001.
-    const c3 = Array.from({ length: 800 }, () => 0.001);
-    expect(reason(backtestOverfitting([c3, noise(800)], 2))).toBe('noDispersion');
-    // m = 24 rows per set (T = 48), c = 1e-4.
-    const c4 = Array.from({ length: 48 }, () => 1e-4);
-    expect(reason(backtestOverfitting([c4, noise(48)], 2))).toBe('noDispersion');
-    // A small but real spread around the same level is kept: var 1e-12 >> 1e-14 x 1e-6.
-    const small = c3.map((x, i) => x + (i % 2 === 0 ? 1e-6 : -1e-6));
-    expect(reason(backtestOverfitting([small, noise(800)], 2))).toBe('value');
+    const constant = (c: number, n: number) => Array.from({ length: n }, () => c);
+    // S = 2: m = 4,000 rows per set (T = 8,000). With the earlier 1e-14 floor, c = 0.00015 gave
+    // a daily Sharpe of about 6.4e6.
+    for (const c of [0.00015, 0.001]) {
+      expect(reason(backtestOverfitting([constant(c, 8000), noise(8000)], 2)), String(c)).toBe(
+        'noDispersion',
+      );
+    }
+    // Shorter sets: m = 400 (c = 0.001) and m = 24 (c = 1e-4).
+    expect(reason(backtestOverfitting([constant(0.001, 800), noise(800)], 2))).toBe('noDispersion');
+    expect(reason(backtestOverfitting([constant(1e-4, 48), noise(48)], 2))).toBe('noDispersion');
+    // A small but real spread around the same level is kept: 0.001 +/- 1e-5 has var about 1e-10,
+    // far above 1e-9 x 1e-6 = 1e-15 (a daily Sharpe of about 100, measured, not refused).
+    const small = constant(0.001, 8000).map((x, i) => x + (i % 2 === 0 ? 1e-5 : -1e-5));
+    expect(reason(backtestOverfitting([small, noise(8000)], 2))).toBe('value');
   });
 
   it('noise trials overfit about half the time; a real edge does not', () => {

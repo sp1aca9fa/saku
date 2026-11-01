@@ -3,7 +3,12 @@
 import { describe, expect, it } from 'vitest';
 import type { RawBar } from '../domain';
 import type { EquitySample } from './metrics';
-import { type GoalProjectionInput, goalProjection, wilson95 } from './projection';
+import {
+  type GoalProjectionInput,
+  type ProjectionPoint,
+  goalProjection,
+  wilson95,
+} from './projection';
 import { createRng, stationaryBootstrap } from './random';
 import type { Statistic } from './statistic';
 
@@ -229,8 +234,8 @@ describe('goal projection', () => {
     expect(c.endValues).not.toEqual(a.endValues);
   });
 
-  it('fault: a run that reads simulated bars before they happen is refused', () => {
-    // The equity on the start date h depends on the last simulated close: a look-ahead.
+  it('fault: a run whose equity on or before the start changes with the simulated future is refused', () => {
+    // The equity on the start date h depends on the last simulated close (a long look-ahead).
     const peeking = (bars: Record<string, RawBar[]>) => {
       const last = bars.X!.at(-1)!.close;
       return hold('X')(bars).map((e) =>
@@ -248,6 +253,49 @@ describe('goal projection', () => {
     expect(() => goalProjection(base({ history, run: shifting }))).toThrow('reads simulated bars');
     // An honest run passes the guard.
     expect(goalProjection(base({ history })).ok).toBe(true);
+  });
+
+  it('fault: a one-day look-ahead is refused through the decisions; equity alone misses it', () => {
+    // A next-open strategy whose decision at each date's close reads the NEXT bar: in X when
+    // tomorrow's close is up. With next-day execution, the decision at h changes equity only
+    // from h + 1, so the equity up to h is the same on every path.
+    const history = { X: series('2024-01-31', varied(400)) };
+    const leaky =
+      (withDecision: boolean) =>
+      (bars: Record<string, RawBar[]>): ProjectionPoint[] => {
+        const x = bars.X!;
+        const decide = (i: number) => (i + 1 < x.length && x[i + 1]!.close > x[i]!.close ? 1 : 0);
+        let e = 1;
+        return x.map((b, i) => {
+          // Held during day i: the decision of day i - 1 (traded at day i's open; opens = closes here).
+          if (i > 0 && decide(i - 1) === 1) e *= b.close / x[i - 1]!.close;
+          const inX = decide(i);
+          return {
+            date: b.date,
+            equity: e,
+            ...(withDecision && {
+              decision: (inX ? { X: 1 } : { CASH_USD: 1 }) as Record<string, number>,
+            }),
+          };
+        });
+      };
+    expect(() => goalProjection(base({ history, run: leaky(true), goal: 1 }))).toThrow(
+      'reads simulated bars',
+    );
+    // Without decisions the guard sees equity only and cannot tell (the contract says so).
+    expect(goalProjection(base({ history, run: leaky(false), goal: 1 })).ok).toBe(true);
+    // Weights that differ on a history date are refused too (same-close execution).
+    let n = 0;
+    const weights = (bars: Record<string, RawBar[]>): ProjectionPoint[] =>
+      hold('X')(bars).map((e) =>
+        e.date === '2024-01-31'
+          ? {
+              ...e,
+              weights: (n++ === 0 ? { X: 1 } : { X: 0.5, CASH_USD: 0.5 }) as Record<string, number>,
+            }
+          : e,
+      );
+    expect(() => goalProjection(base({ history, run: weights }))).toThrow('reads simulated bars');
   });
 
   it('refuses malformed input', () => {
