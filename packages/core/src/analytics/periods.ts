@@ -42,18 +42,23 @@ export interface WalkForward {
 /** The default number of walk-forward folds (each at least a year). */
 export const WALK_FORWARD_FOLDS = 10;
 
-/** Fold q's series: the last point before `from` (q > 0), then the points in [from, to). */
+/**
+ * Fold q's series: the last point before `from` (q > 0), then the points in [from, to), the last
+ * fold's also those dated `to` (t_(n-1)). A benchmark point after the strategy's last date is in
+ * no fold: the benchmark is cut by the same boundaries, so both cover the same period.
+ */
 function foldSeries(
   series: readonly EquitySample[],
   from: TradingDate,
-  to: TradingDate | undefined,
+  to: TradingDate,
   first: boolean,
+  last: boolean,
 ): EquitySample[] {
   const out: EquitySample[] = [];
   let before: EquitySample | undefined;
   for (const p of series) {
     if (p.date < from) before = p;
-    else if (to === undefined || p.date < to) out.push(p);
+    else if (p.date < to || (last && p.date === to)) out.push(p);
   }
   return !first && before ? [before, ...out] : out;
 }
@@ -84,9 +89,9 @@ export function walkForward(input: {
   const bounds = Array.from({ length: K + 1 }, (_, q) => addDays(t0, Math.floor((q * D) / K)));
   const folds: Fold[] = [];
   for (let q = 0; q < K; q++) {
-    const to = q === K - 1 ? undefined : bounds[q + 1]!;
-    const s = foldSeries(points, bounds[q]!, to, q === 0);
-    const b = foldSeries(benchmark, bounds[q]!, to, q === 0);
+    const last = q === K - 1;
+    const s = foldSeries(points, bounds[q]!, bounds[q + 1]!, q === 0, last);
+    const b = foldSeries(benchmark, bounds[q]!, bounds[q + 1]!, q === 0, last);
     const strategy = metrics({ points: s, cashReturn: input.cashReturn }).sharpe;
     const bench = metrics({ points: b, cashReturn: input.cashReturn }).sharpe;
     folds.push({
