@@ -406,7 +406,10 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         runId,
         sessions,
         to: target,
-        // The run's clock: a red day's re-check deadline is compared with it (requirements 04).
+        // Requirements 04 "Red re-check before execution": the run's start (the timer's tick)
+        // decides whether this is the last check before a deadline; the step's clock whether it
+        // is past one.
+        start: now,
         now: o.clock?.() ?? new Date(),
       });
       if (f.skipped) log.info(`Forward records: ${f.skipped}`);
@@ -442,10 +445,12 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         // Re-check messages first (a final before the next day's alert, which is compared with
         // it), then the day alerts. Undelivered alerts are retried at the next check (sent ones
         // are not repeated).
-        const rechecked = await sendRecheckAlerts(db, { ...alerting, sessions });
+        // The run's clock: an alert made after its execution point says it applied then.
+        const told = { ...alerting, sessions, clock: o.clock?.() ?? new Date() };
+        const rechecked = await sendRecheckAlerts(db, { ...told, runId });
         log.info(`Re-check alerts: ${rechecked.sent} sent`, { failed: rechecked.failed });
         if (rechecked.failed.length > 0) markIncomplete('alerts');
-        const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
+        const sent = await sendStrategyAlerts(db, told);
         log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
         if (sent.failed.length > 0) markIncomplete('alerts');
         await recomputeAndTell();

@@ -29,7 +29,7 @@
 import { Sessions } from '@saku/data';
 import { tradingDateOf } from '@saku/core';
 import { join } from 'node:path';
-import { activeSymbols, createDb, openRechecks } from '@saku/db';
+import { activeSymbols, createDb, latestRecheckRun, openRechecks } from '@saku/db';
 import { backupDatabase, backupDir, localDay, pruneBackups } from '@saku/db/backup';
 import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
@@ -38,6 +38,7 @@ import { HttpError, PoliteHttp } from '../http';
 import { lock, readStamp, writeStamp } from '../jobs/lock';
 import { jobLogger } from '../jobs/log';
 import { probe } from '../jobs/probe';
+import { dailyAction } from '../jobs/recheck';
 import { runJob } from '../jobs/run';
 import { GATE, type SpikeReport, spikeFrom, spikeReport, verdict } from '../jobs/spike';
 import { dailyAfterOf, dailyTarget } from '../jobs/target';
@@ -187,7 +188,23 @@ if (job === 'daily' && !force && (readStamp('daily') ?? '') >= target) {
   if ((readStamp('heartbeat') ?? '') < target && (await heartbeat()))
     writeStamp('heartbeat', target);
   const open = await openRechecks(db);
-  if (open.length === 0) {
+  const next = dailyAction({
+    stamped: true,
+    force,
+    open,
+    now,
+    lastRecheck: await latestRecheckRun(db),
+  });
+  if (next.action === 'exit') {
+    // Stuck: the latest re-check run failed for these versions after their deadlines; its
+    // job-failure alert stands, and another full run every hour would only repeat it.
+    if (next.why === 'stuck') {
+      log.warn(
+        `Red re-checks past their deadline cannot close (see the last re-check run's error): ` +
+          `${open.map((r) => `${r.date} ${r.versionId}`).join(', ')}; not run again until fixed ` +
+          '(then pnpm daily --force)',
+      );
+    }
     held.release();
     process.exit(0);
   }

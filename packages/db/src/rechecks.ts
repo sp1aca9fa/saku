@@ -6,7 +6,7 @@
 import type { Json } from '@saku/core';
 import { and, asc, eq, isNull } from 'drizzle-orm';
 import type { Db, Tx } from './client';
-import { type RecheckOutcome, redRechecks } from './schema';
+import { type RecheckOutcome, forwardAnnotations, redRechecks } from './schema';
 
 export type Recheck = typeof redRechecks.$inferSelect;
 
@@ -103,16 +103,37 @@ export async function closeRecheck(
   if (done.length === 0) throw new Error(`Re-check ${id} is not open; its final is not changed.`);
 }
 
-/** Records when the provisional or the final message reached its channels (once). */
+/**
+ * Records when the provisional or the final message reached its channels (once; returns whether
+ * this call recorded it). The final's sending time also becomes a `red_recheck_sent` annotation on
+ * the day's entry (requirements 04: the record keeps the final instruction with the time it was
+ * sent; the entry's hashed `finalDecidedAt` is when it was decided), in the same transaction, so a
+ * sending time is annotated exactly once.
+ */
 export async function markRecheckSent(
   db: Db,
   id: number,
   which: 'provisional' | 'final',
   at: string,
-): Promise<void> {
+  runId: string | null = null,
+): Promise<boolean> {
   const column = which === 'provisional' ? redRechecks.provisionalSentAt : redRechecks.finalSentAt;
-  await db
-    .update(redRechecks)
-    .set(which === 'provisional' ? { provisionalSentAt: at } : { finalSentAt: at })
-    .where(and(eq(redRechecks.id, id), isNull(column)));
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(redRechecks)
+      .set(which === 'provisional' ? { provisionalSentAt: at } : { finalSentAt: at })
+      .where(and(eq(redRechecks.id, id), isNull(column)))
+      .returning();
+    if (!row) return false;
+    if (which === 'final') {
+      await tx.insert(forwardAnnotations).values({
+        versionId: row.versionId,
+        date: row.date,
+        kind: 'red_recheck_sent',
+        detail: { sentAt: at, outcome: row.outcome, finalDecidedAt: row.finalAt },
+        runId,
+      });
+    }
+    return true;
+  });
 }

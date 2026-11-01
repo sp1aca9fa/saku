@@ -452,6 +452,7 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
     const decision = await decide(strategy);
     const outcome = regrade({
       red: decision.safeStateApplied,
+      start: at.getTime(),
       clock: at.getTime(),
       deadline: at.getTime(),
     });

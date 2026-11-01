@@ -58,11 +58,16 @@ export interface ForwardOptions {
   sessions: Sessions;
   to: TradingDate;
   /**
-   * The run's clock (requirements 04 "Red re-check before execution"): compared with a red day's
-   * re-check deadline and recorded as the time a re-checked day's final instruction was sent.
-   * Default: the system clock.
+   * The forward step's clock (requirements 04 "Red re-check before execution"): whether a red
+   * day's grading is past its re-check deadline (no look-ahead), and the time a re-checked day's
+   * final instruction is decided (`finalDecidedAt`). Default: the system clock.
    */
   now?: Date;
+  /**
+   * The run's start, the hourly timer's tick: whether this run is the last check before a
+   * deadline (the next tick comes after it). Default: `now`.
+   */
+  start?: Date;
 }
 
 export interface ForwardSummary {
@@ -165,9 +170,11 @@ export function readKeptDecision(value: unknown): RecheckDecision | null {
  *   `not_rechecked` (its alert says so).
  * An open re-check is graded again by every run: cleared, the normal decision; still red at the
  * last check before the deadline, the safe state; past the deadline, the safe state as the
- * provisional message gave it. The entry then carries `signaledAt` (the run's clock: the final
- * instruction is sent by the same run right after) in its hashed text, and the first red grading
- * is an annotation (`red_recheck`), never an edit; both commit together with the closed re-check.
+ * provisional message gave it. The entry then carries `finalDecidedAt` (the forward step's clock:
+ * when the final instruction was decided; the same run sends it right after, and the time it was
+ * sent is a `red_recheck_sent` annotation, `sendRecheckAlerts`) in its hashed text, and the first
+ * red grading is an annotation (`red_recheck`), never an edit; both commit together with the
+ * closed re-check.
  */
 export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary> {
   const summary: ForwardSummary = {
@@ -186,6 +193,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
   const cashRate = await cashRateReader(db);
   const clock = o.now ?? new Date();
   const clockIso = clock.toISOString();
+  const startMs = (o.start ?? clock).getTime();
   // The deadline's setting: a stored value that does not parse opens no re-check (the safe
   // state at once, as before C16), and the run names it.
   const minutes = await recheckMinutes(db);
@@ -250,6 +258,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
       if (pending && date === pending.date) {
         const outcome = regrade({
           red: decision.safeStateApplied,
+          start: startMs,
           clock: clock.getTime(),
           deadline: Date.parse(pending.deadline),
         });
@@ -282,7 +291,13 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
         const deadline = deadlineOf(date);
         if (deadline !== undefined) {
           const provisional = keptDecision(decision);
-          if (firstGrading({ clock: clock.getTime(), deadline: Date.parse(deadline) }) === 'open') {
+          if (
+            firstGrading({
+              start: startMs,
+              clock: clock.getTime(),
+              deadline: Date.parse(deadline),
+            }) === 'open'
+          ) {
             await insertRecheck(db, {
               versionId: version.id,
               date,
@@ -316,8 +331,9 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
           reasons: decision.reasons,
           ties: decision.ties,
           execution: strategy.execution,
-          // What was finally signaled after a re-check, with when (C16; in the hashed text).
-          ...(closes && { signaledAt: clockIso }),
+          // What was finally signaled after a re-check, with when it was decided (C16; in the
+          // hashed text; the time it was sent is the `red_recheck_sent` annotation).
+          ...(closes && { finalDecidedAt: clockIso }),
         },
       };
       // The entry and what records it elsewhere commit together (or neither does).
@@ -336,7 +352,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
               reasons: row.reasons,
               deadline: row.deadline,
               outcome,
-              signaledAt: clockIso,
+              finalDecidedAt: clockIso,
             },
             runId: o.runId,
           });

@@ -86,9 +86,17 @@ install's time zone.
   yellow) and the owner gets one final message with the normal instruction. Still red at the last
   check before the deadline (the check at :20 within the hour before it): the safe state is
   recorded and the final message says it stands. Exactly one final message per strategy and day.
-- The entry stores what was finally signaled with the time the run sent it (`signaledAt` in the
-  hashed text); the first red grading (time, reasons, deadline) is a `red_recheck` annotation.
-  Corrections after the deadline are annotations, as before.
+- The entry stores what was finally signaled with the time it was decided (`finalDecidedAt` in
+  the hashed text); the time the final message was sent is a `red_recheck_sent` annotation, and
+  the first red grading (time, reasons, deadline) a `red_recheck` annotation. Corrections after
+  the deadline are annotations, as before. `pnpm strategy list` shows an open re-check on the
+  version's line (`<date> red, re-check open until <deadline>`).
+- Whether a run is the last check before the deadline is decided by when it started (the timer's
+  tick at :20), not by how long its steps took. A message sent after the open says the instruction
+  applied at that open.
+- A re-check that cannot close (the latest re-check run after its deadline failed for that
+  strategy, e.g. its definition no longer parses) is not run again every hour: that run's
+  job-failure alert stands; fix the cause, then `pnpm daily --force`.
 - The machine was off at the deadline: the next run records the safe state as the provisional
   message gave it (nothing known after the deadline is used) and the final message says it is late.
   A first grading with no check left before the deadline (a late catch-up) records the safe state

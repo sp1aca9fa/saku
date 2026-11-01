@@ -35,6 +35,7 @@ import {
   createDb,
   deliveryTargets,
   forwardRecord,
+  openRechecks,
   getSetting,
   getUserByUsername,
   journalOf,
@@ -47,6 +48,7 @@ import { createInterface } from 'node:readline/promises';
 import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA } from '../jobs/anchor';
 import { chainLines, chainProblems, verifyChains } from '../jobs/chain-verify';
+import { openRecheckNote, recheckTimeZone } from '../jobs/recheck';
 import {
   type CommandOutput,
   previewRegistration,
@@ -142,12 +144,16 @@ if (tool === 'strategy' && command === 'check') {
   for (const line of strategySummary(s).slice(1)) console.log(`  ${line}`);
   finish(await registerStrategy(db, { strategy: s, ownerId, ...(await registrationInput()) }));
 } else if (tool === 'strategy' && command === 'list') {
+  const timeZone = await recheckTimeZone(db);
   for (const v of await allVersions(db)) {
     const record = await forwardRecord(db, v.id);
     const last = record.at(-1);
+    // A day red at its first grading is not recorded until its final (requirements 04).
+    const open = (await openRechecks(db, v.id)).map((r) => `; ${openRecheckNote(r, timeZone)}`);
     console.log(
       `${v.id}  ${v.name}  ${v.ownerId ? 'user' : 'library'}  registered ${v.registeredAt}  ` +
-        `${record.length} days${last ? `, last ${last.date}: ${last.allocation} (${last.dataStatus})` : ''}`,
+        `${record.length} days${last ? `, last ${last.date}: ${last.allocation} (${last.dataStatus})` : ''}` +
+        open.join(''),
     );
   }
 } else if (tool === 'strategy' && command === 'show') {

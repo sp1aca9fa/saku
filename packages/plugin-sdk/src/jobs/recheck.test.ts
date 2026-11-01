@@ -2,7 +2,7 @@
 // re-check"; decisions log 2026-11-01, C16; spec 2026-11-01 red-recheck): the deadline, the
 // grading rules, and the forward step and alerts on a synthetic database (no network).
 import type { RawBar } from '@saku/core';
-import { Sessions } from '@saku/data';
+import { Sessions, TOLERANCE } from '@saku/data';
 import {
   addChannel,
   annotationsOf,
@@ -27,7 +27,9 @@ import { sendRecheckAlerts, sendStrategyAlerts } from './alerts';
 import { forward } from './forward';
 import {
   RECHECK_PERIOD_MINUTES,
+  dailyAction,
   firstGrading,
+  openRecheckNote,
   recheckDeadline,
   regrade,
   shownDeadline,
@@ -86,25 +88,94 @@ describe('the re-check deadline', () => {
 
 describe('the grading rules', () => {
   const deadline = Date.parse('2026-01-12T13:30:00.000Z');
-  it('opens a re-check only when a later hourly check still comes before the deadline', () => {
+  const at = (minutes: number) => deadline + minutes * MIN;
+  it('opens a re-check only when the run’s next hourly check still comes before the deadline', () => {
     expect(RECHECK_PERIOD_MINUTES).toBe(60);
-    expect(firstGrading({ clock: deadline - 60 * MIN, deadline })).toBe('open');
-    expect(firstGrading({ clock: deadline - 59 * MIN, deadline })).toBe('not_rechecked');
-    expect(firstGrading({ clock: deadline + MIN, deadline })).toBe('not_rechecked');
+    expect(firstGrading({ start: at(-60), clock: at(-50), deadline })).toBe('open');
+    expect(firstGrading({ start: at(-59), clock: at(-59), deadline })).toBe('not_rechecked');
+    expect(firstGrading({ start: at(1), clock: at(1), deadline })).toBe('not_rechecked');
+    // A step that ends past the deadline opens nothing, whenever the run started.
+    expect(firstGrading({ start: at(-120), clock: at(1), deadline })).toBe('not_rechecked');
   });
 
-  it('re-grades: cleared, pending, the safe state at the last check, late past the deadline', () => {
-    const at = (minutes: number, red: boolean) =>
-      regrade({ red, clock: deadline + minutes * MIN, deadline });
-    expect(at(-70, false)).toBe('cleared');
-    expect(at(0, false)).toBe('cleared'); // at the deadline: data known by then counts
-    expect(at(-70, true)).toBe('pending');
-    expect(at(-60, true)).toBe('pending');
-    expect(at(-59, true)).toBe('safe_state'); // the next check would come after the deadline
-    expect(at(0, true)).toBe('safe_state');
-    // Past the deadline: late whatever the day grades now (no look-ahead).
-    expect(at(1, true)).toBe('late');
-    expect(at(1, false)).toBe('late');
+  it('the last check is decided by the run’s start; past the deadline by the step’s clock', () => {
+    const grade = (red: boolean, start: number, clock = start) =>
+      regrade({ red, start: at(start), clock: at(clock), deadline });
+    expect(grade(false, -70)).toBe('cleared');
+    expect(grade(false, 0)).toBe('cleared'); // at the deadline: data known by then counts
+    expect(grade(true, -70)).toBe('pending');
+    expect(grade(true, -60)).toBe('pending');
+    // 07:20 start, the step at 07:35: the 08:20 check still comes, so not final yet.
+    expect(grade(true, -70, -55)).toBe('pending');
+    expect(grade(true, -59)).toBe('safe_state'); // the next check would come after the deadline
+    expect(grade(true, 0)).toBe('safe_state');
+    // 08:20 start, the step at 08:31: the last check, not late.
+    expect(grade(true, -10, 1)).toBe('safe_state');
+    // A run started past the deadline: late whatever the day grades now (no look-ahead).
+    expect(grade(true, 1)).toBe('late');
+    expect(grade(false, 1)).toBe('late');
+    // Cleared only on a grading at or before the deadline.
+    expect(grade(false, -10, 1)).toBe('late');
+    // A run that took over an hour: past the deadline, not pending.
+    expect(grade(true, -70, 1)).toBe('late');
+  });
+
+  it('the hourly check: a daily run, a re-check run, or nothing', () => {
+    const open = [{ versionId: 'v1', deadline: '2026-01-12T13:30:00.000Z' }];
+    const now = new Date('2026-01-12T15:20:00Z');
+    const stuck = {
+      startedAt: '2026-01-12T14:20:00.000Z',
+      status: 'failed',
+      error: 'incomplete: forward; Trend (v1): definition does not parse: x',
+    };
+    expect(dailyAction({ stamped: false, force: false, open, now })).toEqual({ action: 'daily' });
+    expect(dailyAction({ stamped: true, force: true, open, now })).toEqual({ action: 'daily' });
+    expect(dailyAction({ stamped: true, force: false, open: [], now })).toEqual({
+      action: 'exit',
+      why: 'done',
+    });
+    // Open and before the deadline, or past it with no re-check run since: a re-check run.
+    const before = new Date('2026-01-12T12:20:00Z');
+    expect(
+      dailyAction({ stamped: true, force: false, open, now: before, lastRecheck: stuck }),
+    ).toEqual({ action: 'recheck' });
+    expect(dailyAction({ stamped: true, force: false, open, now })).toEqual({ action: 'recheck' });
+    // Past the deadline, the latest re-check run (after it) failed naming the version: nothing.
+    expect(dailyAction({ stamped: true, force: false, open, now, lastRecheck: stuck })).toEqual({
+      action: 'exit',
+      why: 'stuck',
+    });
+    // Not when that run started before the deadline, succeeded, or did not name every version.
+    for (const last of [
+      { ...stuck, startedAt: '2026-01-12T13:20:00.000Z' },
+      { ...stuck, status: 'success' },
+      { ...stuck, error: 'incomplete: alerts' },
+      { ...stuck, error: null },
+    ]) {
+      expect(dailyAction({ stamped: true, force: false, open, now, lastRecheck: last })).toEqual({
+        action: 'recheck',
+      });
+    }
+    const two = [...open, { versionId: 'v2', deadline: '2026-01-12T13:30:00.000Z' }];
+    expect(
+      dailyAction({ stamped: true, force: false, open: two, now, lastRecheck: stuck }),
+    ).toEqual({ action: 'recheck' });
+    // A deadline that is not an instant is never taken as passed.
+    expect(
+      dailyAction({
+        stamped: true,
+        force: false,
+        open: [{ versionId: 'v1', deadline: 'x' }],
+        now,
+        lastRecheck: stuck,
+      }),
+    ).toEqual({ action: 'recheck' });
+  });
+
+  it('an open re-check on the strategy list', () => {
+    expect(
+      openRecheckNote({ date: '2026-01-09', deadline: '2026-01-12T13:30:00.000Z' }, 'Asia/Tokyo'),
+    ).toBe('2026-01-09 red, re-check open until 2026-01-12 22:30 (Asia/Tokyo)');
   });
 });
 
@@ -205,20 +276,24 @@ async function setup(o: { days?: number } = {}) {
   await check();
   await setSetting(db, 'forward_records_from', '2026-01-05');
   const { notifier, sent } = fakeNotifier();
-  const alerting = (date = RED) => ({
+  const alerting = (date = RED, clock?: Date) => ({
     date,
     sessions,
     notifiers: [notifier],
     authSecret: SECRET,
     context: () => ({ http: null as never, now: new Date(), log: quiet }),
     log: quiet,
+    ...(clock && { clock }),
   });
-  /** A run's forward step and alerts, as the daily run does them, at `now`. */
-  const run = async (now: Date, to = RED) => {
+  /**
+   * A run's forward step and alerts, as the daily run does them: started at `start` (the timer's
+   * tick), the forward step and the alerts at `now`.
+   */
+  const run = async (now: Date, to = RED, start = now) => {
     const runId = await check();
-    const f = await forward(db, { runId, sessions, to, now });
-    const r = await sendRecheckAlerts(db, alerting(to));
-    const s = await sendStrategyAlerts(db, alerting(to));
+    const f = await forward(db, { runId, sessions, to, now, start });
+    const r = await sendRecheckAlerts(db, { ...alerting(to, now), runId });
+    const s = await sendStrategyAlerts(db, alerting(to, now));
     return { f, runId, failed: [...r.failed, ...s.failed] };
   };
   /** The secondary corrected: AAA2 agrees again on the red day. */
@@ -280,7 +355,7 @@ describe('the forward step and the alerts', () => {
       safeStateApplied: false,
     });
     // What was finally signaled, with when, in the hashed text; the chain verifies.
-    expect(payload(record[0]!).signaledAt).toBe(at.toISOString());
+    expect(payload(record[0]!).finalDecidedAt).toBe(at.toISOString());
     expect(await verifyChain(db, version)).toEqual([]);
     const [note] = await annotationsOf(db, version.id, 'red_recheck');
     expect(note).toMatchObject({
@@ -290,7 +365,7 @@ describe('the forward step and the alerts', () => {
         reasons: ['AAA2:B.close_match@s'],
         deadline: DEADLINE,
         outcome: 'cleared',
-        signaledAt: at.toISOString(),
+        finalDecidedAt: at.toISOString(),
       },
     });
     expect(await recheckOf(db, version.id, RED)).toMatchObject({
@@ -305,6 +380,23 @@ describe('the forward step and the alerts', () => {
     expect(final).toContain(`First recorded allocation: Risk on (signal of ${RED}).`);
     expect(final).toContain('Target: AAA2 100%.');
     expect(final).toContain('Data health: green.');
+    expect(final).toContain('Trade at the US open on 2026-01-12.');
+    // The time it was sent: an annotation (the hashed field is when it was decided).
+    const sentNotes = await annotationsOf(db, version.id, 'red_recheck_sent');
+    expect(sentNotes).toEqual([
+      expect.objectContaining({
+        date: RED,
+        runId: later.runId,
+        detail: {
+          sentAt: expect.any(String),
+          outcome: 'cleared',
+          finalDecidedAt: at.toISOString(),
+        },
+      }),
+    ]);
+    expect((await recheckOf(db, version.id, RED))!.finalSentAt).toBe(
+      (sentNotes[0]!.detail as { sentAt: string }).sentAt,
+    );
     // Later runs: nothing more (idempotent), nothing appended again.
     const again = await run(new Date('2026-01-12T13:20:00Z'));
     expect(again.f.appended).toBe(0);
@@ -319,10 +411,14 @@ describe('the forward step and the alerts', () => {
       const r = await run(new Date(at));
       expect(r.f).toMatchObject({ appended: 0, rechecks: [{ date: RED, opened: false }] });
     }
+    // Started 07:20, the forward step at 07:35: the 08:20 check still comes, not final yet.
+    const slow = await run(new Date('2026-01-12T12:35:00Z'), RED, new Date('2026-01-12T12:20:00Z'));
+    expect(slow.f).toMatchObject({ appended: 0, rechecks: [{ date: RED, opened: false }] });
     expect(sent).toHaveLength(1);
-    // Monday 08:20 New York: the last check before the deadline.
-    const at = new Date('2026-01-12T13:20:00Z');
-    const last = await run(at);
+    // Monday 08:20 New York: the last check before the deadline (its forward step at 08:31, a
+    // minute past the deadline: still the last check, the safe state, not late).
+    const at = new Date('2026-01-12T13:31:00Z');
+    const last = await run(at, RED, new Date('2026-01-12T13:20:00Z'));
     expect(last.f.finals).toEqual([
       { version: `Trend (${version.id})`, date: RED, outcome: 'safe_state' },
     ]);
@@ -334,7 +430,7 @@ describe('the forward step and the alerts', () => {
       dataStatus: 'red',
       holdings: [{ ticker: 'AAA', weight: 100 }],
     });
-    expect(payload(entry!).signaledAt).toBe(at.toISOString());
+    expect(payload(entry!).finalDecidedAt).toBe(at.toISOString());
     expect(await verifyChain(db, version)).toEqual([]);
     expect(sent).toHaveLength(2);
     const final = sent[1]!.text.split('\n');
@@ -384,9 +480,9 @@ describe('the forward step and the alerts', () => {
     ]);
     expect(payload(record[0]!)).toMatchObject({
       reasons: ['AAA2:B.close_match@s'],
-      signaledAt: at.toISOString(),
+      finalDecidedAt: at.toISOString(),
     });
-    expect(payload(record[1]!).signaledAt).toBeUndefined();
+    expect(payload(record[1]!).finalDecidedAt).toBeUndefined();
     expect(await verifyChain(db, version)).toEqual([]);
     // The late final says so; then Monday's own alert, against the final.
     const titles = sent.map((m) => m.text.split('\n')[0]);
@@ -399,7 +495,42 @@ describe('the forward step and the alerts', () => {
       'Saku could not re-check the data before the deadline (2026-01-12 08:30 ' +
         '(America/New_York)), so the safe state stands, as the provisional message said.',
     );
+    // Sent after Monday's open: it applied then, never "trade at" a time already past.
+    expect(sent[1]!.text).toContain(
+      'This applied at the US open on 2026-01-12, which has already passed.',
+    );
+    expect(sent[1]!.text).not.toContain('Trade at the US open on 2026-01-12.');
     expect(sent[2]!.text).toContain(`Safe state → Risk on (signal of ${D[5]}).`);
+    expect(sent[2]!.text).toContain(`Trade at the US open on ${sessions.after(D[5]!)}.`);
+  });
+
+  it('clears to yellow: the normal decision under the yellow rules, the warning in the final', async () => {
+    const { db, version, run, store, sent } = await setup();
+    await run(FIRST);
+    // The secondary corrected to within twice the close tolerance: yellow, not red.
+    await store(
+      'AAA2',
+      's',
+      bars(AAA2.slice(0, 5).map((c, i) => (i === 4 ? c * (1 + 1.5 * TOLERANCE.close) : c))),
+    );
+    const at = new Date('2026-01-12T12:20:00Z');
+    const r = await run(at);
+    expect(r.f.finals).toEqual([
+      { version: `Trend (${version.id})`, date: RED, outcome: 'cleared' },
+    ]);
+    const [entry] = await forwardRecord(db, version.id);
+    expect(entry).toMatchObject({
+      date: RED,
+      allocation: 'Risk on',
+      dataStatus: 'yellow',
+      safeStateApplied: false,
+    });
+    expect(payload(entry!).reasons).toEqual(['AAA2:B.close_match@s']);
+    expect(sent).toHaveLength(2);
+    const final = sent[1]!.text.split('\n');
+    expect(final[0]).toBe(`Trend: data cleared for ${RED}`);
+    expect(final).toContain('Data health: yellow (computed with a warning).');
+    expect(final.at(-1)).toBe('Details: AAA2: closes differ between sources (s).');
   });
 
   it('the next day waits while the day before is open (the chain order)', async () => {
@@ -421,7 +552,7 @@ describe('the forward step and the alerts', () => {
     const [entry] = await forwardRecord(db, version.id);
     expect(entry).toMatchObject({ date: RED, safeStateApplied: true });
     // Recorded as before C16 (no sent time in the hashed text).
-    expect(payload(entry!).signaledAt).toBeUndefined();
+    expect(payload(entry!).finalDecidedAt).toBeUndefined();
     expect(await recheckOf(db, version.id, RED)).toMatchObject({ outcome: 'not_rechecked' });
     expect(await openRechecks(db)).toEqual([]);
     expect(sent).toHaveLength(1);
@@ -431,6 +562,19 @@ describe('the forward step and the alerts', () => {
       'This day was graded too close to its re-check deadline (2026-01-12 08:30 ' +
         '(America/New_York)) or after it, so it is not re-checked: this is the final instruction.',
     );
+  });
+
+  it('a first grading after the next open: the safe state, said to have applied at that open', async () => {
+    const { db, version, run, sent } = await setup();
+    // Monday 10:00 New York, past the deadline and the open (a catch-up run).
+    const r = await run(new Date('2026-01-12T15:00:00Z'));
+    expect(r.failed).toEqual([]);
+    expect(await recheckOf(db, version.id, RED)).toMatchObject({ outcome: 'not_rechecked' });
+    expect(sent).toHaveLength(1);
+    const lines = sent[0]!.text.split('\n');
+    expect(lines[0]).toBe(`Trend: safe state for ${RED}`);
+    expect(lines).toContain('This applied at the US open on 2026-01-12, which has already passed.');
+    expect(lines).not.toContain('Trade at the US open on 2026-01-12.');
   });
 
   it('an undelivered message is tried again at the next run, never sent twice', async () => {

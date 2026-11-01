@@ -13,6 +13,10 @@
       "next_close": "Trade at the US close on {date}.",
       "same_close": "Signal for the close of {date} (not achievable in practice)."
     },
+    "timingPassed": {
+      "next_open": "This applied at the US open on {date}, which has already passed.",
+      "next_close": "This applied at the US close on {date}, which has already passed."
+    },
     "stateChange": {
       "title": "{strategy}: new allocation",
       "body": "{from} → {to} (signal of {date}).",
@@ -192,5 +196,94 @@
       "unknown": "Data health: unknown (the run did not finish)."
     },
     "more": "...and {count} more"
+  },
+  "indicators": {
+    "price": {
+      "name": "Price",
+      "tooltip": "The fund's value at the day's close: the plain price (adjusted for splits) or, with total return, a level that also counts reinvested dividends.",
+      "why": "Most rules compare today's value with something slower, such as its own average.",
+      "example": "Price above its 200-day average: the fund is in an uptrend."
+    },
+    "sma": {
+      "name": "Simple moving average (SMA)",
+      "tooltip": "The plain average of the last N closing values. It needs N days of data before it has a value (warm-up).",
+      "why": "It smooths out daily noise, so a rule reacts to the trend rather than to one day.",
+      "example": "SMA 200 = the average of the last 200 closes."
+    },
+    "ema": {
+      "name": "Exponential moving average (EMA)",
+      "tooltip": "An average of past closing values that gives recent days more weight. It starts as the plain average of the first N days, then each day moves 2 / (N + 1) of the way toward the new value.",
+      "why": "It reacts to a turn sooner than a plain average of the same length, at the cost of more false alarms.",
+      "example": "EMA 20: today's close counts about 10%, yesterday's EMA the other 90%.",
+      "history": "It depends on every value since the first stored day, so a longer stored history can change it slightly."
+    },
+    "return": {
+      "name": "Return over N days",
+      "tooltip": "How much the value changed over the last N trading days, in percent: (today / N days ago - 1) x 100.",
+      "why": "Momentum: funds that rose over recent months have tended to keep rising for a while, though not always.",
+      "example": "Return 126 above 0%: the fund is higher than about six months ago."
+    },
+    "volatility": {
+      "name": "Volatility",
+      "tooltip": "How much the value swings, as a yearly percentage (daily swings x the square root of 252 trading days). The method decides which prices of each day are used.",
+      "why": "Calm markets have tended to reward holding risk; very volatile ones are where large losses happen.",
+      "example": "Volatility 20 below 25%: the last 20 days were calm."
+    },
+    "volatilityClose": {
+      "name": "Close-to-close volatility",
+      "tooltip": "The spread (sample standard deviation) of the last N daily returns from close to close, per year, in percent. The default method.",
+      "why": "The simplest and most widely used measure; it needs only closing prices.",
+      "example": "Daily moves of about 1% give roughly 16% a year."
+    },
+    "volatilityParkinson": {
+      "name": "Parkinson volatility",
+      "tooltip": "Volatility from each day's high and low instead of the closes, per year, in percent. It needs every day's high and low; a day without them gives no value.",
+      "why": "The day's range holds more information than one close, so it settles faster with fewer days. It does not see overnight gaps.",
+      "example": "A day trading between 99 and 101 adds about a 2% range."
+    },
+    "volatilityGarmanKlass": {
+      "name": "Garman-Klass volatility",
+      "tooltip": "Volatility from each day's open, high, low and close, per year, in percent. It needs all four prices every day; a day without them gives no value.",
+      "why": "It uses more of each day's prices than the close or the range alone, so it is steadier. It does not see overnight gaps.",
+      "example": "Used like close-to-close volatility, for example below 25% as a calm signal."
+    },
+    "volatilityYangZhang": {
+      "name": "Yang-Zhang volatility",
+      "tooltip": "Volatility that combines overnight gaps (previous close to open), the open-to-close move and the day's range, per year, in percent. It needs every day's open, high and low.",
+      "why": "It counts overnight gaps that the range methods miss, which matters on news days.",
+      "example": "A fund that jumps at the open after news shows higher Yang-Zhang than Parkinson volatility."
+    },
+    "drawdown": {
+      "name": "Drawdown",
+      "tooltip": "How far today's value is below its highest value, in percent (0% at a new high). The high is over the last N days, or since the first stored day when no length is set (all-time high).",
+      "why": "It shows how deep the current fall is; many rules step aside after a deep fall or wait for a recovery.",
+      "example": "Drawdown -10%: the fund is 10% below its high.",
+      "history": "Without a length it depends on every value since the first stored day."
+    },
+    "high": {
+      "name": "N-day high",
+      "tooltip": "The highest closing value of the last N days, today included (closes, not the day's intraday highs).",
+      "why": "A close at a new N-day high is a classic breakout signal.",
+      "example": "Price at its 50-day high: no close in the last 50 days was higher."
+    },
+    "low": {
+      "name": "N-day low",
+      "tooltip": "The lowest closing value of the last N days, today included (closes, not the day's intraday lows).",
+      "why": "A close at a new N-day low is a classic breakdown signal, often used to step aside.",
+      "example": "Price at its 20-day low: no close in the last 20 days was lower."
+    },
+    "threshold": {
+      "name": "Fixed level",
+      "tooltip": "A fixed number to compare with, for example a volatility of 25 (percent). Plain prices, averages, highs and lows cannot be compared with a fixed level, because a split would change what it means.",
+      "why": "Percentages such as return, volatility and drawdown mean the same at any price, so a fixed level works for them.",
+      "example": "Drawdown below -20: the fund is more than 20% below its high."
+    }
+  },
+  "glossary": {
+    "warmUp": "Warm-up: the days an indicator needs before it has its first value. A 200-day average has none until 200 days of data exist; no signal is given before then.",
+    "totalReturn": "Total return: the value of the fund with its dividends reinvested on the ex-dividend date (the first day the price no longer includes them), not only the price.",
+    "annualized": "Per year (annualized): daily volatility scaled to a year with the square root of 252 trading days, so periods of any length compare.",
+    "intradayPrices": "Open, high and low: the day's first trade, highest and lowest price. Some volatility methods need them; a day without them gives no value, never an estimate.",
+    "allTimeHigh": "All-time high: the highest value since the first day Saku stores for the fund, not necessarily the fund's first trading day."
   }
 }

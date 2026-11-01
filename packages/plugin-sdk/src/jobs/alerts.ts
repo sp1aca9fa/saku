@@ -10,7 +10,7 @@
 // Their health line then states the data-health grade alone, with nothing about signals or
 // strategies, since none are live. Every other alert (strategies, data health, revisions,
 // integrity, parity, recompute, stand-in corrections) waits for the gate.
-import { CASH_USD, SAFE_STATE, type Strategy, type TradingDate } from '@saku/core';
+import { CASH_USD, SAFE_STATE, type Strategy, type TradingDate, zonedInstant } from '@saku/core';
 import { type Translate, hasText, translator } from '@saku/content';
 import type { Sessions } from '@saku/data';
 import {
@@ -37,8 +37,8 @@ import {
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { Logger, Notifier, PluginContext } from '../types';
 import { type DiskUsage, formatBytes } from './disk';
-import { instantOf, parseVersion, readKeptDecision } from './forward';
-import { recheckTimeZone, shownDeadline } from './recheck';
+import { instantOf, parseVersion, readKeptDecision, recordClose } from './forward';
+import { REGULAR_OPEN, recheckTimeZone, shownDeadline } from './recheck';
 
 export type AlertType =
   | 'state_change'
@@ -116,6 +116,8 @@ export function strategyAlert(
     entry: DayEntry;
     nextSession: TradingDate;
     lastTold?: string;
+    /** The execution point (`executionPassed`) was already past when the alert was made. */
+    passed?: boolean;
     /**
      * The red day was graded with no hourly check left before its re-check deadline (requirements
      * 04 "Red re-check before execution"): the deadline as shown, said in the safe-state alert.
@@ -134,9 +136,7 @@ export function strategyAlert(
         `${h.ticker === CASH_USD ? t('alerts.cash', { currency: 'USD' }) : h.ticker} ${percent.format(h.weight / 100)}`,
     )
     .join(', ');
-  const timing = t(`alerts.timing.${o.execution}`, {
-    date: o.execution === 'same_close' ? e.date : o.nextSession,
-  });
+  const timing = timingLine(t, o.execution, e.date, o.nextSession, o.passed === true);
   const health = { keep: t(`alerts.health.${e.dataStatus}`) };
   const reasons: Part[] = e.reasons.length
     ? [
@@ -210,6 +210,11 @@ export interface AlertOptions {
    * their room in the channel's longest message first, so the alert keeps its end as it would.
    */
   drill?: boolean;
+  /**
+   * The run's clock: an alert made after its execution point (the next session's open for
+   * `next_open`) says the instruction applied then, never "trade at" a time already past.
+   */
+  clock?: Date;
   /** Told of each delivered message: the channel, the alert type and the message's first line. */
   onDelivered?: (d: { channel: string; type: AlertType; title: string }) => void;
 }
@@ -300,6 +305,7 @@ export async function sendDayAlert(
         execution: strategy.execution,
         entry: day,
         nextSession: o.sessions.after(day.date),
+        passed: executionPassed(o, strategy.execution, day.date),
         // A drill reads nothing told before (the safe-state alert does not depend on it).
         lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
         ...(d.notRechecked !== undefined && { notRechecked: d.notRechecked }),
@@ -309,6 +315,37 @@ export async function sendDayAlert(
     if (alert) await deliver(db, o, channel, alert, summary, t);
   }
   return summary;
+}
+
+/**
+ * The day's instruction timing: when to trade (`alerts.timing`), or, once that point has passed
+ * (`passed`), that it applied then (`alerts.timingPassed`). `same_close` is a parity label only.
+ */
+function timingLine(
+  t: Translate,
+  execution: Strategy['execution'],
+  date: TradingDate,
+  nextSession: TradingDate,
+  passed: boolean,
+): string {
+  if (execution === 'same_close') return t('alerts.timing.same_close', { date });
+  return t(`alerts.${passed ? 'timingPassed' : 'timing'}.${execution}`, { date: nextSession });
+}
+
+/**
+ * Whether the run's clock (`o.clock`; none: not known, the alert says when to trade) is past the
+ * day's execution point: the next session's regular open (09:30 New York) for `next_open`, its
+ * close as the calendar gives it (an early close at its time) for `next_close`.
+ */
+export function executionPassed(
+  o: { clock?: Date; sessions: Sessions },
+  execution: Strategy['execution'],
+  date: TradingDate,
+): boolean {
+  if (!o.clock || execution === 'same_close') return false;
+  const next = o.sessions.after(date);
+  const time = execution === 'next_open' ? REGULAR_OPEN : recordClose(next, o.sessions).time;
+  return o.clock.getTime() > Date.parse(zonedInstant(next, time, 'America/New_York'));
 }
 
 /** A forward entry as the alerts read it. */
@@ -354,6 +391,8 @@ export function recheckAlert(
     deadline: string;
     nextSession: TradingDate;
     lastTold?: string;
+    /** The execution point (`executionPassed`) was already past when the alert was made. */
+    passed?: boolean;
   },
   max = Infinity,
 ): Alert {
@@ -368,9 +407,7 @@ export function recheckAlert(
         `${h.ticker === CASH_USD ? t('alerts.cash', { currency: 'USD' }) : h.ticker} ${percent.format(h.weight / 100)}`,
     )
     .join(', ');
-  const timing = t(`alerts.timing.${o.execution}`, {
-    date: o.execution === 'same_close' ? e.date : o.nextSession,
-  });
+  const timing = timingLine(t, o.execution, e.date, o.nextSession, o.passed === true);
   const keep = (line: string) => ({ keep: line });
   const values = { strategy: o.name, date: e.date, deadline: o.deadline };
   const reasons: Part[] = e.reasons.length
@@ -462,6 +499,7 @@ export async function sendRecheckMessage(
         message: d.message,
         deadline: shownDeadline(d.deadline, d.timeZone),
         nextSession: o.sessions.after(d.message.day.date),
+        passed: executionPassed(o, strategy.execution, d.message.day.date),
         lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
       },
       roomOn(o, channel, t),
@@ -477,14 +515,19 @@ export async function sendRecheckMessage(
  * provisional of each open re-check, the final of each closed one (`not_rechecked` has none: its
  * safe-state alert is the day's alert, `sendStrategyAlerts`). Driven by `red_rechecks` and
  * `alerts_sent`, so a failed delivery is tried again at the next run; a re-check is marked as told
- * (`provisional_sent_at`, `final_sent_at`) once a pass delivered to every channel, and is not
+ * (`provisional_sent_at`, `final_sent_at`; the final's time also as a `red_recheck_sent`
+ * annotation on the entry) once a pass delivered to every channel, and is not
  * looked at again (a channel added later gets the next day's alert, as with day alerts). A
  * provisional not delivered before its re-check closed is not sent: the final supersedes it.
  * Nothing before the A1 gate (no forward records); never in a drill (the drill sends its own).
  */
 export async function sendRecheckAlerts(
   db: Db,
-  o: AlertOptions & { sessions: Sessions },
+  o: AlertOptions & {
+    sessions: Sessions;
+    /** The run that sends (named on the `red_recheck_sent` annotation). */
+    runId?: string;
+  },
 ): Promise<AlertSummary> {
   const summary: AlertSummary = { sent: 0, failed: [] };
   if (o.drill || !(await getSetting(db, 'forward_records_from'))) return summary;
@@ -532,7 +575,7 @@ export async function sendRecheckAlerts(
       summary,
     );
     if (summary.failed.length === before) {
-      await markRecheckSent(db, r.id, which, new Date().toISOString());
+      await markRecheckSent(db, r.id, which, new Date().toISOString(), o.runId ?? null);
     }
   }
   return summary;

@@ -1,5 +1,5 @@
 import type { JobType, SourceRole } from '@saku/core';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import type { Db } from './client';
 import { activityLog, jobRuns, sourceRoles } from './schema';
 
@@ -26,6 +26,19 @@ export async function startRun(
     })
     .returning({ id: jobRuns.id });
   return row!.id;
+}
+
+/** The latest red re-check run (requirements 04), if any: when it started, how it ended. */
+export async function latestRecheckRun(
+  db: Db,
+): Promise<{ startedAt: string; status: string; error: string | null } | undefined> {
+  const [row] = await db
+    .select({ startedAt: jobRuns.startedAt, status: jobRuns.status, error: jobRuns.error })
+    .from(jobRuns)
+    .where(eq(jobRuns.recheck, true))
+    .orderBy(desc(jobRuns.startedAt))
+    .limit(1);
+  return row;
 }
 
 export async function finishRun(

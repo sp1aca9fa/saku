@@ -631,7 +631,11 @@ describe('fault injection (layer F)', () => {
       expect(recheck).toBeDefined();
       expect(today).toMatchObject({ safeStateApplied: true, allocation: 'Safe state' });
       expect(alert).toMatch(new RegExp(`^Trend 2x: safe state for ${TARGET}`));
-      expect(alert).toContain('so the safe state stands');
+      // Still red at the last check before the deadline (not late): the `stands` final.
+      expect(alert).toContain(
+        `so the safe state stands. This is the final instruction for ${TARGET}.`,
+      );
+      expect(alert).toContain('The data was still not reliable at the last re-check before');
     });
   }
 
