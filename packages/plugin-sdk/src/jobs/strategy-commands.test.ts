@@ -9,7 +9,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { lock } from './lock';
-import { previewRegistration, recomputeRecords, registerStrategy } from './strategy-commands';
+import {
+  checkStrategy,
+  previewRegistration,
+  recomputeRecords,
+  registerStrategy,
+} from './strategy-commands';
 
 const sessions = new Sessions({
   id: 't',
@@ -202,6 +207,58 @@ describe('registerStrategy costs', () => {
     expect(ok.stdout).toContain(
       'Costs: slippageBps 1, feePct 0, fxSpreadPct 0 (not applied yet: backtests are in USD until the base-currency layer)',
     );
+  });
+});
+
+describe('checkStrategy (pnpm strategy check)', () => {
+  const N = '(not applied yet: backtests are in USD until the base-currency layer)';
+  const noCosts = async () => {
+    const db = await passed();
+    await db.delete(schema.appSettings).where(eq(schema.appSettings.key, 'broker_costs'));
+    return db;
+  };
+
+  it('prints the costs and valid; exit 1 when a cost is not known', async () => {
+    expect(await checkStrategy(await passed(), strategy())).toEqual({
+      exitCode: 0,
+      stdout: [
+        `Costs: slippageBps 5, feePct 0.1, fxSpreadPct 0.2 ${N} (from the install's broker_costs: slippageBps, feePct, fxSpreadPct)`,
+        'Test: valid; depends on AAA.',
+      ],
+      stderr: [],
+    });
+    const out = await checkStrategy(await noCosts(), strategy());
+    expect(out.exitCode).toBe(1);
+    expect(out.stdout).toEqual([]);
+    expect(out.stderr).toEqual([
+      expect.stringMatching(/^Costs not known: The strategy leaves out/),
+    ]);
+  });
+
+  it('with --registration lists every reason, the unknown costs among them, exit 1', async () => {
+    const db = await noCosts();
+    const out = await checkStrategy(db, strategy('same_close'), {
+      through: D[3],
+      sessions,
+      lockDir: lockDir(),
+    });
+    expect(out.exitCode).toBe(1);
+    expect(out.stdout).toEqual([]);
+    expect(out.stderr[0]).toMatch(
+      /^Would not register:\n- The strategy leaves out costs\.slippageBps.*\n- same_close trades at a close/,
+    );
+    // Ready: the costs line once, then valid, then ready.
+    const ok = await checkStrategy(await passed(), strategy(), {
+      through: D[3],
+      sessions,
+      lockDir: lockDir(),
+    });
+    expect(ok.exitCode).toBe(0);
+    expect(ok.stdout).toEqual([
+      expect.stringMatching(/^Costs: /),
+      'Test: valid; depends on AAA.',
+      'Ready to register.',
+    ]);
   });
 });
 

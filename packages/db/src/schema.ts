@@ -128,9 +128,10 @@ export const appSettings = sqliteTable('app_settings', {
 /**
  * The base currency's deposit rate as a dated series (requirements 05 `CASH_BASE`, 01 "Bank
  * deposits", 12): each entry applies from its `from_date` until the next one; read only through
- * `depositRateAsOf` (no look-ahead). Append-only (triggers in migration 0018): an entry is never
- * edited or removed, and each new one starts after every earlier one, so what a past date reads
- * never changes. `rate_pct` is decimal text (percent a year).
+ * `depositRateAsOf` (no look-ahead). Append-only (triggers in migrations 0018, 0020): an entry is
+ * never edited or removed; a new one starts after every earlier one or before the earliest (a
+ * backfill, where every reader saw unknown), never on or between existing dates. A wrong value is
+ * corrected by a row in `deposit_rate_revisions`. `rate_pct` is decimal text (percent a year).
  */
 export const depositRates = sqliteTable(
   'deposit_rates',
@@ -144,6 +145,29 @@ export const depositRates = sqliteTable(
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex('deposit_rates_from_uq').on(t.fromDate)],
+);
+
+/**
+ * Corrections of a deposit rate entry's rate (the revision log: stored data is never silently
+ * overwritten). Each row names the entry, the rate it replaces (the entry's, or the previous
+ * correction's: a trigger checks the chain), the new rate, why, who and when. Append-only
+ * (triggers in migration 0020). `depositRateAsOf` reads the latest correction known by its
+ * `knownBy`.
+ */
+export const depositRateRevisions = sqliteTable(
+  'deposit_rate_revisions',
+  {
+    id: serial(),
+    entryId: integer('entry_id')
+      .notNull()
+      .references(() => depositRates.id),
+    oldRatePct: text('old_rate_pct').notNull(),
+    newRatePct: text('new_rate_pct').notNull(),
+    reason: text('reason').notNull(),
+    actor: text('actor').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index('deposit_rate_revisions_entry_idx').on(t.entryId)],
 );
 
 export const userSettings = sqliteTable('user_settings', {
@@ -715,6 +739,13 @@ export const strategyVersions = sqliteTable(
     canonicalJson: text('canonical_json').notNull(),
     registeredAt: text('registered_at').notNull(),
     hash: text('hash').notNull(),
+    /**
+     * True when registration froze the effective costs into the strategy (C2 onward): an omitted
+     * cost is then a fault, never 0. False for versions registered before (the default for the
+     * rows already stored), whose omitted costs were charged as 0 when recorded (docs/indicators.md
+     * "Costs"). Not part of the hashed registration text.
+     */
+    costsResolved: integer('costs_resolved', { mode: 'boolean' }).notNull().default(false),
   },
   (t) => [index('strategy_versions_owner_idx').on(t.ownerId)],
 );

@@ -498,6 +498,48 @@ describe('whole shares', () => {
     expect(open.points[2]!.value).toEqual(usd(1166));
   });
 
+  it('held from the previous session without a bar there: refused, no pre-entry move credited', () => {
+    // 01-06 is a session (decided) where A has no bar: buying A there has no price, and A held
+    // into 01-07 from 01-06 has no starting bar (its 100 -> 150 since 01-05 is not the run's).
+    const cash = [{ ticker: 'CASH_USD', weight: 100 }];
+    const a = [{ ticker: 'A', weight: 100 }];
+    const at = (date: string, holdings: Holding[]): StrategyDay => ({
+      date,
+      signals: {},
+      allocation: holdings[0]!.ticker,
+      holdings,
+      ties: [],
+    });
+    const bars = {
+      A: [bar('2026-01-05', 100, { open: 100 }), bar('2026-01-07', 150, { open: 150 })],
+    };
+    // Bought at 01-06's close: decided there (same_close) or the day before (next_close).
+    for (const [execution, first] of [
+      ['same_close', cash],
+      ['next_close', a],
+    ] as const) {
+      expect(() =>
+        backtest({
+          strategy: { execution, costs: { slippageBps: 0, feePct: 0 } },
+          days: [at('2026-01-05', first), at('2026-01-06', a), at('2026-01-07', a)],
+          bars,
+          cashRate: none,
+          wholeShares: { initialAmount: '1000', currency: 'USD' },
+        }),
+      ).toThrow(/A has no bar on 2026-01-06/);
+    }
+    // Held from 01-05 over a session without its bar: refused there too.
+    expect(() =>
+      backtest({
+        strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
+        days: [at('2026-01-05', a), at('2026-01-06', a), at('2026-01-07', a)],
+        bars,
+        cashRate: none,
+        wholeShares: { initialAmount: '1000', currency: 'USD' },
+      }),
+    ).toThrow(/A has no bar on 2026-01-06/);
+  });
+
   it('a target listing a ticker twice is refused up front, even one never traded', () => {
     const twice = [
       { ticker: 'X', weight: 50 },

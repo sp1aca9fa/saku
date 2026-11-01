@@ -59,6 +59,9 @@ export async function integrity(
     let core: StrategyDay[];
     /** Core's equity per session, by date. */
     let equity: Map<TradingDate, number>;
+    // Only a version registered before C2's cost freeze reads an omitted cost as 0 (as when it
+    // was recorded); for any other an omitted cost fails (docs/indicators.md "Costs").
+    const omittedCostsAsZero = !version.costsResolved;
     try {
       // Read as registered (`StoredStrategy`, as forward.ts `parseVersion`).
       strategy = StoredStrategy.parse(JSON.parse(version.canonicalJson).strategy);
@@ -66,9 +69,10 @@ export async function integrity(
       bars = barsOf(await loadRows(strategyTickers(strategy), o.to));
       core = evaluate(strategy, bars);
       equity = new Map(
-        backtest({ strategy, days: core, bars, cashRate, omittedCostsAsZero: true }).points.map(
-          (p) => [p.date, p.equity],
-        ),
+        backtest({ strategy, days: core, bars, cashRate, omittedCostsAsZero }).points.map((p) => [
+          p.date,
+          p.equity,
+        ]),
       );
     } catch (e) {
       // Neither check can run: both are red, and the other versions are still checked.
@@ -77,8 +81,10 @@ export async function integrity(
       }
       continue;
     }
-    out.push(compareReference(strategy, core, equity, bars, cashRate, result));
-    out.push(compareIncremental(strategy, core, equity, bars, cashRate, result));
+    out.push(compareReference(strategy, core, equity, bars, cashRate, omittedCostsAsZero, result));
+    out.push(
+      compareIncremental(strategy, core, equity, bars, cashRate, omittedCostsAsZero, result),
+    );
   }
   return out;
 }
@@ -92,6 +98,7 @@ function compareReference(
   equity: Map<TradingDate, number>,
   bars: Bars,
   cashRate: (date: TradingDate) => number | undefined,
+  omittedCostsAsZero: boolean,
   result: Result,
 ): IntegrityResult {
   const problems: string[] = [];
@@ -113,7 +120,7 @@ function compareReference(
       // Core succeeded, so no day it valued needed an unknown rate; the reference reads the rate
       // on every day (times a zero weight where unused), so an unknown one is passed as 0 there.
       // Matched by date: both value every session, those without a decision included.
-      const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? 0, { omittedCostsAsZero: true });
+      const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? 0, { omittedCostsAsZero });
       const theirs = new Map(b.dates.map((d, i) => [d, b.equity[i]!]));
       const ours = [...equity.keys()];
       if (ours.length !== b.dates.length || ours.some((d) => !theirs.has(d))) {
@@ -139,6 +146,7 @@ function compareIncremental(
   equity: Map<TradingDate, number>,
   bars: Bars,
   cashRate: (date: TradingDate) => number | undefined,
+  omittedCostsAsZero: boolean,
   result: Result,
 ): IntegrityResult {
   const problems: string[] = [];
@@ -168,7 +176,7 @@ function compareIncremental(
         days,
         bars: upTo,
         cashRate,
-        omittedCostsAsZero: true,
+        omittedCostsAsZero,
       }).points.at(-1)!;
       const full = equity.get(date);
       if (point.date !== date || full === undefined) {

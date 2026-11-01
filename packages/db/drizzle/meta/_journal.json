@@ -141,6 +141,20 @@
       "when": 1793548159304,
       "tag": "0019_replace_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1793548997760,
+      "tag": "0020_deposit_rate_revisions",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1793549085253,
+      "tag": "0021_strategy_versions_costs_resolved",
+      "breakpoints": true
     }
   ]
 }

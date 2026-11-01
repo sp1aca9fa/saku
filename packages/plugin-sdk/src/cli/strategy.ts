@@ -27,7 +27,7 @@
 //   pnpm channel list|disable|enable|test [<channel id>] --user <username>
 //   pnpm alert update-failed --from <commit> --to <commit> --step <step> [--stuck]
 //                    (the update script, after going back)
-import { type Strategy, dependencies, isTradingDate, tradingDateOf } from '@saku/core';
+import { type Strategy, isTradingDate, tradingDateOf } from '@saku/core';
 import { translator } from '@saku/content';
 import { Sessions } from '@saku/data';
 import {
@@ -51,11 +51,10 @@ import { createInterface } from 'node:readline/promises';
 import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA } from '../jobs/anchor';
 import { chainLines, chainProblems, verifyChains } from '../jobs/chain-verify';
-import { costsLine, effectiveCosts } from '../jobs/costs';
 import { openRecheckNote, recheckTimeZone } from '../jobs/recheck';
 import {
   type CommandOutput,
-  previewRegistration,
+  checkStrategy,
   recomputeRecords,
   registerStrategy,
 } from '../jobs/strategy-commands';
@@ -131,21 +130,16 @@ if (tool === 'strategy' && command === 'check') {
   const s = load(a.file);
   // What the file says, as read: a misread value shows here, before anything is registered.
   for (const line of strategySummary(s)) console.log(line);
-  // The costs a backtest or registration would use now (the install's for those the file omits).
-  // Unknown costs: not valid to run, exit 1 (never read as 0).
-  const costs = await effectiveCosts(db, s);
-  if ('problem' in costs) fail(`Costs not known: ${costs.problem}`);
-  console.log(costsLine(costs as Exclude<typeof costs, { problem: string }>));
-  console.log(`${s.name}: valid; depends on ${dependencies(s).join(', ')}.`);
-  if (a.registration) {
+  // The costs a backtest or registration would use now (the install's for those the file omits);
+  // unknown costs exit 1 (never read as 0). With --registration, every reason register would
+  // refuse is listed, the costs among them (checkStrategy).
+  if (a.registration && a.user !== undefined) await userId();
+  const out = await checkStrategy(db, s, a.registration ? await registrationInput() : undefined);
+  if (a.registration && a.user === undefined && !a.library) {
     // The same account lookup as register; without either flag the account is not checked.
-    if (a.user !== undefined) await userId();
-    const out = await previewRegistration(db, { strategy: s, ...(await registrationInput()) });
-    if (a.user === undefined && !a.library) {
-      out.stdout.push('Account not checked (give --user or --library).');
-    }
-    finish(out);
+    out.stdout.push('Account not checked (give --user or --library).');
   }
+  finish(out);
 } else if (tool === 'strategy' && command === 'register') {
   const s = load(rest[0]);
   const ownerId = rest.includes('--library') ? null : await userId();

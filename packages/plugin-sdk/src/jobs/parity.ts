@@ -14,10 +14,12 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   type PointInTime,
+  type RawBar,
   type StrategyDay,
   type TradingDate,
   Strategy,
   backtest,
+  rateReadDates,
   strategyTickers,
   evaluate,
   isTradingDate,
@@ -218,7 +220,7 @@ interface WindowHealth {
 export const usesCashRate = (strategy: Strategy) =>
   strategy.allocations.some((a) => a.holdings.some((h) => readsCashRate(h.ticker)));
 
-/** The cash rate's freshness over the decision days of a case window. */
+/** The cash rate's freshness over the days a case's backtest may read it (`cashRateDays`). */
 interface CashHealth {
   /** No value, more than MAX_STALE_DAYS business days behind, or not countable: refused. */
   bad: { date: TradingDate; why: string }[];
@@ -226,12 +228,32 @@ interface CashHealth {
 }
 
 /**
- * The cash rate as the backtest reads it on each decision day (the value known at `cashReadAt`,
+ * The days a case's backtest may read the cash rate on, all graded: every decision day of the
+ * window, every session after the first, and every covered day between two sessions (a date
+ * that is no session on which a ticker it may hold has a bar: cash, financing and leverage
+ * accrue there too; docs/indicators.md "Returns").
+ */
+export function cashRateDays(
+  strategy: Strategy,
+  days: StrategyDay[],
+  bars: Record<string, RawBar[]>,
+): TradingDate[] {
+  return [
+    ...new Set([...days.map((d) => d.date), ...rateReadDates({ strategy, days, bars })]),
+  ].sort();
+}
+
+/**
+ * The cash rate as the backtest reads it on each of `dates` (the value known at `cashReadAt`,
  * the instant `cashRateOf` uses), graded on the cash series' own calendar by `seriesHealthAtOpen`
  * (04 "Point-in-time series"). A day, or its last known value, outside that calendar's valid
  * range is unknown: refused, never green, and the message says which was outside.
  */
-function cashHealth(dates: TradingDate[], values: PointInTime, calendar: Sessions): CashHealth {
+export function cashHealth(
+  dates: TradingDate[],
+  values: PointInTime,
+  calendar: Sessions,
+): CashHealth {
   const h: CashHealth = { bad: [], yellow: [] };
   for (const d of dates) {
     const last = values.asOf(d, cashReadAt(d))?.date;
@@ -272,9 +294,10 @@ function cashHealth(dates: TradingDate[], values: PointInTime, calendar: Session
  * session of `sessions` without a stored bar, refuses the case; yellow days are computed and
  * counted in the message, the status still follows the tolerances.
  *
- * A case whose holdings read the cash rate (`usesCashRate`) is graded on it too, on every
- * decision day from `from` to `to` (the backtest reads the rate on each day after the first; the
- * indicators and bands never read it, so warm-up days are not graded): no cash source, no value,
+ * A case whose holdings read the cash rate (`usesCashRate`) is graded on it too, on every day
+ * from `from` to `to` the backtest may read it on (`cashRateDays`: decision days, sessions and
+ * covered days between them; the indicators and bands never read it, so warm-up days are not
+ * graded): no cash source, no value,
  * more than MAX_STALE_DAYS business days behind, or a day outside the cash series' calendar
  * (`seriesSessions`) refuses the case; yellow days are counted in the message.
  */
@@ -394,15 +417,11 @@ export async function parity(
           );
           continue;
         }
-        const h = cashHealth(
-          days.map((d) => d.date),
-          cash.values,
-          o.seriesSessions,
-        );
+        const h = cashHealth(cashRateDays(c.strategy, days, bars), cash.values, o.seriesSessions);
         if (h.bad.length > 0) {
           const first = h.bad[0]!;
           refuse(
-            `the cash rate (${cash.series}@${cash.source}) is unknown or more than ${MAX_STALE_DAYS} business days old on ${h.bad.length} decision days from ${start} to ${end} (first ${first.date}: ${first.why})`,
+            `the cash rate (${cash.series}@${cash.source}) is unknown or more than ${MAX_STALE_DAYS} business days old on ${h.bad.length} days it is read from ${start} to ${end} (first ${first.date}: ${first.why})`,
           );
           continue;
         }
@@ -426,7 +445,7 @@ export async function parity(
           ? `; yellow days (warm-up days count): ${yellow.map((h) => `${h.ticker} ${h.yellow.length} (first ${h.yellow[0]})`).join(', ')}`
           : '') +
         (cashYellow.length
-          ? `; cash rate 2 to ${MAX_STALE_DAYS} business days old: ${cashYellow.length} decision days (first ${cashYellow[0]})`
+          ? `; cash rate 2 to ${MAX_STALE_DAYS} business days old: ${cashYellow.length} days it is read (first ${cashYellow[0]})`
           : '');
       out.push(
         result(

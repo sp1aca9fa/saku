@@ -698,8 +698,6 @@ describe('core vs reference: whole strategies with every B1 operand (random OHLC
 // that are no session (another ticker it may hold, and the signal ticker, have no bar there) are
 // compounded day by day: cash, synthetic leverage, financing and expense per covered day. Runs of
 // up to 4 such dates in a row; both price bases; all three execution modes.
-// Review of 16f0131 (gap bars, per-day rules): `.fails` until the reference follows the
-// contract; remove it then.
 describe('core vs reference: bars between sessions (covered days)', () => {
   /** On today's split basis: prices and dividends divided by the later splits. */
   const toAdjusted = (bars: RawBar[]): RawBar[] => {
@@ -723,17 +721,25 @@ describe('core vs reference: bars between sessions (covered days)', () => {
     const n = 300;
     const rnd = random(seed * 7 + 1);
     const x = walk(seed, n, 0.04);
-    const y = walk(seed + 50, n, 0.02);
+    // Y without its split (prices after it on the old basis), so Y may miss that date.
+    const half = Math.floor(n / 2);
+    const y = walk(seed + 50, n, 0.02).map((b, i) =>
+      i < half
+        ? b
+        : { ...b, open: b.open! * 2, close: b.close * 2, divCash: b.divCash * 2, splitFactor: 1 },
+    );
     const s = walk(seed + 90, n, 0.03);
     const dropX = new Set<string>();
-    const dropY = new Set<string>();
+    // X's split and two of its dividends always fall on dates that are no session (Y, and so S,
+    // have no bar there).
+    const dropY = new Set<string>([half, 63, 126].map((i) => x[i]!.date));
     for (let i = 40; i < n - 1;) {
       if (rnd() < 0.1) {
         const which = rnd() < 0.6 ? dropY : dropX;
         const len = 1 + Math.floor(rnd() * 4);
         // Keep the split bars (a dropped split would be a fake crash, not a gap).
         for (let k = 0; k < len && i < n - 1; k++, i++) {
-          if (i !== Math.floor(n / 2)) which.add(x[i]!.date);
+          if (i !== half) which.add(x[i]!.date);
         }
       } else i++;
     }
@@ -745,6 +751,34 @@ describe('core vs reference: bars between sessions (covered days)', () => {
       S: s.filter(keep(both)),
       dropped: both.size,
     };
+  };
+  /** What the cases exercised, over every step that covers a date that is no session. */
+  const seen = { leveredOverGap: 0, heldXWithoutBar: 0, exDateOnGap: 0 };
+  const count = (a: ReturnType<typeof backtest>, bars: Record<string, RawBar[]>) => {
+    const on = (t: string) => new Map(bars[t]!.map((b) => [b.date, b]));
+    const X = on('X');
+    const Y = on('Y');
+    const holdable = [...new Set([...X.keys(), ...Y.keys()])].sort();
+    for (let i = 1; i < a.points.length; i++) {
+      const [prev, cur] = [a.points[i - 1]!, a.points[i]!];
+      const between = holdable.filter((d) => d > prev.date && d < cur.date);
+      if (between.length === 0) continue;
+      // Held over the step: the holdings at the previous close.
+      const held = Object.keys(prev.weights);
+      if (held.includes('X?L=3&E=0.9')) seen.leveredOverGap++;
+      const heldX = held.some((t) => t.startsWith('X'));
+      if (heldX && between.some((d) => !X.has(d))) seen.heldXWithoutBar++;
+      for (const [t, list] of [
+        ['X', X],
+        ['Y', Y],
+      ] as const) {
+        if (!held.some((h) => h.startsWith(t))) continue;
+        for (const d of between) {
+          const b = list.get(d);
+          if (b && (b.splitFactor !== 1 || b.divCash > 0)) seen.exDateOnGap++;
+        }
+      }
+    }
   };
   const strategyFor = (execution: string) =>
     Strategy.parse({
@@ -812,8 +846,15 @@ describe('core vs reference: bars between sessions (covered days)', () => {
           const b = refBacktest(strategy, ref, bars, cashRate);
           expect(a.switches).toBe(b.switches);
           expectSameEquity(a, b);
+          count(a, bars);
         });
       }
     }
   }
+
+  it('the cases cover leverage over a covered day, a held X without a bar there, and gap ex-dates', () => {
+    expect(seen.leveredOverGap).toBeGreaterThan(0);
+    expect(seen.heldXWithoutBar).toBeGreaterThan(0);
+    expect(seen.exDateOnGap).toBeGreaterThan(0);
+  });
 });

@@ -6,6 +6,7 @@ import {
   groupFactors,
   issuerRecordsOf,
   storeFx,
+  storeTaxFx,
   storeIssuerRecords,
   storeRawBars,
   seriesPointInTime,
@@ -1154,5 +1155,56 @@ describe('issuer records', () => {
     expect(await store([{ date: '2026-01-02', split: 2 }])).toBe(1);
     expect(await store([{ date: '2026-01-05', distribution: 0 }])).toBe(1);
     expect(await store([{ date: '2026-01-06', distribution: 0.2, currency: 'USD' }])).toBe(1);
+  });
+});
+
+describe('storeTaxFx: the order holds at every new instant', () => {
+  const D = '2026-01-05';
+  const P0 = '2026-01-05T01:00:00Z';
+  const P1 = '2026-01-05T03:00:00Z';
+  const P2 = '2026-01-05T05:00:00Z';
+  const rate = (kind: 'tax_mid' | 'tax_buy' | 'tax_sell', value: number, publishedAt: string) => ({
+    pair: 'USDXTS',
+    date: D,
+    rate: value,
+    publishedAt,
+    kind,
+  });
+  async function stored() {
+    const db = await testDb();
+    // F0: TTM 150, TTS (tax_buy) 151, TTB (tax_sell) 149.
+    await storeTaxFx(db, {
+      source: 'bank',
+      rates: [rate('tax_mid', 150, P0), rate('tax_buy', 151, P0), rate('tax_sell', 149, P0)],
+      fetchedAt: '2026-01-05T02:00:00Z',
+    });
+    return db;
+  }
+
+  it('refuses a TTB published before its TTM when it reads above the stored TTM until then', async () => {
+    const db = await stored();
+    // The latest view is in order (TTM 151, TTS 151, TTB 150.5), but at P1 TTB 150.5 is above
+    // the stored TTM 150.
+    await expect(
+      storeTaxFx(db, {
+        source: 'bank',
+        rates: [rate('tax_sell', 150.5, P1), rate('tax_mid', 151, P2)],
+        fetchedAt: '2026-01-05T06:00:00Z',
+      }),
+    ).rejects.toThrow(
+      `tax rates out of order as they would be read: USDXTS ${D}: tax_mid 150 is below tax_sell 150.5 (as known at 2026-01-05T03:00:00.000Z)`,
+    );
+    expect(await db.select().from(fxRates)).toHaveLength(3);
+  });
+
+  it('stores the same rates published in an order that never breaks the rule', async () => {
+    const db = await stored();
+    const r = await storeTaxFx(db, {
+      source: 'bank',
+      rates: [rate('tax_mid', 151, P1), rate('tax_sell', 150.5, P2)],
+      fetchedAt: '2026-01-05T06:00:00Z',
+    });
+    expect(r.tax_mid.inserted + r.tax_sell.inserted).toBe(2);
+    expect(await db.select().from(fxRates)).toHaveLength(5);
   });
 });

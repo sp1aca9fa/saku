@@ -105,9 +105,15 @@ by a limit added later).
 benchmark) is a dated series, not a single value: `pnpm settings deposit-rate add <ratePct>
 <from YYYY-MM-DD> <currency>` adds an entry (percent a year as decimal text, below 1000; the
 base currency, so set `base_currency` first), in force from that date until the next entry.
-Entries are append-only: never edited or removed, each starting after every earlier one and not
-after today's New York date. `pnpm settings deposit-rate list` shows them. A date before the first
-entry has no rate (unknown, never a guess).
+Entries are append-only: never edited or removed, and not dated after today's New York date. A new
+entry starts after the latest one, or before the earliest (a backfill: every reader saw no rate
+there); one on or between existing dates is refused, since it would change what those dates
+already read. A wrong rate is corrected, never overwritten: `pnpm settings deposit-rate correct
+<from> <ratePct> --reason "..."` adds a row to the revision log (the entry, the rate it replaces,
+the new rate, the reason, who and when). Readers get the rate as corrected; a reader asking what
+was known at an earlier instant gets the entries and corrections made by then. `pnpm settings
+deposit-rate list` shows each entry with its corrections. A date before the first entry has no
+rate (unknown, never a guess).
 
 **Benchmarks.** A JSON list; each benchmark has exactly `id` (unique; lowercase letters, digits and
 `_`, starting with a letter), `holdings` (`[{ "ticker": "SPY", "weight": 100 }]`: tickers as in a

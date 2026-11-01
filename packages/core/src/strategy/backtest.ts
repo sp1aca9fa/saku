@@ -454,6 +454,60 @@ function wholeBook(deps: {
   };
 }
 
+/**
+ * What a backtest may hold, as base tickers: every allocation and the safe state (the strategy's
+ * own lists), and what the days hold (for a caller passing days only).
+ */
+function holdableOf(input: Pick<BacktestInput, 'strategy' | 'days'>): string[] {
+  return heldTickers([
+    ...(input.strategy.allocations ?? []).flatMap((a) => a.holdings),
+    ...(input.strategy.safeState?.holdings ?? []),
+    ...input.days.flatMap((d) => d.holdings),
+  ]);
+}
+
+/**
+ * Covered days (docs/indicators.md "Equity curves", "Returns"): for a step from session `prev`
+ * to session `date`, the dates strictly between them on which any ticker the strategy may hold
+ * (`holdable`, base tickers) has a bar, then `date` itself.
+ */
+function coveredDays(
+  holdable: readonly string[],
+  bars: Record<string, RawBar[]>,
+): (prev: TradingDate, date: TradingDate) => TradingDate[] {
+  const dates = [...new Set(holdable.flatMap((t) => (bars[t] ?? []).map((b) => b.date)))].sort();
+  return (prev, date) => {
+    let lo = 0;
+    let hi = dates.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (dates[mid]! <= prev) lo = mid + 1;
+      else hi = mid;
+    }
+    const out: TradingDate[] = [];
+    for (let j = lo; j < dates.length && dates[j]! < date; j++) out.push(dates[j]!);
+    out.push(date);
+    return out;
+  };
+}
+
+/**
+ * Every date a backtest of these inputs may read the cash rate on (for grading it; requirements
+ * 04, data health wherever a number is computed): each session after the first and each covered
+ * day between two sessions, in date order. Cash, financing and the whole-share residual read the
+ * rate on these days only.
+ */
+export function rateReadDates(
+  input: Pick<BacktestInput, 'strategy' | 'days' | 'bars'>,
+): TradingDate[] {
+  const holdable = holdableOf(input);
+  const all = sessions(input.days, input.bars, holdable);
+  const covered = coveredDays(holdable, input.bars);
+  const out: TradingDate[] = [];
+  for (let i = 1; i < all.length; i++) out.push(...covered(all[i - 1]!, all[i]!));
+  return out;
+}
+
 export function backtest(input: BacktestInput): BacktestResult {
   const { strategy } = input;
   // An omitted cost is unknown, not 0, unless the caller says so (stored pre-C2 versions, parity).
@@ -467,13 +521,7 @@ export function backtest(input: BacktestInput): BacktestResult {
     }
   }
   const decided = new Map(input.days.map((d) => [d.date, d]));
-  // What it may hold: every allocation and the safe state (the strategy's own lists), and what
-  // the days hold (for a caller passing days only).
-  const holdable = heldTickers([
-    ...(strategy.allocations ?? []).flatMap((a) => a.holdings),
-    ...(strategy.safeState?.holdings ?? []),
-    ...input.days.flatMap((d) => d.holdings),
-  ]);
+  const holdable = holdableOf(input);
   const initial = input.wholeShares && wholeSharesAmount(input.wholeShares);
   const days = sessions(input.days, input.bars, holdable).map((date) => {
     const day = decided.get(date);
@@ -506,26 +554,7 @@ export function backtest(input: BacktestInput): BacktestResult {
     }
     return { base: list[k]!, gap: list.slice(k + 1, i), bar: list[i]! };
   };
-  // Covered days (docs/indicators.md "Returns"): the dates strictly between two sessions on which
-  // any ticker the strategy may hold has a bar, then the session itself.
-  const holdableDates = [
-    ...new Set(holdable.flatMap((t) => (input.bars[t] ?? []).map((b) => b.date))),
-  ].sort();
-  const covered = (prev: TradingDate, date: TradingDate): TradingDate[] => {
-    let lo = 0;
-    let hi = holdableDates.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (holdableDates[mid]! <= prev) lo = mid + 1;
-      else hi = mid;
-    }
-    const out: TradingDate[] = [];
-    for (let j = lo; j < holdableDates.length && holdableDates[j]! < date; j++) {
-      out.push(holdableDates[j]!);
-    }
-    out.push(date);
-    return out;
-  };
+  const covered = coveredDays(holdable, input.bars);
   const barOn = (ticker: string, date: TradingDate): RawBar => {
     const [list, i] = positionOf(ticker, date);
     if (i === undefined) throw new Error(`${ticker} has no bar on ${date}.`);

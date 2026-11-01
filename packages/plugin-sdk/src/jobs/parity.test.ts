@@ -2,7 +2,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RawBar } from '@saku/core';
+import { PointInTime, type RawBar, type StrategyDay, Strategy } from '@saku/core';
 import { Sessions } from '@saku/data';
 import { type Db, addChannel, createUser, schema, setSetting, upsertSymbols } from '@saku/db';
 import { testDb } from '@saku/db/testing';
@@ -10,7 +10,14 @@ import { and, between, eq } from 'drizzle-orm';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { emptyPlugins } from '../registry';
 import type { BarSource } from '../types';
-import { PARITY_TOLERANCE, compareStats, parity, parseCase } from './parity';
+import {
+  PARITY_TOLERANCE,
+  cashHealth,
+  cashRateDays,
+  compareStats,
+  parity,
+  parseCase,
+} from './parity';
 import { type RunOptions, runJob } from './run';
 import { cashRates, fakeNotifier, quiet, testInfo } from './testkit';
 
@@ -467,7 +474,7 @@ describe('parity on stored bars', () => {
       // Read at the open of the session two after each missing one: 2, 3 and 4 business days old.
       expect(yellow!.message).toMatch(
         new RegExp(
-          `same_close \\(not achievable\\).*; cash rate 2 to 5 business days old: 3 decision days \\(first ${DATES[g + 2]}\\)$`,
+          `same_close \\(not achievable\\).*; cash rate 2 to 5 business days old: 3 days it is read \\(first ${DATES[g + 2]}\\)$`,
         ),
       );
 
@@ -476,7 +483,7 @@ describe('parity on stored bars', () => {
       expect(red!.status).toBe('red');
       // 2 to 9 business days old from DATES[g + 2]: more than 5 from the fifth missing one on.
       expect(red!.message).toBe(
-        `c: cannot run: the cash rate (CASH@rates) is unknown or more than 5 business days old on 4 decision days from ${FROM} to ${TARGET} (first ${DATES[g + 6]}: last value ${DATES[g - 1]}, 6 business days behind)`,
+        `c: cannot run: the cash rate (CASH@rates) is unknown or more than 5 business days old on 4 days it is read from ${FROM} to ${TARGET} (first ${DATES[g + 6]}: last value ${DATES[g - 1]}, 6 business days behind)`,
       );
     });
 
@@ -499,7 +506,7 @@ describe('parity on stored bars', () => {
       const [r] = await run(casesDir({ c: leveraged() }), own);
       expect(r!.status).toBe('red');
       expect(r!.message).toMatch(
-        new RegExp(`on \\d+ decision days .* \\(first ${FROM}: no value known\\)$`),
+        new RegExp(`on \\d+ days it is read .* \\(first ${FROM}: no value known\\)$`),
       );
     });
 
@@ -645,5 +652,77 @@ describe('parity on stored bars', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]!.text).toMatch(/^Saku: the checks run for .* did not finish/);
     expect(sent[0]!.text).toContain('\n- testfol_parity failed: bad: same_close (not achievable)');
+  });
+});
+
+// docs/indicators.md "Returns": cash, financing and leverage accrue on every covered day, so the
+// cash rate is graded there too, not only on decision days (review of 2fcf3ab).
+describe('the cash rate on covered days between sessions', () => {
+  it('a stale rate on a covered day refuses, though no decision day is red', () => {
+    const d = sessions.between('2025-03-03', '2025-03-21');
+    const gap = d[10]!;
+    const bar = (date: string): RawBar => ({
+      date,
+      open: 100,
+      close: 100,
+      closeIsSplitAdjusted: false,
+      divCash: 0,
+      splitFactor: 1,
+    });
+    // Y (which it may hold) has no bar on the gap day: no session there, a covered day.
+    const bars = { X: d.map(bar), Y: d.filter((x) => x !== gap).map(bar) };
+    const strategy = Strategy.parse({
+      name: 'Gap',
+      account: 'taxable',
+      execution: 'same_close',
+      safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+      evaluation: { frequency: 'daily' },
+      costs: { slippageBps: 0, feePct: 0 },
+      signals: [],
+      allocations: [
+        {
+          name: 'All',
+          holdings: [
+            { ticker: 'X?L=2', weight: 50 },
+            { ticker: 'Y', weight: 50 },
+          ],
+        },
+      ],
+    });
+    const days: StrategyDay[] = d
+      .filter((x) => x !== gap)
+      .map((date) => ({
+        date,
+        signals: {},
+        allocation: 'All',
+        holdings: strategy.allocations[0]!.holdings,
+        ties: [],
+      }));
+    // The rate of d[0..3] and of d[10] on is published before the next open; nothing between.
+    // At the opens: d[9] reads d[3], 5 sessions behind (yellow); the gap day d[10] reads d[3],
+    // 6 behind (red); d[11] reads d[10] (green).
+    const published = [0, 1, 2, 3, 10, 11, 12, 13].map((i) => ({
+      date: d[i]!,
+      value: 2,
+      knownAt: `${d[i + 1]!}T13:00:00Z`,
+    }));
+    // And the day before the window, known before d[0]'s open.
+    const values = new PointInTime([
+      { date: '2025-02-28', value: 2, knownAt: `${d[0]!}T13:00:00Z` },
+      ...published,
+    ]);
+    const graded = cashRateDays(strategy, days, bars);
+    expect(graded).toContain(gap);
+    const h = cashHealth(graded, values, sessions);
+    expect(h.bad.map((b) => b.date)).toEqual([gap]);
+    expect(h.bad[0]!.why).toBe(`last value ${d[3]}, 6 business days behind`);
+    // Graded on the decision days alone, nothing would be red.
+    expect(
+      cashHealth(
+        days.map((x) => x.date),
+        values,
+        sessions,
+      ).bad,
+    ).toEqual([]);
   });
 });

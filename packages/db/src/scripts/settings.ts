@@ -1,11 +1,12 @@
 // `pnpm settings list | set <key> <value>`: install-wide admin settings from the server.
-// `pnpm settings deposit-rate add <ratePct> <from YYYY-MM-DD> <currency>` | `deposit-rate list`:
-// the base currency's deposit rate, a dated append-only series (deposit-rates.ts).
+// `pnpm settings deposit-rate add <ratePct> <from YYYY-MM-DD> <currency>` | `deposit-rate list` |
+// `deposit-rate correct <from> <ratePct> --reason "..."`: the base currency's deposit rate, a
+// dated append-only series with a revision log (deposit-rates.ts).
 import { createDb } from '../client';
 import { dbConfigFromEnv, loadRootEnv } from '../env';
 import { exitIfUnmigrated } from '../migrate';
 import { activeSymbols } from '../market';
-import { addDepositRate, depositRateEntries } from '../deposit-rates';
+import { addDepositRate, correctDepositRate, depositRateEntries } from '../deposit-rates';
 import {
   SETTINGS,
   getSetting,
@@ -47,14 +48,38 @@ if (command === 'list') {
     console.error((e as Error).message);
     process.exit(1);
   }
+} else if (command === 'deposit-rate' && key === 'correct' && value && more.length === 3) {
+  const reasonAt = more.indexOf('--reason');
+  try {
+    if (reasonAt !== 1)
+      throw new Error('Usage: pnpm settings deposit-rate correct <from> <ratePct> --reason "..."');
+    const { oldRatePct } = await correctDepositRate(db, {
+      from: value,
+      ratePct: more[0]!,
+      reason: more[2]!,
+    });
+    console.log(`deposit rate from ${value}: ${oldRatePct}% corrected to ${more[0]}% a year`);
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
 } else if (command === 'deposit-rate' && key === 'list') {
   const entries = await depositRateEntries(db);
   if (entries.length === 0) console.log('No deposit rate entries (the rate is unknown).');
-  for (const e of entries) console.log(`from ${e.from}: ${e.ratePct}% a year (${e.currency})`);
+  for (const e of entries) {
+    console.log(`from ${e.from}: ${e.ratePct}% a year (${e.currency})`);
+    if (e.revisions.length > 0) console.log(`  entered as ${e.enteredRatePct}%`);
+    for (const r of e.revisions) {
+      console.log(
+        `  corrected ${r.oldRatePct}% -> ${r.newRatePct}% at ${r.at} by ${r.actor}: ${r.reason}`,
+      );
+    }
+  }
 } else {
   console.error(
     `Usage: pnpm settings list | pnpm settings set <${Object.keys(SETTINGS).join('|')}> <value> | ` +
-      'pnpm settings deposit-rate add <ratePct> <from YYYY-MM-DD> <currency> | pnpm settings deposit-rate list',
+      'pnpm settings deposit-rate add <ratePct> <from YYYY-MM-DD> <currency> | ' +
+      'pnpm settings deposit-rate correct <from> <ratePct> --reason "..." | pnpm settings deposit-rate list',
   );
   process.exit(1);
 }

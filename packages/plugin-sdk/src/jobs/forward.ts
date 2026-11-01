@@ -319,13 +319,23 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
           notRechecked = { deadline, provisional };
         }
       }
-      const equity = forwardEquity(strategy, prior, bars, cashRate, {
-        date,
-        signals: decision.signals ?? {},
-        allocation: decision.allocation,
-        holdings: decision.holdings,
-        ties: decision.ties,
-      });
+      const equity = forwardEquity(
+        strategy,
+        prior,
+        bars,
+        cashRate,
+        {
+          date,
+          signals: decision.signals ?? {},
+          allocation: decision.allocation,
+          holdings: decision.holdings,
+          ties: decision.ties,
+        },
+        // Only a version registered before C2's cost freeze reads an omitted cost as 0.
+        !version.costsResolved,
+        // Recorded with an unknown equity, and reported: the run is not a silent success.
+        (reason) => summary.problems.push(`${name} ${date}: equity unknown: ${reason}`),
+      );
       const input = {
         date,
         allocation: decision.allocation,
@@ -1110,9 +1120,12 @@ const asDay = (e: ForwardEntry): StrategyDay => ({
 
 /**
  * The record's own equity: its recorded holdings traded as the strategy executes, from 1.
- * `prior` is the whole record before `today`, in date order. A cost the stored version omits (a
- * version registered before C2 froze the effective costs into it) is charged as 0 here, as when
- * it was recorded: the backtest reads an omitted cost as 0 (exported for that test).
+ * `prior` is the whole record before `today`, in date order. `omittedCostsAsZero` only for a
+ * version registered before C2 froze the effective costs into it (`costs_resolved` false): its
+ * omitted cost is charged as 0, as when it was recorded; for any other an omitted cost fails
+ * (docs/indicators.md "Costs"). When the backtest fails (a holding without a bar that day, an
+ * unresolved cost) the equity is unknown, never guessed: null, and `onUnknown` gets the reason so
+ * the run reports it (exported for those tests).
  */
 export function forwardEquity(
   strategy: Strategy,
@@ -1120,13 +1133,14 @@ export function forwardEquity(
   bars: Record<string, RawBar[]>,
   cashRate: (date: TradingDate) => number | undefined,
   today: StrategyDay,
+  omittedCostsAsZero: boolean,
+  onUnknown?: (reason: string) => void,
 ): number | null {
   const days = [...prior, today];
   try {
-    return backtest({ strategy, days, bars, cashRate, omittedCostsAsZero: true }).points.at(-1)!
-      .equity;
-  } catch {
-    // A holding without a bar that day: the equity is unknown, not guessed.
+    return backtest({ strategy, days, bars, cashRate, omittedCostsAsZero }).points.at(-1)!.equity;
+  } catch (e) {
+    onUnknown?.(e instanceof Error ? e.message : String(e));
     return null;
   }
 }

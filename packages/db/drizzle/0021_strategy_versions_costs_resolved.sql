@@ -1,0 +1,1 @@
+ALTER TABLE `strategy_versions` ADD `costs_resolved` integer DEFAULT false NOT NULL;

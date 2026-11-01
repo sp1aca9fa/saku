@@ -1,4 +1,4 @@
-import type { RawBar } from '@saku/core';
+import { type RawBar, Strategy } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   addChannel,
@@ -29,6 +29,7 @@ import {
   type Rows,
   annotateStandInCorrections,
   forward,
+  forwardEquity,
   instantOf,
   isOpenStandIn,
   reader,
@@ -160,6 +161,78 @@ describe('forward', () => {
     // Bought at 01-08's open (= its close here): no change on 01-08.
     expect(record.map((e) => e.equity)).toEqual([1, 1]);
     expect(await verifyChain(db, version)).toEqual([]);
+  });
+
+  // docs/indicators.md "Costs": only a version registered before C2's cost freeze reads an
+  // omitted cost as 0; an equity the backtest cannot compute is recorded as unknown and reported.
+  it('an unknown equity is null and reported; a post-C2 version with an omitted cost is one', async () => {
+    const { db, version, runId } = await setup();
+    expect(version.costsResolved).toBe(false);
+    const frozen = await registerVersion(db, {
+      ownerId: version.ownerId,
+      name: 'Frozen',
+      strategy,
+      at: new Date('2026-01-06T22:00:00Z'),
+      costsResolved: true,
+    });
+    expect(frozen.costsResolved).toBe(true);
+    await setSetting(db, 'forward_records_from', '2026-01-05');
+    const f = await forward(db, { runId, sessions, to: D[3]! });
+    const unresolved =
+      "costs not resolved: slippageBps; resolve with the install's broker_costs first";
+    expect(f.problems).toEqual([
+      `Frozen (${frozen.id}) ${D[2]}: equity unknown: ${unresolved}`,
+      `Frozen (${frozen.id}) ${D[3]}: equity unknown: ${unresolved}`,
+    ]);
+    expect((await forwardRecord(db, frozen.id)).map((e) => e.equity)).toEqual([null, null]);
+    // The version registered before C2 (the same omitted costs) records as before: charged 0.
+    expect((await forwardRecord(db, version.id)).map((e) => e.equity)).toEqual([1, 1]);
+  });
+
+  it('a holding without a bar that day: the equity is unknown, and the reason goes to the run', () => {
+    const parsed = Strategy.parse({ ...strategy, execution: 'same_close', costs: {} });
+    const day = (date: string) => ({
+      date,
+      signals: {},
+      allocation: 'Calm',
+      holdings: [{ ticker: 'AAA', weight: 100 }],
+      ties: [],
+    });
+    const reasons: string[] = [];
+    const held = {
+      AAA: bars([100, 101, 102]).filter((b) => b.date !== D[1]),
+      AAA2: bars([50, 51, 52]),
+    };
+    expect(
+      forwardEquity(
+        parsed,
+        [day(D[0]!)],
+        held,
+        () => 2,
+        day(D[1]!),
+        true,
+        (r) => reasons.push(r),
+      ),
+    ).toBeNull();
+    expect(reasons).toEqual([expect.stringMatching(/AAA has no bar on 2026-01-06/)]);
+    // Without the flag, a version whose costs are omitted is unknown too, for that reason.
+    const full = { AAA: bars([100, 101]), AAA2: bars([50, 51]) };
+    expect(
+      forwardEquity(
+        parsed,
+        [day(D[0]!)],
+        full,
+        () => 2,
+        day(D[1]!),
+        false,
+        (r) => reasons.push(r),
+      ),
+    ).toBeNull();
+    expect(reasons[1]).toMatch(/^costs not resolved: slippageBps/);
+    expect(forwardEquity(parsed, [day(D[0]!)], full, () => 2, day(D[1]!), true)).toBeCloseTo(
+      1.01,
+      12,
+    );
   });
 
   it('a stored version that no longer parses is reported and skipped; the others still run', async () => {

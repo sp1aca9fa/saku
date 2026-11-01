@@ -1,4 +1,4 @@
-// Migration 0019: INSERT OR REPLACE cannot remove or move a protected row (its implicit delete
+// Migrations 0019, 0020: INSERT OR REPLACE cannot remove or move a protected row (its implicit delete
 // fires no DELETE trigger). Raw SQL, as a hand edit or a careless tool would send it.
 import { sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
@@ -84,9 +84,29 @@ const cases: { table: string; setup: string[]; replace: string; check: string; p
       replace: `INSERT OR REPLACE INTO chain_anchors (id, chain_head_hash, heads, anchored_at, method) VALUES (1, 'other', '[]', 't', 'rfc3161')`,
       check: `SELECT chain_head_hash AS v FROM chain_anchors`,
     },
+    {
+      // 0020: an existing id with a later date passes the date-order rule; the id guard refuses.
+      table: 'deposit_rates',
+      setup: [
+        `INSERT INTO deposit_rates (id, rate_pct, from_date, currency, actor, created_at) VALUES (1, '0.1', '2026-01-05', 'XXX', 'cli', 't')`,
+      ],
+      replace: `INSERT OR REPLACE INTO deposit_rates (id, rate_pct, from_date, currency, actor, created_at) VALUES (1, '9', '2026-06-01', 'XXX', 'cli', 't2')`,
+      check: `SELECT id || rate_pct || from_date AS v FROM deposit_rates`,
+      plain: `INSERT INTO deposit_rates (rate_pct, from_date, currency, actor, created_at) VALUES ('0.2', '2026-06-01', 'XXX', 'cli', 't')`,
+    },
+    {
+      table: 'deposit_rate_revisions',
+      setup: [
+        `INSERT INTO deposit_rates (id, rate_pct, from_date, currency, actor, created_at) VALUES (1, '0.1', '2026-01-05', 'XXX', 'cli', 't')`,
+        `INSERT INTO deposit_rate_revisions (id, entry_id, old_rate_pct, new_rate_pct, reason, actor, created_at) VALUES (1, 1, '0.1', '0.2', 'typo', 'cli', 't')`,
+      ],
+      replace: `INSERT OR REPLACE INTO deposit_rate_revisions (id, entry_id, old_rate_pct, new_rate_pct, reason, actor, created_at) VALUES (1, 1, '0.2', '9', 'other', 'cli', 't2')`,
+      check: `SELECT new_rate_pct || reason AS v FROM deposit_rate_revisions`,
+      plain: `INSERT INTO deposit_rate_revisions (entry_id, old_rate_pct, new_rate_pct, reason, actor, created_at) VALUES (1, '0.2', '0.3', 'again', 'cli', 't')`,
+    },
   ];
 
-describe('INSERT OR REPLACE cannot remove or move a protected row (0019)', () => {
+describe('INSERT OR REPLACE cannot remove or move a protected row (0019, 0020)', () => {
   for (const c of cases) {
     it(c.table, async () => {
       const db = await testDb();

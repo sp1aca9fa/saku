@@ -1,8 +1,13 @@
 // The deposit rate series (requirements 05 `CASH_BASE`, 01 "Bank deposits"; CLAUDE.md: rates are
 // read only through asOf): dated, append-only, unknown before its first entry.
 import { describe, expect, it } from 'vitest';
-import { addDepositRate, depositRateAsOf, depositRateEntries } from './deposit-rates';
-import { depositRates } from './schema';
+import {
+  addDepositRate,
+  correctDepositRate,
+  depositRateAsOf,
+  depositRateEntries,
+} from './deposit-rates';
+import { depositRateRevisions, depositRates } from './schema';
 import { setSetting } from './settings';
 import { testDb } from './testing';
 
@@ -28,8 +33,8 @@ describe('deposit rates', () => {
     expect(await depositRateAsOf(db, '2026-07-01')).toEqual({ entry: entry('0.25', '2026-07-01') });
     expect(await depositRateAsOf(db, '2030-01-01')).toEqual({ entry: entry('0.25', '2026-07-01') });
     expect(await depositRateEntries(db)).toEqual([
-      entry('0.1', '2026-01-05'),
-      entry('0.25', '2026-07-01'),
+      { ...entry('0.1', '2026-01-05'), enteredRatePct: '0.1', revisions: [] },
+      { ...entry('0.25', '2026-07-01'), enteredRatePct: '0.25', revisions: [] },
     ]);
     await expect(depositRateAsOf(db, '2026-13-01')).rejects.toThrow(/Not a date/);
   });
@@ -45,22 +50,94 @@ describe('deposit rates', () => {
     });
   });
 
-  it('never edits or slips an entry before a later one', async () => {
+  it('backfills before the earliest entry; refuses one on or between existing dates', async () => {
     const db = await withBase();
     await addDepositRate(db, entry('0.1', '2026-03-02'), { now });
-    for (const from of ['2026-03-02', '2026-01-05']) {
+    await addDepositRate(db, entry('0.3', '2026-09-01'), { now });
+    for (const from of ['2026-03-02', '2026-05-01', '2026-09-01']) {
       await expect(addDepositRate(db, entry('0.2', from), { now })).rejects.toThrow(
-        /after the latest entry's \(2026-03-02\)/,
+        /after the latest entry's \(2026-09-01\) or before the earliest \(2026-03-02\)/,
       );
     }
-    // The database refuses it too (triggers), and refuses edits and removals.
+    // Before the earliest: every reader saw unknown there.
+    expect(await depositRateAsOf(db, '2026-01-10')).toEqual({ unknown: true });
+    await addDepositRate(db, entry('0.05', '2026-01-05'), { now });
+    expect(await depositRateAsOf(db, '2026-01-10')).toEqual({ entry: entry('0.05', '2026-01-05') });
+    expect(await depositRateAsOf(db, '2026-03-02')).toEqual({ entry: entry('0.1', '2026-03-02') });
+    // The database refuses one between too (triggers), and refuses edits and removals.
     const row = { ratePct: '0.2', currency: 'XXX', actor: 't' };
     await expect(
       db.insert(depositRates).values({ ...row, fromDate: '2026-02-01' }),
     ).rejects.toThrow();
+    await expect(
+      db.insert(depositRates).values({ ...row, fromDate: '2026-09-01' }),
+    ).rejects.toThrow();
+    await db.insert(depositRates).values({ ...row, fromDate: '2025-12-01' });
     await expect(db.update(depositRates).set({ ratePct: '9' })).rejects.toThrow();
     await expect(db.delete(depositRates)).rejects.toThrow();
-    expect(await depositRateEntries(db)).toEqual([entry('0.1', '2026-03-02')]);
+    expect((await depositRateEntries(db)).map((e) => e.from)).toEqual([
+      '2025-12-01',
+      '2026-01-05',
+      '2026-03-02',
+      '2026-09-01',
+    ]);
+  });
+
+  it('corrects a rate with a revision row; knownBy reads it only from when it was made', async () => {
+    const db = await withBase();
+    await addDepositRate(db, entry('0.1', '2026-03-02'), { now });
+    const before = new Date();
+    // The correction is made after `before` (the clock moves on): known by a later instant only.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(
+      await correctDepositRate(db, { from: '2026-03-02', ratePct: '0.15', reason: 'typo' }),
+    ).toEqual({ oldRatePct: '0.1' });
+    const after = new Date();
+    expect(await depositRateAsOf(db, '2026-04-01')).toEqual({ entry: entry('0.15', '2026-03-02') });
+    expect(await depositRateAsOf(db, '2026-04-01', { knownBy: before })).toEqual({
+      entry: entry('0.1', '2026-03-02'),
+    });
+    expect(await depositRateAsOf(db, '2026-04-01', { knownBy: after })).toEqual({
+      entry: entry('0.15', '2026-03-02'),
+    });
+    // A second correction replaces the one in force; the listing keeps the whole chain.
+    await correctDepositRate(db, { from: '2026-03-02', ratePct: '0.12', reason: 'bank letter' });
+    const [listed] = await depositRateEntries(db);
+    expect(listed).toMatchObject({
+      ratePct: '0.12',
+      enteredRatePct: '0.1',
+      revisions: [
+        { oldRatePct: '0.1', newRatePct: '0.15', reason: 'typo', actor: 'cli' },
+        { oldRatePct: '0.15', newRatePct: '0.12', reason: 'bank letter', actor: 'cli' },
+      ],
+    });
+  });
+
+  it('refuses a correction without an entry, a reason, a valid new rate or a change', async () => {
+    const db = await withBase();
+    await addDepositRate(db, entry('0.1', '2026-03-02'), { now });
+    const bad = (c: { from: string; ratePct: string; reason: string }) =>
+      expect(correctDepositRate(db, c)).rejects;
+    await bad({ from: '2026-03-03', ratePct: '0.2', reason: 'x' }).toThrow(/no entry starts on/);
+    await bad({ from: '2026-03-02', ratePct: '0.2', reason: '  ' }).toThrow(/states its reason/);
+    await bad({ from: '2026-03-02', ratePct: '-1', reason: 'x' }).toThrow(
+      /the rate must be a decimal/,
+    );
+    await bad({ from: '2026-03-02', ratePct: '0.10', reason: 'x' }).toThrow(/already 0.1/);
+    expect((await depositRateEntries(db))[0]!.revisions).toEqual([]);
+    // The database refuses a revision that does not replace the rate in force, or has no
+    // reason, and refuses edits and removals of revisions.
+    const id = (await db.select().from(depositRates))[0]!.id;
+    const rev = { entryId: id, newRatePct: '0.2', actor: 't' };
+    await expect(
+      db.insert(depositRateRevisions).values({ ...rev, oldRatePct: '0.3', reason: 'x' }),
+    ).rejects.toThrow();
+    await expect(
+      db.insert(depositRateRevisions).values({ ...rev, oldRatePct: '0.1', reason: ' ' }),
+    ).rejects.toThrow();
+    await db.insert(depositRateRevisions).values({ ...rev, oldRatePct: '0.1', reason: 'x' });
+    await expect(db.update(depositRateRevisions).set({ reason: 'y' })).rejects.toThrow();
+    await expect(db.delete(depositRateRevisions)).rejects.toThrow();
   });
 
   it.each([

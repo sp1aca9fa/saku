@@ -121,7 +121,8 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `user_devices` | id, user_id, label, created_at, last_seen_at, revoked_at | Max 2 active |
 | `backup_codes`, `login_attempts` | | Auth |
 | `app_settings` | key, value | Install-wide admin settings (base currency, time zone, languages, regime, broker costs, benchmark set, ...; list in `docs/setup.md`, "Settings") |
-| `deposit_rates` | rate_pct, from_date, currency, actor, created_at | The base currency's deposit rate as a dated series, append-only (triggers; each entry starts after every earlier one), read through `depositRateAsOf` (C2, migration 0018) |
+| `deposit_rates` | rate_pct, from_date, currency, actor, created_at | The base currency's deposit rate as a dated series, append-only (triggers; a new entry starts after the latest or before the earliest, never on or between), read through `depositRateAsOf` (C2, migrations 0018, 0020) |
+| `deposit_rate_revisions` | entry_id, old_rate_pct, new_rate_pct, reason, actor, created_at | Corrections of a deposit rate entry (the revision log), append-only; each replaces the rate in force (trigger-checked chain); `depositRateAsOf` reads those known by its `knownBy` (migration 0020) |
 | `user_settings` | owner_id, example_amount, defaults (json) | Per user |
 | `plugin_info` | key, kind, description (json), saved_at | Written by each job run; the description also keeps `formerProviders` (`{ id, since }`: provider ids it was saved under before and when each stopped, for 32 days) |
 | `source_roles` | data_kind, plugin_key, role, position | Admin's choice |

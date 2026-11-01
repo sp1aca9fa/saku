@@ -22,6 +22,11 @@ export async function registerVersion(
     strategy: Json;
     strategyId?: string;
     at?: Date;
+    /**
+     * The registration froze the effective costs into `strategy` (C2 onward: the registration
+     * command). Default false: what a version registered before reads (an omitted cost as 0).
+     */
+    costsResolved?: boolean;
   },
 ): Promise<Version> {
   const registeredAt = (o.at ?? new Date()).toISOString();
@@ -41,6 +46,7 @@ export async function registerVersion(
       canonicalJson: text,
       registeredAt,
       hash: sha256(text),
+      costsResolved: o.costsResolved ?? false,
     })
     .returning();
   return row!;

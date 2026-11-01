@@ -930,8 +930,9 @@ export function taxFxOrderProblems(
  * transaction, so a failure in any kind stores nothing. Before writing, the order rule
  * (`taxFxOrderProblems`) runs per pair on the response merged with the stored rows of all three
  * kinds, read at the fetch (the latest of the fetch time and the new rows' known times, so every
- * new row counts): a partial revision (only the TTS republished, now below the stored TTM) is
- * refused like an out-of-order response. Any problem refuses the whole response. Returns what
+ * new row counts) and at each earlier instant a new row becomes known (so a past moment re-read
+ * later never shows the kinds out of order): a partial revision (only the TTS republished, now
+ * below the stored TTM) is refused like an out-of-order response. Any problem refuses the whole response. Returns what
  * was stored per kind; items are `<pair> <kind>`.
  */
 export async function storeTaxFx(
@@ -956,6 +957,8 @@ export async function storeTaxFx(
       const range = dateRange(rates);
       const merged: Partial<Record<TaxFxStoredKind, FxVintageRow[]>> = {};
       let at = fetchedAt;
+      /** Every moment a new row becomes known (each a point-in-time view that changes). */
+      const instants = new Set<string>([fetchedAt]);
       for (const kind of TAX_FX_ORDER) {
         const stored = await storedFxVintages(tx, pair, input.source, kind, range);
         const { values, withdrawals, result } = newVintages(
@@ -973,15 +976,24 @@ export async function storeTaxFx(
         out[kind].revised.push(...result.revised);
         out[kind].withdrawn.push(...result.withdrawn);
         merged[kind] = [...stored, ...values, ...withdrawals];
-        for (const r of [...values, ...withdrawals]) if (r.knownAt > at) at = r.knownAt;
+        for (const r of [...values, ...withdrawals]) {
+          instants.add(r.knownAt);
+          if (r.knownAt > at) at = r.knownAt;
+        }
       }
-      problems.push(
-        ...taxFxOrderProblems(
-          merged,
-          rates.map((r) => r.date),
-          at,
-        ).map((p) => `${pair} ${p}`),
-      );
+      // The order must hold in every view a later read can see, not only the latest: at each
+      // instant a new row becomes known, the merged rows read as of then (a TTB published before
+      // its TTM would otherwise read above the stored TTM until the TTM arrives). The latest
+      // view first, unmarked; an earlier one adds only problems the latest does not have.
+      const dates = rates.map((r) => r.date);
+      const found = new Set<string>();
+      for (const t of [at, ...[...instants].filter((x) => x !== at).sort()]) {
+        for (const p of taxFxOrderProblems(merged, dates, t)) {
+          if (found.has(p)) continue;
+          found.add(p);
+          problems.push(t === at ? `${pair} ${p}` : `${pair} ${p} (as known at ${t})`);
+        }
+      }
     }
     if (problems.length > 0) {
       const more = problems.length > 5 ? `; and ${problems.length - 5} more` : '';

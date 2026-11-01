@@ -7,13 +7,17 @@
 // - `currency` is the base currency (`base_currency` must be set): the entry states it, so a rate
 //   in another currency is refused rather than read as the base currency's.
 // - `from` is a real date, not after today's New York trading date (a rate not yet in force is
-//   not known), and after every earlier entry's `from`: an entry is never edited, removed or
-//   slipped in before a later one (triggers in migration 0018 enforce the same), so what a past
-//   date reads never changes.
+//   not known), and either after the latest entry's `from` or before the earliest (a backfill:
+//   every reader saw unknown there). On or between existing dates is refused: it would change
+//   what a date already read. An entry is never edited or removed (triggers in migrations 0018,
+//   0020 enforce the same).
+// - A wrong rate is corrected, never overwritten (data rule: the revision log): a row in
+//   `deposit_rate_revisions` names the entry, the rate it replaces, the new rate, a reason, who
+//   and when (`correctDepositRate`).
 // - Reading (`depositRateAsOf`): the entry in force on the date, the latest `from` on or before
-//   it. Before the first entry the rate is unknown, never a guess (not 0, not the first rate).
-//   `knownBy` also leaves out entries added after that instant (for a reader that must not see
-//   what was entered later).
+//   it, with its latest correction. Before the first entry the rate is unknown, never a guess
+//   (not 0, not the first rate). `knownBy` reads what was known at that instant: entries and
+//   corrections added after it are left out (for a reader that must not see later input).
 import {
   type TradingDate,
   compareDecimalText,
@@ -21,9 +25,9 @@ import {
   isTradingDate,
   tradingDateOf,
 } from '@saku/core';
-import { and, asc, desc, lte } from 'drizzle-orm';
+import { and, asc, desc, eq, lte } from 'drizzle-orm';
 import type { Db } from './client';
-import { activityLog, depositRates } from './schema';
+import { activityLog, depositRateRevisions, depositRates } from './schema';
 import { getSetting } from './settings';
 
 /**
@@ -74,14 +78,27 @@ export async function addDepositRate(
     if (isTradingDate(entry.from) && entry.from > today) {
       problems.push(`the start date ${entry.from} is after today (${today}, New York)`);
     }
-    const [latest] = await tx
-      .select({ from: depositRates.fromDate })
-      .from(depositRates)
-      .orderBy(desc(depositRates.fromDate))
-      .limit(1);
-    if (latest && isTradingDate(entry.from) && entry.from <= latest.from) {
+    const dates = (await tx.select({ from: depositRates.fromDate }).from(depositRates)).map(
+      (r) => r.from,
+    );
+    const earliest = dates.reduce<string | undefined>(
+      (a, d) => (a === undefined || d < a ? d : a),
+      undefined,
+    );
+    const latest = dates.reduce<string | undefined>(
+      (a, d) => (a === undefined || d > a ? d : a),
+      undefined,
+    );
+    if (
+      earliest !== undefined &&
+      latest !== undefined &&
+      isTradingDate(entry.from) &&
+      entry.from >= earliest &&
+      entry.from <= latest
+    ) {
       problems.push(
-        `the start date must be after the latest entry's (${latest.from}): entries are never edited or inserted before a later one`,
+        `the start date must be after the latest entry's (${latest}) or before the earliest (${earliest}): ` +
+          'an entry on or between existing dates would change what those dates already read (correct an entry instead: deposit-rate correct)',
       );
     }
     if (problems.length > 0) {
@@ -99,17 +116,113 @@ export async function addDepositRate(
   });
 }
 
-/** Every entry in date order (for listing). */
-export async function depositRateEntries(db: Db): Promise<DepositRateEntry[]> {
+/** A correction of an entry's rate, as stored. */
+export interface DepositRateRevision {
+  oldRatePct: string;
+  newRatePct: string;
+  reason: string;
+  actor: string;
+  at: string;
+}
+
+/** An entry with its rate in force now (`ratePct`, after its corrections) and its corrections. */
+export interface DepositRateListing extends DepositRateEntry {
+  /** The rate as first entered. */
+  enteredRatePct: string;
+  revisions: DepositRateRevision[];
+}
+
+/** Every entry in date order, with its corrections in order (for listing). */
+export async function depositRateEntries(db: Db): Promise<DepositRateListing[]> {
   const rows = await db.select().from(depositRates).orderBy(asc(depositRates.fromDate));
-  return rows.map((r) => ({ ratePct: r.ratePct, from: r.fromDate, currency: r.currency }));
+  const revisions = await db
+    .select()
+    .from(depositRateRevisions)
+    .orderBy(asc(depositRateRevisions.id));
+  return rows.map((r) => {
+    const own = revisions
+      .filter((v) => v.entryId === r.id)
+      .map((v) => ({
+        oldRatePct: v.oldRatePct,
+        newRatePct: v.newRatePct,
+        reason: v.reason,
+        actor: v.actor,
+        at: v.createdAt,
+      }));
+    return {
+      ratePct: own.at(-1)?.newRatePct ?? r.ratePct,
+      from: r.fromDate,
+      currency: r.currency,
+      enteredRatePct: r.ratePct,
+      revisions: own,
+    };
+  });
 }
 
 /**
- * The deposit rate in force on `date`: the entry with the latest `from` on or before it, among
- * those added by `knownBy` when given. `unknown` before the first entry (never a guess);
- * `invalid` when that entry's values do not pass the rules (only a direct database write can do
- * that), never read anyway. Throws on a `date` that is not a date (a caller error).
+ * Corrects the rate of the entry starting on `from` (a revision row; the entry is never edited),
+ * or throws with every reason it is refused: no such entry, a new rate that does not pass the
+ * rules or equals the rate in force, or no reason.
+ */
+export async function correctDepositRate(
+  db: Db,
+  c: { from: TradingDate; ratePct: string; reason: string },
+  o: { actor?: string } = {},
+): Promise<{ oldRatePct: string }> {
+  return db.transaction(async (tx) => {
+    const problems: string[] = [];
+    const [row] = await tx.select().from(depositRates).where(eq(depositRates.fromDate, c.from));
+    if (!row) problems.push(`no entry starts on ${JSON.stringify(c.from)} (deposit-rate list)`);
+    const rate = floatDecimalTextProblem(c.ratePct);
+    if (rate !== undefined) problems.push(`the rate ${rate}`);
+    else if (compareDecimalText(c.ratePct, DEPOSIT_RATE_BELOW) >= 0) {
+      problems.push(`the rate must be below ${DEPOSIT_RATE_BELOW} (got ${c.ratePct})`);
+    }
+    if (c.reason.trim() === '') problems.push('a correction states its reason (--reason "...")');
+    let current: string | undefined;
+    if (row) {
+      const [last] = await tx
+        .select({ rate: depositRateRevisions.newRatePct })
+        .from(depositRateRevisions)
+        .where(eq(depositRateRevisions.entryId, row.id))
+        .orderBy(desc(depositRateRevisions.id))
+        .limit(1);
+      current = last?.rate ?? row.ratePct;
+      if (rate === undefined && compareDecimalText(c.ratePct, current) === 0) {
+        problems.push(`the rate in force is already ${current}`);
+      }
+    }
+    if (problems.length > 0) {
+      throw new Error(`Deposit rate not corrected:\n${problems.map((p) => `- ${p}`).join('\n')}`);
+    }
+    const actor = o.actor ?? 'cli';
+    await tx.insert(depositRateRevisions).values({
+      entryId: row!.id,
+      oldRatePct: current!,
+      newRatePct: c.ratePct,
+      reason: c.reason.trim(),
+      actor,
+    });
+    await tx.insert(activityLog).values({
+      actor,
+      action: 'deposit_rate.correct',
+      detail: {
+        from: c.from,
+        oldRatePct: current!,
+        newRatePct: c.ratePct,
+        reason: c.reason.trim(),
+      },
+    });
+    return { oldRatePct: current! };
+  });
+}
+
+/**
+ * The deposit rate in force on `date`: the entry with the latest `from` on or before it, with
+ * its latest correction; with `knownBy`, only entries and corrections added by that instant
+ * (without it: the latest). `unknown` before the first entry (never a guess); `invalid` when the
+ * value read does not pass the rules (only a direct database write can do that), never read
+ * anyway. Throws on a `date` that is not a date (a caller error).
  */
 export async function depositRateAsOf(
   db: Db,
@@ -117,19 +230,35 @@ export async function depositRateAsOf(
   o: { knownBy?: Date } = {},
 ): Promise<{ entry: DepositRateEntry } | { unknown: true } | { invalid: string[] }> {
   if (!isTradingDate(date)) throw new Error(`Not a date: ${JSON.stringify(date)}.`);
+  const knownBy = o.knownBy?.toISOString();
   const [row] = await db
     .select()
     .from(depositRates)
     .where(
       and(
         lte(depositRates.fromDate, date),
-        o.knownBy ? lte(depositRates.createdAt, o.knownBy.toISOString()) : undefined,
+        knownBy ? lte(depositRates.createdAt, knownBy) : undefined,
       ),
     )
     .orderBy(desc(depositRates.fromDate))
     .limit(1);
   if (!row) return { unknown: true };
-  const entry = { ratePct: row.ratePct, from: row.fromDate, currency: row.currency };
+  const [revision] = await db
+    .select({ rate: depositRateRevisions.newRatePct })
+    .from(depositRateRevisions)
+    .where(
+      and(
+        eq(depositRateRevisions.entryId, row.id),
+        knownBy ? lte(depositRateRevisions.createdAt, knownBy) : undefined,
+      ),
+    )
+    .orderBy(desc(depositRateRevisions.id))
+    .limit(1);
+  const entry = {
+    ratePct: revision?.rate ?? row.ratePct,
+    from: row.fromDate,
+    currency: row.currency,
+  };
   const problems = valueProblems(entry, await getSetting(db, 'base_currency'));
   return problems.length > 0 ? { invalid: problems } : { entry };
 }

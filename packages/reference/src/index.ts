@@ -818,8 +818,10 @@ function snapWhole(x: number, tol: number): number {
  * Whole-share bookkeeping (docs/indicators.md "Equity curves", "Whole shares"), written from the
  * contract text: share counts per ticker as traded, and a residual in USD. The caller drives the
  * same sessions, parts and trade decisions as the fractional backtest.
+ *
+ * Exported for direct tests of checks that refBacktest cannot reach (an entry needs a price).
  */
-function refWholeShareBook(
+export function refWholeShareBook(
   opt: RefWholeShares,
   ctx: {
     costRate: number;

@@ -3,11 +3,11 @@
 // and bar grades a run may be rewriting, and recompute writes append-only annotations a run writes
 // too (a race could store one twice or compute on half-rebuilt bars). The CLI prints the output
 // and exits with the code.
-import type { Strategy, TradingDate } from '@saku/core';
+import { type Strategy, type TradingDate, dependencies } from '@saku/core';
 import type { Sessions } from '@saku/data';
 import { type Db, registerVersion } from '@saku/db';
 import { annotateStandInCorrections, recompute } from './forward';
-import { costsLine } from './costs';
+import { costsLine, effectiveCosts } from './costs';
 import { lock } from './lock';
 import { registrationReport } from './registration';
 
@@ -80,6 +80,36 @@ export function previewRegistration(db: Db, o: RegistrationInput): Promise<Comma
 }
 
 /**
+ * `pnpm strategy check` after the file's summary: the costs it would run with and whether it is
+ * valid. Unknown costs (a cost omitted with no usable `broker_costs`) exit 1, never read as 0.
+ * With `registration`, every reason register would refuse is listed (`previewRegistration`), the
+ * unknown costs among them, and the exit is 1 when there is any.
+ */
+export async function checkStrategy(
+  db: Db,
+  strategy: Strategy,
+  registration?: Omit<RegistrationInput, 'strategy'>,
+): Promise<CommandOutput> {
+  const costs = await effectiveCosts(db, strategy);
+  const known = !('problem' in costs);
+  const lines = known
+    ? [
+        costsLine(costs),
+        `${strategy.name}: valid; depends on ${dependencies(strategy).join(', ')}.`,
+      ]
+    : [];
+  if (!registration) {
+    return known
+      ? { exitCode: 0, stdout: lines, stderr: [] }
+      : refused(`Costs not known: ${(costs as { problem: string }).problem}`);
+  }
+  const out = await previewRegistration(db, { strategy, ...registration });
+  // The preview repeats the costs line when ready; printed once.
+  const preview = out.stdout.filter((l) => !lines.includes(l));
+  return { ...out, stdout: [...lines, ...preview] };
+}
+
+/**
  * Registers the strategy when nothing refuses it (registration.ts); otherwise every reason. The
  * version stores the effective costs (the install's `broker_costs` for each the file omits), so a
  * later settings change never changes it.
@@ -110,6 +140,7 @@ export function registerStrategy(
       ownerId: o.ownerId,
       name: costs.strategy.name,
       strategy: costs.strategy,
+      costsResolved: true,
     });
     return {
       exitCode: 0,

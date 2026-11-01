@@ -153,6 +153,37 @@ describe('integrity (layer E)', () => {
     expect(ref!.message).toMatch(/allocation .* vs Flipped/);
   });
 
+  // docs/indicators.md "Costs": a version registered after C2's cost freeze with a cost omitted
+  // is a fault (red, named), never run as 0; one registered before still reads it as 0.
+  it('a post-C2 version with an omitted cost is red for that reason; a pre-C2 one is not', async () => {
+    const { db, owner } = await setup();
+    const definition = {
+      name: 'Frozen',
+      account: 'taxable',
+      costs: { slippageBps: 5 },
+      safeState: { holdings: [{ ticker: 'AAA', weight: 100 }] },
+      evaluation: { frequency: 'daily' },
+      signals: [],
+      allocations: [{ name: 'All', holdings: [{ ticker: 'AAA', weight: 100 }] }],
+    };
+    await registerVersion(db, {
+      ownerId: owner,
+      name: 'Frozen',
+      strategy: definition,
+      costsResolved: true,
+    });
+    const results = await integrity(db, { to: TARGET, sessions });
+    expect(results.map((r) => [r.message!.split(' (')[0], r.check, r.status])).toEqual([
+      ['Trend', 'core_vs_reference', 'green'],
+      ['Trend', 'incremental_vs_full', 'green'],
+      ['Frozen', 'core_vs_reference', 'red'],
+      ['Frozen', 'incremental_vs_full', 'red'],
+    ]);
+    expect(results[2]!.message).toMatch(
+      /core could not evaluate: Error: costs not resolved: feePct/,
+    );
+  });
+
   it('without a cash rate: a 1x strategy still agrees; one that needs cash is red alone', async () => {
     const { db, owner } = await setup({ cash: false });
     await registerVersion(db, {

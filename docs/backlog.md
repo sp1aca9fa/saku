@@ -12,7 +12,7 @@
 | 2026-10-30 | Index on `data_health(run_id)` | Claude | Reliability | accepted | Done 2026-10-30 (migration 0008) |
 | 2026-10-30 | Full passes store per-symbol green coverage, so a symbol skipped in a full run never reads green from older data | Claude (review) | Reliability | accepted | Done (health_coverage per symbol and run, f2e8e57) |
 | 2026-10-30 | Compare holdings order-insensitively when counting switches (a reorder with no trade counted) | Claude (review) | Evidence | accepted | Done 2026-10-30 (core and reference); matters for testfol parity |
-| 2026-10-30 | testfol parity: check the cash rate series' health in the case window | Claude (review) | Reliability | accepted | Leveraged and cash cases depend on it; done 2026-10-30 (decision days graded) |
+| 2026-10-30 | testfol parity: check the cash rate series' health in the case window | Claude (review) | Reliability | accepted | Leveraged and cash cases depend on it; done 2026-10-30 (decision days graded); 2026-11-02 every day the backtest reads the rate on (sessions and covered days) |
 | 2026-10-30 | Plug-ins declare a calendar per series or pair (TARGET for ECB, Fed for DTB3), so expected gaps are exact | Claude | Reliability | accepted (partly) | Done for the cash series (us-fed) and the FX primary (`PluginInfo.calendar`, ECB TARGET); secondaries and index series still on the trading calendar |
 | 2026-10-30 | Plug-ins declare a provider id (default: the key), so two plug-ins for one provider share its quota | Claude (review) | Reliability | accepted | Done 2026-10-31 (`PluginInfo.provider`; differing limits for one provider refused) |
 | 2026-10-30 | Quota guard for bandwidth limits (e.g. 1 GB per month) | Claude | Reliability | new | Not declared by any plug-in yet |

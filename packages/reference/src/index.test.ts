@@ -2,6 +2,7 @@
 // tickers and weights is no trade. Written against the reference only (no @saku/core).
 import { describe, expect, it } from 'vitest';
 import {
+  refWholeShareBook,
   refParseTicker,
   refAnnualize,
   refBacktest,
@@ -1402,6 +1403,42 @@ describe('reference: covered days (docs/indicators.md "Returns", "Cash", "Synthe
     };
     const r = refBacktest(s, decide('H', sessions), { H, H2, G }, () => 0);
     expect(r.equity[2]).toBeCloseTo(1.331, 12);
+  });
+
+  it('fractional: held from the previous session without a bar there fails (next_close)', () => {
+    // D[1] is an evaluated date where H has no bar; next_close enters H at D[1]'s close (the
+    // fractional book needs no price), so the whole-day step to D[2] starts without H's bar.
+    const H = mk([100, undefined, 100, 100, 100, 100]);
+    const S = mk([1, 1, 1, 1, 1, 1]);
+    const s = { execution: 'next_close' as const, costs: ZERO };
+    const days = decide('H', [D[0]!, D[1]!, D[2]!]);
+    expect(() => refBacktest(s, days, { H, S }, () => 0)).toThrow(
+      /H is held from 2026-10-02 without a bar that day/,
+    );
+  });
+
+  it('whole shares: held from the previous session without a bar there fails (book move)', () => {
+    // refBacktest cannot reach this (a whole-share entry needs the bar's price), so the book is
+    // driven directly: buy at D[0], then step from D[1], where H has no bar.
+    const H = mk([100, undefined, 100, 100, 100, 100]);
+    const book = refWholeShareBook(
+      { initialAmount: '1000', currency: 'USD' },
+      {
+        costRate: 0,
+        bars: { H },
+        cashRate: () => 0,
+        targets: [hold('H')],
+        mayHold: new Set(['H']),
+      },
+    );
+    book.trade(hold('H'), D[0]!, 'close');
+    expect(() => book.move(D[1]!, D[2]!, 'whole')).toThrow(
+      /H is held from 2026-10-02 without a bar/,
+    );
+    expect(() => book.move(D[1]!, D[2]!, 'night')).toThrow(/without a bar/);
+    // From a session with its bar, the same step is fine; the day part reads no previous bar.
+    expect(() => book.move(D[0]!, D[2]!, 'whole')).not.toThrow();
+    expect(() => book.move(D[1]!, D[2]!, 'day')).not.toThrow();
   });
 
   it('the pre-entry probe: held over a night without a bar on the previous session fails', () => {

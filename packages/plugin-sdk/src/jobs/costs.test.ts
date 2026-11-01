@@ -46,13 +46,13 @@ describe('a version registered before C2 (costs omitted)', () => {
     const parsed = parseVersion(v);
     expect(parsed).toEqual({ strategy: definition });
     const strategy = (parsed as { strategy: Strategy }).strategy;
-    const equity = forwardEquity(strategy, [day(D[0])], bars, () => 2, day(D[1]));
+    const equity = forwardEquity(strategy, [day(D[0])], bars, () => 2, day(D[1]), true);
     expect(equity).not.toBeNull();
     // Today's meaning: exactly what stating every cost as 0 gives.
     const zero = { ...strategy, costs: { slippageBps: 0, feePct: 0, fxSpreadPct: 0 } };
-    expect(forwardEquity(zero, [day(D[0])], bars, () => 2, day(D[1]))).toBe(equity);
+    expect(forwardEquity(zero, [day(D[0])], bars, () => 2, day(D[1]), true)).toBe(equity);
     const fee = { ...strategy, costs: { slippageBps: 0, feePct: 1, fxSpreadPct: 0 } };
-    expect(forwardEquity(fee, [day(D[0])], bars, () => 2, day(D[1]))!).toBeLessThan(equity!);
+    expect(forwardEquity(fee, [day(D[0])], bars, () => 2, day(D[1]), true)!).toBeLessThan(equity!);
   });
 
   it('parses a stored version over the cost limits added later; a new definition is refused', () => {
