@@ -45,6 +45,13 @@ describe('normal distribution', () => {
     expect(() => normalQuantile(NaN)).toThrow('[0, 1]');
   });
 
+  it('meets the check values of the contract within 1e-15 relative (50-digit decimal values)', () => {
+    expect(rel(normalCdf(-1), Number('0.158655253931457051'))).toBeLessThan(1e-15);
+    expect(rel(normalCdf(0.3), Number('0.617911422188952637'))).toBeLessThan(1e-15);
+    expect(rel(normalQuantile(0.01), Number('-2.326347874040841101'))).toBeLessThan(1e-15);
+    expect(rel(normalQuantile(0.975), Number('1.959963984540054236'))).toBeLessThan(1e-15);
+  });
+
   it('PhiInv inverts Phi', () => {
     fc.assert(
       fc.property(fc.double({ min: 1e-300, max: 0.5, noNaN: true }), (p) => {

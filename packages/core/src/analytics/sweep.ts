@@ -61,6 +61,24 @@ function checkGrid(strategy: Strategy, grid: readonly SweepParameter[]): void {
     }
     for (const path of p.paths) locate(strategy, path);
   }
+  // Two parameters setting the same place (equal paths, or one inside the other) would let the
+  // later one silently win: refused.
+  const prefix = (a: ParameterPath, b: ParameterPath) =>
+    a.length <= b.length && a.every((k, i) => k === b[i]);
+  grid.forEach((p, k) => {
+    grid.forEach((q, l) => {
+      if (l <= k) return;
+      for (const a of p.paths) {
+        for (const b of q.paths) {
+          if (prefix(a, b) || prefix(b, a)) {
+            throw new Error(
+              `sweep: ${describe(a)} and ${describe(b)} set the same place in two parameters.`,
+            );
+          }
+        }
+      }
+    });
+  });
 }
 
 /**

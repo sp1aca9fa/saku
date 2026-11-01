@@ -6,7 +6,7 @@
 import type { RawBar, TradingDate } from '../domain';
 import { isTradingDate } from '../time';
 import type { EquitySample } from './metrics';
-import { createRng, stationaryBootstrap } from './random';
+import { DEFAULT_MEAN_BLOCK, createRng, stationaryBootstrap } from './random';
 import { type Statistic, noValue, ok } from './statistic';
 
 export interface GoalProjectionInput {
@@ -49,7 +49,6 @@ export interface GoalProjection {
 }
 
 export const PROJECTION_PATHS = 10_000;
-export const PROJECTION_MEAN_BLOCK = 20;
 /** A sample shorter than a year of sessions says nothing about a year. */
 export const MIN_SAMPLE_DAYS = 252;
 /** PhiInv(0.975). */
@@ -64,7 +63,11 @@ export function wilson95(k: number, n: number): { low: number; high: number } {
   const z2 = Z95 * Z95;
   const center = (p + z2 / (2 * n)) / (1 + z2 / n);
   const half = (Z95 / (1 + z2 / n)) * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n));
-  return { low: Math.max(0, center - half), high: Math.min(1, center + half) };
+  // At k = 0 and k = n the exact bounds are 0 and 1; rounding is not left to decide them.
+  return {
+    low: k === 0 ? 0 : Math.max(0, center - half),
+    high: k === n ? 1 : Math.min(1, center + half),
+  };
 }
 
 /** One sampled day of one series, relative to its previous close. */
@@ -140,7 +143,7 @@ function checkInput(input: GoalProjectionInput): void {
   if (!Number.isInteger(input.seed) || input.seed < 0 || input.seed >= 4_294_967_296) {
     throw new Error('goalProjection: the seed is an integer in 0 .. 2^32 - 1.');
   }
-  const meanBlock = input.meanBlock ?? PROJECTION_MEAN_BLOCK;
+  const meanBlock = input.meanBlock ?? DEFAULT_MEAN_BLOCK;
   if (typeof meanBlock !== 'number' || !Number.isFinite(meanBlock) || meanBlock < 1) {
     throw new Error('goalProjection: meanBlock is a number >= 1.');
   }
@@ -202,7 +205,7 @@ function nearestRank(sorted: readonly number[], q: number): number {
 export function goalProjection(input: GoalProjectionInput): Statistic<GoalProjection> {
   checkInput(input);
   const paths = input.paths ?? PROJECTION_PATHS;
-  const meanBlock = input.meanBlock ?? PROJECTION_MEAN_BLOCK;
+  const meanBlock = input.meanBlock ?? DEFAULT_MEAN_BLOCK;
   const names = Object.keys(input.history).sort();
   const { days, rows } = sample(input, names);
   if (days.length < MIN_SAMPLE_DAYS) return noValue('tooShort');
@@ -210,6 +213,7 @@ export function goalProjection(input: GoalProjectionInput): Statistic<GoalProjec
   const L = input.future.length;
   const ends: number[] = [];
   let reached = 0;
+  let firstPast: readonly EquitySample[] = [];
   for (let p = 0; p < paths; p++) {
     const draw = stationaryBootstrap(createRng(input.seed, p), days.length, L, meanBlock);
     const bars: Record<string, RawBar[]> = {};
@@ -238,7 +242,19 @@ export function goalProjection(input: GoalProjectionInput): Statistic<GoalProjec
       });
       bars[n] = [...history, ...synthetic];
     });
-    const equity = new Map(input.run(bars).map((e) => [e.date, e.equity]));
+    const output = input.run(bars);
+    const equity = new Map(output.map((e) => [e.date, e.equity]));
+    // Look-ahead guard: the run's past (dates up to h) must not change with the simulated future.
+    const past = output.filter((e) => e.date <= h);
+    if (p === 0) firstPast = past;
+    else if (
+      past.length !== firstPast.length ||
+      past.some((e, i) => e.date !== firstPast[i]!.date || e.equity !== firstPast[i]!.equity)
+    ) {
+      throw new Error(
+        `goalProjection: path ${p} changes the run's equity on or before ${h}: the run reads simulated bars before they happen.`,
+      );
+    }
     const at = (date: TradingDate) => {
       const e = equity.get(date);
       if (typeof e !== 'number' || !Number.isFinite(e)) {

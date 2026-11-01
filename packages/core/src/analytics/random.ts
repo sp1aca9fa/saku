@@ -3,6 +3,12 @@
 // the reference implementation draws the same numbers from the same seed.
 
 const TWO_32 = 4_294_967_296;
+
+/**
+ * The default mean block length of the stationary bootstrap, in trading days: a choice (about one
+ * month; docs/analytics.md "Stationary block bootstrap"). Callers pass their own `meanBlock`.
+ */
+export const DEFAULT_MEAN_BLOCK = 20;
 const MASK_64 = (1n << 64n) - 1n;
 
 /** One SplitMix64 step (Vigna, splitmix64.c): the next counter and its output, modulo 2^64. */

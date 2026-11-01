@@ -64,6 +64,21 @@ describe('trials', () => {
     expect(t.excess[1]![0]).toBeCloseTo(-0.01 - 0.001, 15);
   });
 
+  it('no value when a trial has a date between two common dates', () => {
+    const a = curve(block(0.001, 30));
+    // b lacks 2024-01-10, so a's 2024-01-10 falls between the common dates 01-09 and 01-11.
+    const b = a.filter((p) => p.date !== '2024-01-10');
+    expect(reason(alignTrials({ trials: [a, b], cashReturn: () => 0 }))).toBe('datesDiffer');
+    // Dates before the first or after the last common date are only cut.
+    const later = a.slice(3);
+    expect(reason(alignTrials({ trials: [a, later], cashReturn: () => 0 }))).toBe('value');
+    // Before the length check: a wiped-out trial is still reported first.
+    const wiped = curve([...block(0.001, 29), -1]);
+    expect(reason(alignTrials({ trials: [wiped, b], cashReturn: () => 0 }))).toBe(
+      'equityNotPositive',
+    );
+  });
+
   it('gives no value with a reason, in the stated order', () => {
     const ok = curve(block(0.001, 30));
     const cash = () => 0;
@@ -91,21 +106,24 @@ describe('effective number of trials', () => {
   it('copies count once, uncorrelated trials each, negative correlation never more than M', () => {
     const x = [1, -1, 1, -1];
     const y = [1, 1, -1, -1]; // centered dot product with x: 1 - 1 - 1 + 1 = 0
-    expect(effectiveTrials([x, x, x]).effective).toBeCloseTo(1, 15);
-    expect(effectiveTrials([x, y]).effective).toBeCloseTo(2, 15);
-    expect(effectiveTrials([x, x.map((a) => -a)])).toMatchObject({
+    expect(v(effectiveTrials([x, x, x])).effective).toBeCloseTo(1, 15);
+    expect(v(effectiveTrials([x, y])).effective).toBeCloseTo(2, 15);
+    expect(v(effectiveTrials([x, x.map((a) => -a)]))).toMatchObject({
       effective: 2,
       averageCorrelation: 0,
     });
     // Pairs (x, x) = 1, (x, y) = 0, (x, y) = 0: rho = 1/3; N = 1/3 + 2/3 x 3 = 7/3.
-    expect(effectiveTrials([x, x, y]).effective).toBeCloseTo(7 / 3, 14);
-    expect(effectiveTrials([x])).toEqual({
+    expect(v(effectiveTrials([x, x, y])).effective).toBeCloseTo(7 / 3, 14);
+    expect(v(effectiveTrials([x]))).toEqual({
       effective: 1,
       trials: 1,
       averageCorrelation: undefined,
       returns: 4,
     });
-    expect(() => effectiveTrials([])).toThrow('no trial');
+    expect(reason(effectiveTrials([]))).toBe('tooFewTrials');
+    // A trial without swings has no correlation: no value, not a guess.
+    expect(reason(effectiveTrials([x, [0.01, 0.01, 0.01, 0.01]]))).toBe('noDispersion');
+    expect(reason(effectiveTrials([[0.01], [0.02]]))).toBe('noDispersion');
     expect(() => effectiveTrials([x, [1, 2]])).toThrow('same number');
   });
 
@@ -113,7 +131,7 @@ describe('effective number of trials', () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 6 }), fc.integer({ min: 0, max: 1000 }), (M, seed) => {
         const trials = Array.from({ length: M }, (_, j) => normals(seed * 10 + j, 30, 0, 0.01));
-        const n = effectiveTrials(trials).effective;
+        const n = v(effectiveTrials(trials)).effective;
         return n >= 1 - 1e-12 && n <= M + 1e-12;
       }),
     );
@@ -234,7 +252,7 @@ describe('deflated Sharpe ratio', () => {
         returns: 300,
         ...moments(trials[2]!),
         trialSharpeVariance: V,
-        effectiveTrials: effectiveTrials(trials).effective,
+        effectiveTrials: v(effectiveTrials(trials)).effective,
       }),
     );
     expect(d).toEqual(want);
@@ -308,6 +326,21 @@ describe('probability of backtest overfitting', () => {
     expect(() => backtestOverfitting([a, a], 0)).toThrow('even');
   });
 
+  it('the dispersion floor scales with the returns: a constant return has no Sharpe', () => {
+    // Constant c over a set of m rows: the variance is 0 up to rounding of the order of
+    // 1e-16 x S2; the floor max(1e-24, 1e-14 x S2 / m) = max(1e-24, 1e-14 x c^2) catches it.
+    const noise = (n: number) => normals(31, n, 0, 0.01);
+    // S = 2: m = 400 rows per set (T = 800), c = 0.001.
+    const c3 = Array.from({ length: 800 }, () => 0.001);
+    expect(reason(backtestOverfitting([c3, noise(800)], 2))).toBe('noDispersion');
+    // m = 24 rows per set (T = 48), c = 1e-4.
+    const c4 = Array.from({ length: 48 }, () => 1e-4);
+    expect(reason(backtestOverfitting([c4, noise(48)], 2))).toBe('noDispersion');
+    // A small but real spread around the same level is kept: var 1e-12 >> 1e-14 x 1e-6.
+    const small = c3.map((x, i) => x + (i % 2 === 0 ? 1e-6 : -1e-6));
+    expect(reason(backtestOverfitting([small, noise(800)], 2))).toBe('value');
+  });
+
   it('noise trials overfit about half the time; a real edge does not', () => {
     const noise = Array.from({ length: 20 }, (_, j) => normals(500 + j, 800, 0, 0.01));
     const pure = v(backtestOverfitting(noise));
@@ -341,7 +374,7 @@ describe('overfitting', () => {
     const trials = returns.map((r) => curve(r));
     const o = overfitting({ trials, cashReturn: () => 0, selected: 2, partitions: 2 });
     const excess = v(alignTrials({ trials, cashReturn: () => 0 })).excess;
-    expect(v(o.effectiveTrials)).toEqual(effectiveTrials(excess));
+    expect(o.effectiveTrials).toEqual(effectiveTrials(excess));
     expect(o.deflatedSharpe).toEqual(deflatedSharpe(excess, 2));
     expect(o.overfittingProbability).toEqual(backtestOverfitting(excess, 2));
     const none = overfitting({ trials: [], cashReturn: () => 0, selected: 0 });

@@ -2,7 +2,11 @@
 // out in the comments.
 import { describe, expect, it } from 'vitest';
 import { type EquitySample, metrics } from './metrics';
-import { DEFAULT_CRISES, crisisReplays, walkForward } from './periods';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as core from '../index';
+import { type CrisisWindow, crisisReplays, walkForward } from './periods';
 import type { Statistic } from './statistic';
 
 const v = <T>(s: Statistic<T>): T => {
@@ -59,8 +63,12 @@ describe('walk-forward folds', () => {
     expect(reason(walkForward({ points: short, benchmark: short, cashReturn: () => 0 }))).toBe(
       'tooShort',
     );
-    expect(reason(walkForward({ points: [], benchmark: short }))).toBe('tooShort');
-    expect(() => walkForward({ points: long, benchmark: long, folds: 1 })).toThrow('folds');
+    expect(reason(walkForward({ points: [], benchmark: short, cashReturn: () => 0 }))).toBe(
+      'tooShort',
+    );
+    expect(() =>
+      walkForward({ points: long, benchmark: long, cashReturn: () => 0, folds: 1 }),
+    ).toThrow('folds');
   });
 
   it('a fold without a value is not measured, never a win or a loss', () => {
@@ -77,7 +85,23 @@ describe('walk-forward folds', () => {
     expect(reason(c.folds[1]!.strategy)).toBe('cashRateMissing');
     expect(c.measured).toBe(2);
   });
+
+  it("no fold measured is no value, with the first fold's reason", () => {
+    const points = daily('2020-01-01', '2023-01-01', wiggle(0.001, 0.01));
+    expect(reason(walkForward({ points, benchmark: points, cashReturn: () => undefined }))).toBe(
+      'cashRateMissing',
+    );
+    // The benchmark has a single point: every fold's benchmark is too short.
+    const benchmark = points.slice(0, 1);
+    expect(reason(walkForward({ points, benchmark, cashReturn: () => 0 }))).toBe('tooShort');
+  });
 });
+
+const TEMPLATE = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../../templates/crises/us-equity.json',
+);
+const template = JSON.parse(readFileSync(TEMPLATE, 'utf8')) as CrisisWindow[];
 
 describe('crisis replays', () => {
   const at = (pairs: [string, number][]): EquitySample[] =>
@@ -97,8 +121,8 @@ describe('crisis replays', () => {
       ['2009-03-06', 45],
       ['2009-03-10', 47],
     ]);
-    const r = crisisReplays({ points, benchmark });
-    expect(r.windows.map((w) => w.id)).toEqual(DEFAULT_CRISES.map((c) => c.id));
+    const r = v(crisisReplays({ points, benchmark, windows: template }));
+    expect(r.windows.map((w) => w.id)).toEqual(template.map((c) => c.id));
     const gfc = r.windows[1]!;
     // Strategy: from 2007-10-09 (110) to 2009-03-09 (90); deepest 80 / 110 - 1.
     expect(v(gfc.strategy).maxDrawdown).toBeCloseTo(80 / 110 - 1, 15);
@@ -113,14 +137,14 @@ describe('crisis replays', () => {
     expect(r).toMatchObject({ covered: 1, shallower: 1 });
   });
 
-  it('ties are not shallower; a wiped-out window is no value', () => {
+  it('ties are not shallower; no window covered is no value with the first reason', () => {
     const w = [{ id: 'x', start: '2020-01-02', end: '2020-01-10', source: 'test' }];
     const a = at([
       ['2020-01-02', 100],
       ['2020-01-06', 90],
       ['2020-01-10', 95],
     ]);
-    expect(crisisReplays({ points: a, benchmark: a, windows: w }).windows[0]!.shallower).toBe(
+    expect(v(crisisReplays({ points: a, benchmark: a, windows: w })).windows[0]!.shallower).toBe(
       false,
     );
     const wiped = at([
@@ -128,21 +152,22 @@ describe('crisis replays', () => {
       ['2020-01-06', 0],
       ['2020-01-10', 1],
     ]);
-    const r = crisisReplays({ points: wiped, benchmark: a, windows: w });
-    expect(reason(r.windows[0]!.strategy)).toBe('equityNotPositive');
+    expect(reason(crisisReplays({ points: wiped, benchmark: a, windows: w }))).toBe(
+      'equityNotPositive',
+    );
     // A series ending on the window's end date covers it; one ending a day earlier does not.
     const early = at([
       ['2020-01-02', 100],
       ['2020-01-09', 100],
     ]);
-    expect(
-      reason(crisisReplays({ points: early, benchmark: a, windows: w }).windows[0]!.strategy),
-    ).toBe('notCovered');
+    expect(reason(crisisReplays({ points: early, benchmark: a, windows: w }))).toBe('notCovered');
+    expect(reason(crisisReplays({ points: a, benchmark: early, windows: w }))).toBe('notCovered');
+    expect(reason(crisisReplays({ points: a, benchmark: a, windows: [] }))).toBe('notCovered');
   });
 
-  it('refuses malformed windows', () => {
+  it('refuses malformed windows; core has no built-in list', () => {
     const a = at([['2020-01-02', 1]]);
-    const bad = (windows: { id: string; start: string; end: string; source: string }[]) => () =>
+    const bad = (windows: CrisisWindow[]) => () =>
       crisisReplays({ points: a, benchmark: a, windows });
     expect(bad([{ id: 'x', start: '2020-02-30', end: '2020-03-01', source: '' }])).toThrow('YYYY');
     expect(bad([{ id: 'x', start: '2020-03-01', end: '2020-03-01', source: '' }])).toThrow(
@@ -150,14 +175,22 @@ describe('crisis replays', () => {
     );
     const ok = { id: 'x', start: '2020-01-01', end: '2020-02-01', source: '' };
     expect(bad([ok, ok])).toThrow('twice');
+    expect(bad([{ ...ok, id: '' }])).toThrow('id and a source');
+    expect(() =>
+      crisisReplays({ points: a, benchmark: a } as unknown as Parameters<typeof crisisReplays>[0]),
+    ).toThrow('windows are required');
+    expect(Object.keys(core)).not.toContain('DEFAULT_CRISES');
   });
 
-  it('the default windows are the stated peak-to-trough dates', () => {
-    expect(DEFAULT_CRISES.map((c) => [c.id, c.start, c.end])).toEqual([
+  it('the US equity template holds the stated peak-to-trough dates, each with its source', () => {
+    expect(template.map((c) => [c.id, c.start, c.end])).toEqual([
       ['dotCom', '2000-03-24', '2002-10-09'],
       ['financialCrisis', '2007-10-09', '2009-03-09'],
       ['covid', '2020-02-19', '2020-03-23'],
       ['rates2022', '2022-01-03', '2022-10-12'],
     ]);
+    for (const c of template) expect(c.source).toContain(c.start);
+    // Valid windows for core.
+    expect(crisisReplays({ points: [], benchmark: [], windows: template }).ok).toBe(false);
   });
 });

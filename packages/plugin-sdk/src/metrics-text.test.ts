@@ -1,7 +1,10 @@
 // Tooltip coverage of the metric set (requirements 08 "Guidance", 13 CI gates): every metric
 // has its name, definition, why it matters and an example, and every no-value reason its text.
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
-  DEFAULT_CRISES,
+  type CrisisWindow,
   METRIC_IDS,
   NO_VALUE_REASONS,
   STATISTIC_IDS,
@@ -38,7 +41,14 @@ describe('statistic texts', () => {
         expect(hasText(`statistics.${id}.${part}`), `statistics.${id}.${part}`).toBe(true);
       }
     }
-    for (const w of DEFAULT_CRISES) {
+    // The crisis template's windows (core has no built-in list) have their names.
+    const template = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../templates/crises/us-equity.json',
+    );
+    const windows = JSON.parse(readFileSync(template, 'utf8')) as CrisisWindow[];
+    expect(windows.length).toBeGreaterThan(0);
+    for (const w of windows) {
       expect(hasText(`statistics.crisisSurvival.windows.${w.id}`), w.id).toBe(true);
     }
   });

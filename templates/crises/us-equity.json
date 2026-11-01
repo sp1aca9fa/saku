@@ -1,0 +1,26 @@
+[
+  {
+    "id": "dotCom",
+    "start": "2000-03-24",
+    "end": "2002-10-09",
+    "source": "S&P 500 price index closing high (2000-03-24) and closing low (2002-10-09), S&P Dow Jones Indices daily closing levels"
+  },
+  {
+    "id": "financialCrisis",
+    "start": "2007-10-09",
+    "end": "2009-03-09",
+    "source": "S&P 500 price index closing high (2007-10-09) and closing low (2009-03-09), S&P Dow Jones Indices daily closing levels"
+  },
+  {
+    "id": "covid",
+    "start": "2020-02-19",
+    "end": "2020-03-23",
+    "source": "S&P 500 price index closing high (2020-02-19) and closing low (2020-03-23), S&P Dow Jones Indices daily closing levels"
+  },
+  {
+    "id": "rates2022",
+    "start": "2022-01-03",
+    "end": "2022-10-12",
+    "source": "S&P 500 price index closing high (2022-01-03) and closing low (2022-10-12), S&P Dow Jones Indices daily closing levels"
+  }
+]

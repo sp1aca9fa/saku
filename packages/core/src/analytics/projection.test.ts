@@ -76,7 +76,11 @@ describe('Wilson interval', () => {
   it('matches the formula', () => {
     expect(wilson95(2, 4).low).toBeCloseTo(0.15003898915214953, 14);
     expect(wilson95(2, 4).high).toBeCloseTo(0.8499610108478505, 14);
-    expect(wilson95(0, 10).low).toBeCloseTo(0, 14);
+    expect(wilson95(0, 10).low).toBe(0);
+    for (const n of [1, 7, 50, 10_000]) {
+      expect(wilson95(0, n).low).toBe(0);
+      expect(wilson95(n, n).high).toBe(1);
+    }
     expect(wilson95(0, 10).high).toBeCloseTo(0.2775327998628892, 14);
     expect(wilson95(50, 50)).toEqual({ low: expect.closeTo(0.9286524008666414, 14), high: 1 });
     expect(() => wilson95(5, 4)).toThrow();
@@ -223,6 +227,27 @@ describe('goal projection', () => {
     const c = v(goalProjection(base({ history, seed: 4, goal: 1010 })));
     expect(a).toEqual(b);
     expect(c.endValues).not.toEqual(a.endValues);
+  });
+
+  it('fault: a run that reads simulated bars before they happen is refused', () => {
+    // The equity on the start date h depends on the last simulated close: a look-ahead.
+    const peeking = (bars: Record<string, RawBar[]>) => {
+      const last = bars.X!.at(-1)!.close;
+      return hold('X')(bars).map((e) =>
+        e.date <= '2024-01-31' ? { ...e, equity: e.equity * (1 + last * 1e-9) } : e,
+      );
+    };
+    const history = { X: series('2024-01-31', varied(400)) };
+    expect(() => goalProjection(base({ history, run: peeking }))).toThrow('reads simulated bars');
+    // A run whose history dates differ between paths is refused too.
+    let calls = 0;
+    const shifting = (bars: Record<string, RawBar[]>) => {
+      const out = hold('X')(bars);
+      return ++calls === 1 ? out : out.slice(1);
+    };
+    expect(() => goalProjection(base({ history, run: shifting }))).toThrow('reads simulated bars');
+    // An honest run passes the guard.
+    expect(goalProjection(base({ history })).ok).toBe(true);
   });
 
   it('refuses malformed input', () => {

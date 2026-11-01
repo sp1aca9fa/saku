@@ -440,7 +440,7 @@
       "name": "Deflated Sharpe ratio",
       "tooltip": "The confidence (0 to 1) that the strategy's true Sharpe ratio is above the best one luck alone would give among the variants tried. It allows for how many effectively independent variants were tried and for skewed, fat-tailed returns.",
       "why": "Trying many variants and keeping the best makes any backtest look good. This asks whether the result beats what the best of that many lucky tries would show.",
-      "example": "0.95: 95% confidence the edge is not luck after allowing for 20 independent variants tried. 0.5 or less: luck explains the result as well."
+      "example": "0.95: the Sharpe ratio is above the best expected from luck alone, with 95% probability, under the model's assumptions."
     },
     "overfittingProbability": {
       "name": "Probability of backtest overfitting",
@@ -456,13 +456,13 @@
     },
     "walkForward": {
       "name": "Time stability",
-      "tooltip": "The history is cut into up to 10 equal calendar periods of at least a year each; in each, the strategy's Sharpe ratio is compared with the benchmark's. The strategy's settings stay the same in every period.",
+      "tooltip": "The history is cut into up to 10 equal calendar periods of at least a year each; in each, the strategy's Sharpe ratio is compared with the benchmark's. The strategy's settings stay the same in every period, but they were chosen on this same history, so this is not an out-of-sample test.",
       "why": "A strategy that won only in one lucky stretch is fragile; winning in most periods is more convincing.",
       "example": "Won in 7 of 10 periods: the strategy had the higher Sharpe ratio in 7 periods."
     },
     "crisisSurvival": {
       "name": "Crisis survival",
-      "tooltip": "The deepest fall of the strategy and of the benchmark inside each major market crisis the data covers (from the S&P 500's peak to its trough). Crises before the data starts are shown as not covered, never as passed.",
+      "tooltip": "The deepest fall of the strategy and of the benchmark inside each major market crisis the data covers, from the crisis's peak to its trough (the source of each crisis's dates is shown with it). Crises before the data starts are shown as not covered, never as passed.",
       "why": "Protection matters most when markets crash; this shows whether the strategy fell less than the benchmark when it counted.",
       "example": "2007-2009: strategy -18%, benchmark -55%, so it fell less deep.",
       "windows": {
@@ -487,7 +487,8 @@
       "holdingsMissing": "No value: what the strategy held is missing on at least one day.",
       "grossMissing": "No value: no run without costs to compare with.",
       "tooFewTrials": "No value: fewer variants than this check compares.",
-      "notCovered": "Not covered: the data does not span this period."
+      "notCovered": "Not covered: the data does not span this period.",
+      "datesDiffer": "No value: the variants do not share the dates they are compared on."
     }
   }
 }

@@ -65,7 +65,8 @@ function foldSeries(
 export function walkForward(input: {
   points: readonly EquitySample[];
   benchmark: readonly EquitySample[];
-  cashReturn?: CashReturn;
+  /** Required: the Sharpe ratio is over the cash return (unknown stays unknown). */
+  cashReturn: CashReturn;
   folds?: number;
 }): Statistic<WalkForward> {
   const { points, benchmark } = input;
@@ -99,15 +100,17 @@ export function walkForward(input: {
           : undefined,
     });
   }
-  return ok({
-    folds,
-    won: folds.filter((f) => f.beat === true).length,
-    measured: folds.filter((f) => f.beat !== undefined).length,
-  });
+  const measured = folds.filter((f) => f.beat !== undefined).length;
+  if (measured === 0) {
+    const first = folds[0]!;
+    const m = !first.strategy.ok ? first.strategy : first.benchmark;
+    return noValue(m.ok ? 'tooShort' : m.reason);
+  }
+  return ok({ folds, won: folds.filter((f) => f.beat === true).length, measured });
 }
 
 export interface CrisisWindow {
-  /** A stable id; the default windows have their names under `statistics.crisisSurvival.windows`. */
+  /** A stable id; a name text, when the content has one, is `statistics.crisisSurvival.windows.<id>`. */
   id: string;
   /** The peak's date. */
   start: TradingDate;
@@ -116,17 +119,6 @@ export interface CrisisWindow {
   /** Where the dates come from. */
   source: string;
 }
-
-const SP500_SOURCE =
-  'S&P 500 price index closing high and low (S&P Dow Jones Indices daily closing levels)';
-
-/** The default crisis windows (data; editable): S&P 500 peak-to-trough closes. */
-export const DEFAULT_CRISES: readonly CrisisWindow[] = [
-  { id: 'dotCom', start: '2000-03-24', end: '2002-10-09', source: SP500_SOURCE },
-  { id: 'financialCrisis', start: '2007-10-09', end: '2009-03-09', source: SP500_SOURCE },
-  { id: 'covid', start: '2020-02-19', end: '2020-03-23', source: SP500_SOURCE },
-  { id: 'rates2022', start: '2022-01-03', end: '2022-10-12', source: SP500_SOURCE },
-];
 
 export interface CrisisFigures {
   /** The deepest running-peak drawdown inside the window (<= 0). */
@@ -174,17 +166,25 @@ function inWindow(series: readonly EquitySample[], w: CrisisWindow): Statistic<C
   return ok({ maxDrawdown, return: slice.at(-1)!.equity / slice[0]!.equity - 1 });
 }
 
-/** Strategy vs benchmark drawdown inside each crisis window. */
+/**
+ * Strategy vs benchmark drawdown inside each crisis window. The windows are data passed in (core
+ * has no built-in list: which crises matter depends on the install's market; a template is in
+ * `templates/crises/`).
+ */
 export function crisisReplays(input: {
   points: readonly EquitySample[];
   benchmark: readonly EquitySample[];
-  windows?: readonly CrisisWindow[];
-}): CrisisReplays {
+  windows: readonly CrisisWindow[];
+}): Statistic<CrisisReplays> {
   checkSeries(input.points, 'points');
   checkSeries(input.benchmark, 'benchmark');
-  const windows = input.windows ?? DEFAULT_CRISES;
+  const { windows } = input;
+  if (!Array.isArray(windows)) throw new Error('crisisReplays: the windows are required.');
   const ids = new Set<string>();
   for (const w of windows) {
+    if (typeof w.id !== 'string' || w.id === '' || typeof w.source !== 'string') {
+      throw new Error('crisisReplays: a window has an id and a source.');
+    }
     if (!isTradingDate(w.start) || !isTradingDate(w.end) || w.start >= w.end) {
       throw new Error(`crisis ${w.id}: start and end are YYYY-MM-DD dates, start before end.`);
     }
@@ -207,9 +207,16 @@ export function crisisReplays(input: {
           : undefined,
     };
   });
-  return {
+  const covered = out.filter((w) => w.shallower !== undefined).length;
+  if (covered === 0) {
+    const first = out[0];
+    if (!first) return noValue('notCovered');
+    const m = !first.strategy.ok ? first.strategy : first.benchmark;
+    return noValue(m.ok ? 'notCovered' : m.reason);
+  }
+  return ok({
     windows: out,
-    covered: out.filter((w) => w.shallower !== undefined).length,
+    covered,
     shallower: out.filter((w) => w.shallower === true).length,
-  };
+  });
 }

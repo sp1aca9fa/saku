@@ -94,6 +94,26 @@ describe('parameter sweep', () => {
     expect(() => sweepVariants(base, [{ paths: [LENGTH], values: [] }])).toThrow('one value');
     expect(() => sweepVariants(base, [{ paths: [], values: [1] }])).toThrow('one path');
     expect(() => sweepVariants(base, [{ paths: [[]], values: [1] }])).toThrow('not empty');
+    // Two parameters setting the same place: equal paths, or one inside the other.
+    expect(() =>
+      sweepVariants(base, [
+        { paths: [LENGTH], values: [50] },
+        { paths: [BAND, LENGTH], values: [1] },
+      ]),
+    ).toThrow('same place');
+    expect(() =>
+      sweepVariants(base, [
+        { paths: [['signals', 0, 'right']], values: [{ threshold: 1 }] },
+        { paths: [LENGTH], values: [50] },
+      ]),
+    ).toThrow('same place');
+    // Sibling paths are fine, and one parameter may list a path once per place.
+    expect(
+      sweepVariants(base, [
+        { paths: [LENGTH], values: [50] },
+        { paths: [['signals', 0, 'right', 'ticker']], values: ['X'] },
+      ]),
+    ).toHaveLength(1);
   });
 
   it('neighbors: one step in one parameter, previous before next', () => {

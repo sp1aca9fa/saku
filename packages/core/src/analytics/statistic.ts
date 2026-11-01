@@ -8,6 +8,8 @@ export const STATISTIC_NO_VALUE_REASONS = [
   'tooFewTrials',
   /** The data does not span the window. */
   'notCovered',
+  /** Trials do not share the dates they are compared on. */
+  'datesDiffer',
 ] as const;
 export type StatisticReason = (typeof STATISTIC_NO_VALUE_REASONS)[number];
 

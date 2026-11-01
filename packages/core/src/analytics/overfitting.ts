@@ -45,6 +45,18 @@ export function alignTrials(input: TrialsInput): Statistic<AlignedTrials> {
     .filter(([, n]) => n === trials.length)
     .map(([d]) => d)
     .sort();
+  // A trial's own date strictly between two consecutive common dates: its return over that step
+  // spans two of its sessions and another trial's one, so the rows would not compare.
+  if (common.length >= 2) {
+    const first = common[0]!;
+    const last = common.at(-1)!;
+    const shared = new Set(common);
+    for (const t of trials) {
+      if (t.some((p) => p.date > first && p.date < last && !shared.has(p.date))) {
+        return noValue('datesDiffer');
+      }
+    }
+  }
   if (common.length - 1 < MIN_RETURNS) return noValue('tooShort');
   const cash: number[] = [];
   for (const d of common.slice(1)) {
@@ -91,15 +103,21 @@ export interface EffectiveTrials {
 }
 
 /**
- * Effective number of independent trials, N = rho + (1 - rho) M (Bailey and Lopez de Prado
- * 2014), rho the average pairwise Pearson correlation of the trials' returns, clamped to [0, 1].
+ * Effective number of independent trials, N = rho + (1 - rho) M, rho the average pairwise
+ * Pearson correlation of the trials' returns, clamped to [0, 1]. A common approximation under a
+ * constant average correlation; its source is unconfirmed (owner check C42), as the contract says
+ * (docs/analytics.md "Effective number of independent trials"). No trial: `tooFewTrials`; a trial
+ * without swings (its correlation undefined): `noDispersion`.
  */
-export function effectiveTrials(excess: readonly (readonly number[])[]): EffectiveTrials {
+export function effectiveTrials(
+  excess: readonly (readonly number[])[],
+): Statistic<EffectiveTrials> {
   checkMatrix(excess);
   const M = excess.length;
-  if (M === 0) throw new Error('effectiveTrials: no trial.');
+  if (M === 0) return noValue('tooFewTrials');
+  if (excess.some((x) => !(sampleSd(x) > DISPERSION_FLOOR))) return noValue('noDispersion');
   const T = excess[0]!.length;
-  if (M === 1) return { effective: 1, trials: 1, averageCorrelation: undefined, returns: T };
+  if (M === 1) return ok({ effective: 1, trials: 1, averageCorrelation: undefined, returns: T });
   const centered = excess.map((x) => {
     const m = mean(x);
     return x.map((v) => v - m);
@@ -118,7 +136,7 @@ export function effectiveTrials(excess: readonly (readonly number[])[]): Effecti
     }
   }
   const rho = Math.min(1, Math.max(0, sum / pairs));
-  return { effective: rho + (1 - rho) * M, trials: M, averageCorrelation: rho, returns: T };
+  return ok({ effective: rho + (1 - rho) * M, trials: M, averageCorrelation: rho, returns: T });
 }
 
 /** Euler-Mascheroni constant. */
@@ -235,7 +253,9 @@ export function deflatedSharpe(
   if (x.length < MIN_RETURNS) return noValue('tooShort');
   if (excess.some((t) => !(sampleSd(t) > DISPERSION_FLOOR))) return noValue('noDispersion');
   const sharpes = excess.map(dailySharpe);
-  const { effective } = effectiveTrials(excess);
+  const n = effectiveTrials(excess);
+  if (!n.ok) return n;
+  const effective = n.value.effective;
   const { skewness, kurtosis } = moments(x);
   return deflatedSharpeFromMoments({
     sharpe: sharpes[selected]!,
@@ -313,6 +333,8 @@ export function backtestOverfitting(
     s1.push(a);
     s2.push(q);
   }
+  // The floor scales with the returns' size: for a constant return the subtraction leaves only
+  // rounding of the order of 1e-16 x S2, which a fixed floor would read as a spread.
   const floor2 = DISPERSION_FLOOR * DISPERSION_FLOOR;
   /** Each trial's Sharpe over the blocks (ascending); undefined when any has no dispersion. */
   const sharpesOver = (blocks: readonly number[]): number[] | undefined => {
@@ -326,7 +348,7 @@ export function backtestOverfitting(
         S2 += s2[j]![k]!;
       }
       const variance = (S2 - (S1 * S1) / m) / (m - 1);
-      if (!(variance > floor2)) return undefined;
+      if (!(variance > Math.max(floor2, (1e-14 * S2) / m))) return undefined;
       out.push(S1 / m / Math.sqrt(variance));
     }
     return out;
@@ -397,7 +419,7 @@ export function overfitting(
   }
   const { excess } = aligned.value;
   return {
-    effectiveTrials: ok(effectiveTrials(excess)),
+    effectiveTrials: effectiveTrials(excess),
     deflatedSharpe: deflatedSharpe(excess, input.selected),
     overfittingProbability: backtestOverfitting(excess, input.partitions),
   };
