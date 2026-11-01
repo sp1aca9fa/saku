@@ -1079,3 +1079,168 @@ describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
     expect(Object.keys(a).sort()).toEqual(['dates', 'equity', 'switches']);
   });
 });
+
+describe('reference: bars between sessions (docs/indicators.md "Returns")', () => {
+  // G may be held (an allocation) and has no bar on D[2], so D[2] is not a session; H, the held
+  // ticker, has a bar there.
+  const D = ['2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06'];
+  const mk = (list: (Partial<RefBar> & { close: number })[], skip?: number): RefBar[] =>
+    list
+      .map((b, i) => ({
+        date: D[i]!,
+        divCash: 0,
+        splitFactor: 1,
+        closeIsSplitAdjusted: false,
+        ...b,
+      }))
+      .filter((_, i) => i !== skip);
+  const G = mk(
+    [10, 10, 10, 10].map((c) => ({ open: c, close: c })),
+    2,
+  );
+  const hold = (t: string) => [{ ticker: t, weight: 100 }];
+  const decide = (t: string, dates: string[]): RefDay[] =>
+    dates.map((date) => ({ date, signals: {}, allocation: 'a', holdings: hold(t) }));
+  const strategy = (t: string, execution: 'next_close' | 'next_open' = 'next_close') => ({
+    execution,
+    allocations: [
+      { name: 'a', holdings: hold(t) },
+      { name: 'g', holdings: hold('G') },
+    ],
+  });
+  const sessionDates = [D[0]!, D[1]!, D[3]!];
+
+  it('a 2:1 split on a gap day is not a 50% loss (fractional, whole day)', () => {
+    // H: 200, 200, 101 (2:1 split, gap), 102. Bought at D[1]'s close (200).
+    // D[3]: (101 x 2 / 200) x (102 / 101) = 1.02.
+    const H = mk([{ close: 200 }, { close: 200 }, { close: 101, splitFactor: 2 }, { close: 102 }]);
+    const r = refBacktest(strategy('H'), decide('H', sessionDates), { H, G }, () => 0);
+    expect(r.dates).toEqual(sessionDates);
+    r.equity.forEach((e, i) => expect(e).toBeCloseTo([1, 1, 1.02][i]!, 12));
+  });
+
+  it('a gap dividend is compounded; next_open puts the gap into the night part', () => {
+    // H: 100, 100 (open 100), gap 98 with a dividend of 2, D[3] open 99, close 102.
+    // Day-0 decision trades at D[1] open; D[1] equity 1. D[3] (no trade, whole day):
+    // (98 + 2) / 100 x 102 / 98.
+    const H = mk([
+      { close: 100 },
+      { open: 100, close: 100 },
+      { close: 98, divCash: 2 },
+      { open: 99, close: 102 },
+    ]);
+    const r = refBacktest(strategy('H', 'next_open'), decide('H', sessionDates), { H, G }, () => 0);
+    r.equity.forEach((e, i) => expect(e).toBeCloseTo([1, 1, (100 / 100) * (102 / 98)][i]!, 12));
+    // A trade at D[3] open: the night part holds the gap (to the open 99), the day part 102/99.
+    const days = [...decide('H', [D[0]!]), ...decide('G', [D[1]!, D[3]!])];
+    const r2 = refBacktest(strategy('H', 'next_open'), days, { H, G }, () => 0);
+    // Night: (98 + 2) / 100 x 99 / 98 on H, then switch to G (no costs), G flat in the day.
+    expect(r2.equity[2]).toBeCloseTo((100 / 100) * (99 / 98), 12);
+  });
+
+  it('a synthetic ticker takes L x the compounded base return, financing once', () => {
+    // X: 100, 100, gap 110, 121. L = 2, rate 25.2% (0.001 a session):
+    // D[3]: 1 + 2 x (121 / 100 - 1) - (2 - 1) x 0.001 = 1.419 (a daily reset would give 1.439).
+    const X = mk([{ close: 100 }, { close: 100 }, { close: 110 }, { close: 121 }]);
+    const r = refBacktest(strategy('X?L=2'), decide('X?L=2', sessionDates), { X, G }, () => 25.2);
+    expect(r.equity[2]).toBeCloseTo(1.419, 12);
+  });
+
+  it('a cash-only strategy takes its sessions from the evaluated dates', () => {
+    const S = mk([{ close: 1 }, { close: 1 }, { close: 1 }, { close: 1 }]);
+    const days = decide('CASH_USD', [D[0]!, D[1]!, D[3]!]);
+    // Z is loaded but not held: its dates do not make sessions.
+    const r = refBacktest({ execution: 'next_close' }, days, { S, Z: S }, () => 25.2);
+    expect(r.dates).toEqual([D[0], D[1], D[3]]);
+    // Bought at D[1]'s close; one night to D[3]: 1.001.
+    expect(r.equity[2]).toBeCloseTo(1.001, 12);
+  });
+
+  describe('whole shares', () => {
+    const usd = (initialAmount: string) => ({ wholeShares: { initialAmount, currency: 'USD' } });
+
+    it('a 2:1 split on a gap day doubles the shares', () => {
+      // 5 shares at 200; gap split x 2 -> 10; D[3] close 102: 1020.
+      const H = mk([
+        { close: 200 },
+        { close: 200 },
+        { close: 101, splitFactor: 2 },
+        { close: 102 },
+      ]);
+      const r = refBacktest(
+        strategy('H'),
+        decide('H', sessionDates),
+        { H, G },
+        () => 0,
+        usd('1000'),
+      );
+      expect(r.value!.map((v) => v.amount)).toEqual([1000, 1000, 1020]);
+    });
+
+    it('gap bars first in date order, fraction at the gap close, dividends on kept shares', () => {
+      // 5 shares at 200, residual 100. Gap: split 1.5 -> 7.5: 7 kept, 0.5 x 140 = 70 cash; gap
+      // dividend 1 x 7 = 7. Session bar: dividend 2 x 7 = 14, close 141.
+      // Value 100 + 70 + 7 + 14 + 7 x 141 = 1178.
+      const H = mk([
+        { close: 200 },
+        { close: 200 },
+        { close: 140, splitFactor: 1.5, divCash: 1 },
+        { close: 141, divCash: 2 },
+      ]);
+      const r = refBacktest(
+        strategy('H'),
+        decide('H', sessionDates),
+        { H, G },
+        () => 0,
+        usd('1100'),
+      );
+      expect(r.value![2]!.amount).toBeCloseTo(1178, 9);
+      expect(r.weights![2]!.CASH_USD).toBeCloseTo(191 / 1178, 12);
+    });
+
+    it('a cost rate of 100% or more is refused', () => {
+      const H = mk([{ close: 200 }, { close: 200 }, { close: 200 }, { close: 200 }]);
+      for (const costs of [{ feePct: 100 }, { slippageBps: 5000, feePct: 50 }, { feePct: 150 }]) {
+        expect(() =>
+          refBacktest(
+            { ...strategy('H'), costs },
+            decide('H', sessionDates),
+            { H, G },
+            () => 0,
+            usd('1000'),
+          ),
+        ).toThrow(/100% or more/);
+      }
+      // 99.99% is allowed.
+      expect(() =>
+        refBacktest(
+          { ...strategy('H'), costs: { feePct: 99.99 } },
+          decide('H', sessionDates),
+          { H, G },
+          () => 0,
+          usd('1000'),
+        ),
+      ).not.toThrow();
+    });
+
+    it('a ticker listed twice in an allocation that is never traded is refused up front', () => {
+      const H = mk([{ close: 200 }, { close: 200 }, { close: 200 }, { close: 200 }]);
+      const s = {
+        execution: 'next_close' as const,
+        allocations: [
+          { name: 'a', holdings: hold('H') },
+          {
+            name: 'dup',
+            holdings: [
+              { ticker: 'G', weight: 50 },
+              { ticker: 'G', weight: 50 },
+            ],
+          },
+        ],
+      };
+      expect(() =>
+        refBacktest(s, decide('H', sessionDates), { H, G }, () => 0, usd('1000')),
+      ).toThrow(/twice/);
+    });
+  });
+});

@@ -283,6 +283,92 @@ describe('backtest', () => {
   });
 });
 
+// docs/indicators.md "Equity curves", "Returns": a held ticker's bars dated between two sessions
+// (another ticker it may hold has no bar there) are compounded into the next session, never dropped.
+describe('bars between sessions', () => {
+  const at = (date: string, holdings: Holding[]): StrategyDay => ({
+    date,
+    signals: {},
+    allocation: holdings.map((h) => h.ticker).join(),
+    holdings,
+    ties: [],
+  });
+  const x100 = [{ ticker: 'X', weight: 100 }];
+  const yAllocation = {
+    allocations: [{ name: 'Y', holdings: [{ ticker: 'Y', weight: 100 }] }],
+  } as unknown as Partial<Pick<Strategy, 'allocations'>>;
+
+  it('a 2:1 split on a date that is no session counts (Y has no bar there)', () => {
+    const r = backtest({
+      strategy: { execution: 'same_close', costs: {}, ...yAllocation },
+      days: [at('2026-01-05', x100), at('2026-01-07', x100)],
+      bars: {
+        X: [
+          bar('2026-01-05', 100),
+          bar('2026-01-06', 55, { splitFactor: 2 }),
+          bar('2026-01-07', 51),
+        ],
+        Y: [bar('2026-01-05', 10), bar('2026-01-07', 10)],
+      },
+      cashRate: none,
+    });
+    expect(r.points.map((p) => p.date)).toEqual(['2026-01-05', '2026-01-07']);
+    // 100 -> 55 x 2 -> 51 x 2: +2%, not 51 / 55 - 1 (the gap's day and split dropped).
+    expect(r.points[1]!.equity).toBeCloseTo(1.02, 12);
+  });
+
+  it('next open: the gap bars (split, dividend) go into the night part, before the trade', () => {
+    const r = backtest({
+      strategy: { execution: 'next_open', costs: {}, ...yAllocation },
+      days: [
+        at('2026-01-05', x100),
+        at('2026-01-06', [{ ticker: 'Y', weight: 100 }]),
+        at('2026-01-08', [{ ticker: 'Y', weight: 100 }]),
+      ],
+      bars: {
+        X: [
+          bar('2026-01-05', 100),
+          bar('2026-01-06', 100, { open: 100 }),
+          bar('2026-01-07', 51, { open: 50, splitFactor: 2, divCash: 1 }),
+          bar('2026-01-08', 53, { open: 52 }),
+        ],
+        Y: [
+          bar('2026-01-05', 10),
+          bar('2026-01-06', 10, { open: 10 }),
+          bar('2026-01-08', 11, { open: 10 }),
+        ],
+      },
+      cashRate: none,
+    });
+    // X bought at 01-06's open; 01-08's night: (51 + 1) x 2 / 100, then 52 / 51; Y's day 11 / 10.
+    expect(r.points[1]!.equity).toBe(1);
+    expect(r.points[2]!.equity).toBeCloseTo(((52 * 2) / 100) * (52 / 51) * 1.1, 12);
+    expect(r.points[2]!.weights).toEqual({ Y: 1 });
+  });
+
+  it('without a gap the return is the same as before, to the bit', () => {
+    const r = backtest({
+      strategy: { execution: 'same_close', costs: {} },
+      days: [at('2026-01-05', x100), at('2026-01-06', x100)],
+      bars: { X: [bar('2026-01-05', 3), bar('2026-01-06', 7, { divCash: 0.1, splitFactor: 3 })] },
+      cashRate: none,
+    });
+    expect(r.points[1]!.equity).toBe(1 + (((7 + 0.1) * 3) / 3 - 1));
+  });
+
+  it('a strategy that may hold only cash: the sessions are the evaluated dates', () => {
+    const cash = [{ ticker: 'CASH_USD', weight: 100 }];
+    const r = backtest({
+      strategy: { execution: 'same_close', costs: {} },
+      days: [at('2026-01-05', cash), at('2026-01-07', cash)],
+      bars: { X: [bar('2026-01-05', 1), bar('2026-01-06', 1), bar('2026-01-07', 1)] },
+      cashRate: () => 2.52,
+    });
+    expect(r.points.map((p) => p.date)).toEqual(['2026-01-05', '2026-01-07']);
+    expect(r.points[1]!.equity).toBeCloseTo(1.0001, 15);
+  });
+});
+
 describe('holdings compare order-insensitively (a reorder is no trade)', () => {
   const A: Holding[] = [
     { ticker: 'SPY', weight: 50 },

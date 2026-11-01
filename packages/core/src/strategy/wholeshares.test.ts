@@ -403,6 +403,118 @@ describe('whole shares', () => {
     ).toThrow(/listed twice/);
   });
 
+  it('bars between sessions: splits and dividends of a gap are applied, in order', () => {
+    // Y (in an allocation) has no bar on 01-06, so 01-06 is no session. X splits 2:1 there:
+    // 10 shares become 20 (worth 20 x 51 on 01-07), not 10 x 51 (a fake 50% loss).
+    const allocations = [{ name: 'Y', holdings: [{ ticker: 'Y', weight: 100 }] }];
+    const days = (list: [string, string][]): StrategyDay[] =>
+      list.map(([date, t]) => ({
+        date,
+        signals: {},
+        allocation: t,
+        holdings: [{ ticker: t, weight: 100 }],
+        ties: [],
+      }));
+    const go = (execution: Execution, d: StrategyDay[], bars: Record<string, RawBar[]>) =>
+      backtest({
+        strategy: { execution, costs: {}, allocations } as unknown as BacktestInput['strategy'],
+        days: d,
+        bars,
+        cashRate: none,
+        wholeShares: { initialAmount: '1000', currency: 'USD' },
+      });
+    const minimal = go(
+      'same_close',
+      days([
+        ['2026-01-05', 'X'],
+        ['2026-01-07', 'X'],
+      ]),
+      {
+        X: [
+          bar('2026-01-05', 100),
+          bar('2026-01-06', 50, { splitFactor: 2 }),
+          bar('2026-01-07', 51),
+        ],
+        Y: [bar('2026-01-05', 10), bar('2026-01-07', 10)],
+      },
+    );
+    expect(minimal.points.map((p) => p.value!.amount)).toEqual([1000, 1020]);
+    expect(minimal.points[1]!.weights).toEqual({ X: 1 });
+
+    // A gap split leaving a fraction: paid at the gap bar's close (210), not the session's (220).
+    const fraction = go(
+      'same_close',
+      days([
+        ['2026-01-05', 'X'],
+        ['2026-01-07', 'X'],
+      ]),
+      {
+        X: [
+          bar('2026-01-05', 300),
+          bar('2026-01-06', 210, { splitFactor: 1.5 }),
+          bar('2026-01-07', 220),
+        ],
+        Y: [bar('2026-01-05', 10), bar('2026-01-07', 10)],
+      },
+    );
+    expect(fraction.points[1]!.value).toEqual(usd(4 * 220 + 100 + 0.5 * 210));
+
+    // next_open: 01-08's night takes 01-07's split and dividend (10 -> 20 shares, 20 x 1 cash),
+    // then the trade at the open: V = 20 + 20 x 52 = 1060, 106 Y at 10.
+    const open = go(
+      'next_open',
+      days([
+        ['2026-01-05', 'X'],
+        ['2026-01-06', 'Y'],
+        ['2026-01-08', 'Y'],
+      ]),
+      {
+        X: [
+          bar('2026-01-05', 100),
+          bar('2026-01-06', 100, { open: 100 }),
+          bar('2026-01-07', 51, { open: 50, splitFactor: 2, divCash: 1 }),
+          bar('2026-01-08', 53, { open: 52 }),
+        ],
+        Y: [
+          bar('2026-01-05', 10),
+          bar('2026-01-06', 10, { open: 10 }),
+          bar('2026-01-08', 11, { open: 10 }),
+        ],
+      },
+    );
+    expect(open.wholeShares!.trades[1]).toMatchObject({
+      date: '2026-01-08',
+      at: 'open',
+      value: usd(1060),
+      shares: { Y: 106 },
+      residualCash: usd(0),
+    });
+    expect(open.points[2]!.value).toEqual(usd(1166));
+  });
+
+  it('a target listing a ticker twice is refused up front, even one never traded', () => {
+    const twice = [
+      { ticker: 'X', weight: 50 },
+      { ticker: 'X', weight: 50 },
+    ];
+    expect(() =>
+      backtest({
+        strategy: {
+          execution: 'same_close',
+          costs: {},
+          allocations: [
+            { name: 'A', holdings: [{ ticker: 'X', weight: 100 }] },
+            { name: 'B', holdings: twice },
+          ],
+        } as unknown as BacktestInput['strategy'],
+        days: decide(['X']),
+        bars: { X: [bar(D[0]!, 100)] },
+        cashRate: none,
+        wholeShares: { initialAmount: '1000', currency: 'USD' },
+      }),
+    ).toThrow(/X is listed twice in one target/);
+  });
+
   it('without the option: no amounts in the result', () => {
     const r = backtest({
       strategy: { execution: 'same_close', costs: {} },

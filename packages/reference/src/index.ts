@@ -533,28 +533,44 @@ export function refBacktest(
     if (t === undefined) throw new Error(`reference: malformed ticker ${JSON.stringify(ticker)}`);
     return t;
   };
-  const ret = (ticker: string, date: string, part: 'night' | 'day' | 'whole'): number => {
+  // A session's return (docs/indicators.md "Returns"): from the ticker's last bar on or before the
+  // previous session, every bar dated in between (a gap) is compounded, close to close with its
+  // split and dividend, into the night part or the whole day; then the session's own bar. A
+  // synthetic ticker takes L x that compounded base return; financing, expense and cash accrue
+  // once per session.
+  const ret = (
+    ticker: string,
+    prevDate: string,
+    date: string,
+    part: 'night' | 'day' | 'whole',
+  ): number => {
     const daily = cashRate(date) / 100 / 252;
     if (ticker === 'CASH_USD') return part === 'day' ? 0 : daily;
     const { base, L, E } = parse(ticker);
-    const list = bars[base]!;
-    const i = list.findIndex((b) => b.date === date);
-    if (i < 1) throw new Error(`reference: no bar or no previous bar for ${base} on ${date}`);
-    const b = list[i]!;
-    const p = list[i - 1]!;
-    const k = b.closeIsSplitAdjusted ? 1 : b.splitFactor;
+    const { from, gap, bar: b } = refPartBars(bars[base]!, prevDate, date);
+    const factor = (x: RefBar) => (x.closeIsSplitAdjusted ? 1 : x.splitFactor);
     let r: number;
-    if (part === 'whole') r = ((b.close + b.divCash) * k) / p.close - 1;
-    else if (part === 'night') r = ((b.open! + b.divCash) * k) / p.close - 1;
-    else r = b.close / b.open! - 1;
-    return part === 'day' ? L * r : L * r - (L - 1) * daily - E / 100 / 252;
+    if (part === 'day') {
+      r = b.close / b.open! - 1;
+      return L * r;
+    }
+    let gross = 1;
+    let last = from.close;
+    for (const g of gap) {
+      gross *= ((g.close + g.divCash) * factor(g)) / last;
+      last = g.close;
+    }
+    const end = part === 'whole' ? b.close : b.open!;
+    gross *= ((end + b.divCash) * factor(b)) / last;
+    r = gross - 1;
+    return L * r - (L - 1) * daily - E / 100 / 252;
   };
 
   let value: Record<string, number> = {}; // money per holding
   let switches = 0;
   const total = () => Object.values(value).reduce((a, b) => a + b, 0);
-  const move = (date: string, part: 'night' | 'day' | 'whole') => {
-    for (const t of Object.keys(value)) value[t] = value[t]! * (1 + ret(t, date, part));
+  const move = (prevDate: string, date: string, part: 'night' | 'day' | 'whole') => {
+    for (const t of Object.keys(value)) value[t] = value[t]! * (1 + ret(t, prevDate, date, part));
   };
   const rebalance = (holdings: { ticker: string; weight: number }[]) => {
     const before = total();
@@ -599,8 +615,8 @@ export function refBacktest(
     }
     sessions = [...counts].filter(([, n]) => n === mayHold.size).map(([date]) => date);
   } else {
-    // Only cash may be held: every date with any bar counts (no ticker to require).
-    sessions = [...new Set(Object.values(bars).flatMap((list) => list.map((b) => b.date)))];
+    // Only cash may be held: no ticker to take sessions from; the sessions are the evaluated dates.
+    sessions = days.map((d) => d.date);
   }
   // An evaluated day is never dropped: if a ticker lacks its bar, valuing it fails loudly.
   const known = new Set(sessions);
@@ -625,8 +641,8 @@ export function refBacktest(
   const ws = options?.wholeShares
     ? refWholeShareBook(options.wholeShares, { costRate, bars, cashRate, targets, mayHold })
     : undefined;
-  const doMove = (date: string, part: 'night' | 'day' | 'whole') =>
-    ws ? ws.move(date, part) : move(date, part);
+  const doMove = (prevDate: string, date: string, part: 'night' | 'day' | 'whole') =>
+    ws ? ws.move(prevDate, date, part) : move(prevDate, date, part);
   const doTrade = (h: RefDay['holdings'], date: string, time: 'open' | 'close') => {
     if (ws) {
       if (ws.trade(h, date, time)) switches++;
@@ -639,14 +655,15 @@ export function refBacktest(
   for (let i = 0; i < sessions.length; i++) {
     const d = { date: sessions[i]!, holdings: decisionOn(sessions[i]!) };
     if (i > 0) {
+      const prev = sessions[i - 1]!;
       if (execution === 'next_open' && queued) {
-        doMove(d.date, 'night');
+        doMove(prev, d.date, 'night');
         doTrade(queued, d.date, 'open');
         current = key(queued);
         queued = undefined;
-        doMove(d.date, 'day');
+        doMove(prev, d.date, 'day');
       } else {
-        doMove(d.date, 'whole');
+        doMove(prev, d.date, 'whole');
         if (execution === 'next_close' && queued) {
           doTrade(queued, d.date, 'close');
           current = key(queued);
@@ -711,6 +728,24 @@ export interface RefBacktestResult {
 
 const USD = (amount: number): RefMoney => ({ amount, currency: 'USD' });
 
+/**
+ * The bars a session step reads for one ticker: `from`, its last bar on or before the previous
+ * session; `gap`, its bars dated after that and before the session, in date order; `bar`, the
+ * session's own bar. A missing `from` or session bar throws.
+ */
+export function refPartBars(
+  list: RefBar[],
+  prevDate: string,
+  date: string,
+): { from: RefBar; gap: RefBar[]; bar: RefBar } {
+  let from: RefBar | undefined;
+  for (const b of list) if (b.date <= prevDate) from = b;
+  const bar = list.find((b) => b.date === date);
+  if (!from || !bar) throw new Error(`reference: no bar to step from ${prevDate} to ${date}`);
+  const gap = list.filter((b) => b.date > from.date && b.date < date);
+  return { from, gap, bar };
+}
+
 // Whole-number snaps (docs/indicators.md "Whole shares"), relative |x - k| <= tol x |x|. One
 // constant each, so a contract change touches one line.
 const SIZING_SNAP = 1e-12; // share count x before the floor at a trade (float noise only)
@@ -748,6 +783,8 @@ function refWholeShareBook(
     throw new Error(`reference: whole shares: initial amount ${JSON.stringify(opt.initialAmount)}`);
   }
   const initial = Number(opt.initialAmount);
+  // A cost rate of 100% or more leaves no budget above 0.
+  if (!(c < 1)) throw new Error(`reference: whole shares: cost rate ${c} is 100% or more`);
   for (const t of ctx.targets) {
     const names = t.map((h) => h.ticker);
     if (new Set(names).size !== names.length) {
@@ -807,27 +844,36 @@ function refWholeShareBook(
   const trades: RefTrade[] = [];
 
   return {
-    move(date: string, part: 'night' | 'day' | 'whole') {
+    move(prevDate: string, date: string, part: 'night' | 'day' | 'whole') {
       if (!started || part === 'day') return; // interest and events belong to the night / whole day
       // 1. Interest on the cash at the start of the part; the rate is read only when it is > 0.
       if (residual > 0) residual = residual * (1 + rateOn(date) / 100 / 252);
       for (const t of Object.keys(shares)) {
-        const b = barAt(t, date);
-        // 2. Split: the product, snapped to a whole number within 1e-9; else the whole shares
-        //    are kept and the fraction is paid as cash at the part's end price.
-        const product = snapWhole(shares[t]! * b.splitFactor, SPLIT_SNAP);
-        const kept = Math.floor(product);
-        if (product !== kept) {
-          const endPrice = part === 'night' ? b.open : b.close;
-          if (endPrice === undefined)
-            throw new Error(`reference: whole shares: no open for ${t} on ${date}`);
-          residual += (product - kept) * endPrice;
+        // 2. Each of the ticker's bars of the part in date order: the gap's, then the session's.
+        const { gap, bar } = refPartBars(bars[t]!, prevDate, date);
+        const sessionEnd = part === 'night' ? bar.open : bar.close;
+        const steps: [RefBar, number | undefined][] = [
+          ...gap.map((g): [RefBar, number] => [g, g.close]),
+          [bar, sessionEnd],
+        ];
+        let n = shares[t]!;
+        for (const [b, endPrice] of steps) {
+          // Split: the product, snapped within 1e-9; else the whole shares are kept and the
+          // fraction is paid as cash at that bar's close (gap) or the part's end price (session).
+          const product = snapWhole(n * b.splitFactor, SPLIT_SNAP);
+          const kept = Math.floor(product);
+          if (product !== kept) {
+            if (endPrice === undefined)
+              throw new Error(`reference: whole shares: no open for ${t} on ${date}`);
+            residual += (product - kept) * endPrice;
+          }
+          // Then the dividend on the whole shares kept after that bar's split.
+          residual += kept * b.divCash;
+          n = kept;
         }
-        // 3. Dividend on the whole shares kept after the split.
-        residual += kept * b.divCash;
         // A reverse split can leave 0 shares: the holding is then all cash.
-        if (kept === 0) delete shares[t];
-        else shares[t] = kept;
+        if (n === 0) delete shares[t];
+        else shares[t] = n;
       }
     },
 
