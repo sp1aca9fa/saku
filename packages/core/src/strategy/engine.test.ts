@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { RawBar } from '../domain';
-import { evaluate, signalLookbacks, signalTickers, splitAdjusted, whyUndecided } from './engine';
+import {
+  compareStep,
+  evaluate,
+  signalLookbacks,
+  signalTickers,
+  splitAdjusted,
+  whyUndecided,
+} from './engine';
 import { sma, volatility } from './indicators';
 import { Strategy } from './schema';
 import { parsePlainAgainstLevel } from './testkit';
@@ -150,6 +157,109 @@ describe('evaluate', () => {
     });
     const y = bars([1, 1, 1]).filter((_, i) => i !== 1);
     expect(evaluate(s, { X: bars([2, 2, 2]), Y: y }).map((d) => d.date)).toEqual([day(0), day(2)]);
+  });
+});
+
+// docs/indicators.md "Signals", compare: the band is reference +- |reference| x t/100 (decisions
+// log 2026-11-01), symmetric and the right way up for a negative reference.
+describe('tolerance band on a negative reference', () => {
+  // All-time drawdown of these closes: 0, -8, -10.5, -12, -10, -8.5, -10, -11.5.
+  const closes = [100, 92, 89.5, 88, 90, 91.5, 90, 88.5];
+  const withSignals = (signals: unknown[]) =>
+    strategy({
+      name: 't',
+      account: 'taxable',
+      safeState: { holdings: [{ ticker: 'X', weight: 100 }] },
+      evaluation: { frequency: 'daily' },
+      signals,
+      allocations: [{ name: 'All', holdings: [{ ticker: 'X', weight: 100 }] }],
+    });
+  const drawdown = { indicator: 'drawdown', ticker: 'X' };
+  const member = (op: string, tolerancePct: number) => ({
+    left: drawdown,
+    op,
+    right: { threshold: -10 },
+    tolerancePct,
+  });
+
+  it('drawdown against -10 with t = 10: true above -9, false below -11, unchanged between', () => {
+    const s = withSignals([
+      { id: 'up', type: 'compare', ...member('>', 10) },
+      { id: 'down', type: 'compare', ...member('<', 10) },
+    ]);
+    const days = evaluate(s, { X: bars(closes) });
+    // The inverted band (-11 as the upper bound) would flip on days 4 and 6 (-10).
+    expect(days.map((d) => d.signals.up)).toEqual([
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+    ]);
+    expect(days.map((d) => d.signals.down)).toEqual([
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+    ]);
+  });
+
+  it('ensemble members use the same band', () => {
+    const s = withSignals([
+      { id: 'E', type: 'ensemble', threshold: 0.5, members: [member('>', 10), member('>', 0)] },
+    ]);
+    const days = evaluate(s, { X: bars(closes) });
+    // Member 1 as above; member 2 (no band): -10.5 and -12 false; -9.999999999999998 (day 4,
+    // 90 / 100 - 1) is a near-tie with -10 and keeps the state, as on day 6.
+    expect(days.map((d) => d.signals.E)).toEqual([1, 1, 0.5, 0, 0, 1, 1, 0]);
+  });
+
+  it('a near-tie at either bound keeps the state', () => {
+    const c = { op: '>' as const, tolerancePct: 10 };
+    // Upper bound -9: within 1e-9 relative is a tie, beyond it the state follows.
+    expect(compareStep(-9 + 9 * 5e-10, -10, c, false)).toEqual({ state: false, tie: true });
+    expect(compareStep(-9 + 9 * 2e-9, -10, c, false)).toEqual({ state: true, tie: false });
+    // Lower bound -11.
+    expect(compareStep(-11 - 11 * 5e-10, -10, c, true)).toEqual({ state: true, tie: true });
+    expect(compareStep(-11 - 11 * 2e-9, -10, c, true)).toEqual({ state: false, tie: false });
+    // `<` mirrors it.
+    const lt = { op: '<' as const, tolerancePct: 10 };
+    expect(compareStep(-11 - 11 * 2e-9, -10, lt, false)).toEqual({ state: true, tie: false });
+    expect(compareStep(-9 + 9 * 2e-9, -10, lt, true)).toEqual({ state: false, tie: false });
+    expect(compareStep(-9.5, -10, lt, true)).toEqual({ state: true, tie: false });
+    // A positive reference: 100 +- 10, as before.
+    expect(compareStep(109, 100, c, false)).toEqual({ state: false, tie: false });
+    expect(compareStep(110 * (1 + 2e-9), 100, c, false)).toEqual({ state: true, tie: false });
+    expect(compareStep(91, 100, c, true)).toEqual({ state: true, tie: false });
+  });
+
+  it('a reference of 0 gives a band of no width (only exactly 0 is a tie)', () => {
+    const c = { op: '>' as const, tolerancePct: 10 };
+    expect(compareStep(1e-12, 0, c, false)).toEqual({ state: true, tie: false });
+    expect(compareStep(-1e-12, 0, c, true)).toEqual({ state: false, tie: false });
+    expect(compareStep(0, 0, c, true)).toEqual({ state: true, tie: true });
+    expect(compareStep(0, 0, c, false)).toEqual({ state: false, tie: true });
+    // Through a strategy: one-day returns +1, -0.99, 0, -1, +0.5 against 0 with t = 10.
+    const s = withSignals([
+      {
+        id: 'R',
+        type: 'compare',
+        left: { indicator: 'return', ticker: 'X', length: 1 },
+        op: '>',
+        right: { threshold: 0 },
+        tolerancePct: 10,
+      },
+    ]);
+    const days = evaluate(s, { X: bars([100, 101, 100, 100, 99, 99.5]) });
+    expect(days.map((d) => d.signals.R)).toEqual([true, false, false, false, true]);
+    expect(days.map((d) => d.ties)).toEqual([[], [], ['R'], [], []]);
   });
 });
 

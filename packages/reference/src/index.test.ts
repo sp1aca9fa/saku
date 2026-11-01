@@ -652,3 +652,103 @@ describe('reference: derived signals not / and / or', () => {
     expect(() => refEvaluate(cycle, bars)).toThrow(/cycle/);
   });
 });
+
+describe('reference: tolerance band right +- |right| x t/100', () => {
+  const series = (closes: number[]): Record<string, RefBar[]> => ({
+    Q: closes.map((close, i) => ({
+      date: `2026-05-${String(1 + i).padStart(2, '0')}`,
+      close,
+      divCash: 0,
+      splitFactor: 1,
+      closeIsSplitAdjusted: false,
+    })),
+  });
+  const dd = { indicator: 'drawdown' as const, ticker: 'Q' };
+  const one = (sig: RefStrategy['signals'][number]): RefStrategy => ({
+    signals: [sig],
+    allocations: [{ name: 'x', holdings: [{ ticker: 'CASH_USD', weight: 100 }] }],
+  });
+  const run = (s: RefStrategy, closes: number[], id = 'k') =>
+    refEvaluate(s, series(closes)).map((d) => d.signals[id]);
+
+  it('negative reference: drawdown > -10 with t = 10 is true above -9, false below -11', () => {
+    const s = one({
+      id: 'k',
+      type: 'compare',
+      left: dd,
+      op: '>',
+      right: { threshold: -10 },
+      tolerancePct: 10,
+    });
+    // All-time drawdowns (peak 100): 0, -8.5, -10, -11.5, -10, -9.5, -8.5.
+    // First day plain: 0 > -10 true; -8.5 > -9 true; -10 in the band: kept; -11.5 < -11 false;
+    // -10 kept; -9.5 kept; -8.5 true.
+    expect(run(s, [100, 91.5, 90, 88.5, 90, 90.5, 91.5])).toEqual([
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+    ]);
+    // The old band right x (1 +- t/100) would be inverted here (-11 above, -9 below).
+  });
+
+  it("'<' mirrors it with a negative reference", () => {
+    const s = one({
+      id: 'k',
+      type: 'compare',
+      left: dd,
+      op: '<',
+      right: { threshold: -10 },
+      tolerancePct: 10,
+    });
+    // 0 < -10 false; -11.5 below -11 true; -10 kept; -8.5 above -9 false.
+    expect(run(s, [100, 88.5, 90, 91.5])).toEqual([false, true, true, false]);
+  });
+
+  it('near-ties at each bound keep the state', () => {
+    const s = one({
+      id: 'k',
+      type: 'compare',
+      left: dd,
+      op: '>',
+      right: { threshold: -10 },
+      tolerancePct: 10,
+    });
+    // Drawdowns 0 (true), -11 (tie with the lower bound: kept true), -12 (false),
+    // -9 (tie with the upper bound: kept false), -8 (true). 89/100 - 1 and 91/100 - 1 carry
+    // float noise of about 1e-15, well within 1e-9 relative.
+    expect(run(s, [100, 89, 88, 91, 92])).toEqual([true, true, false, false, true]);
+  });
+
+  it('reference 0: the band has zero width, an exact 0 is a tie', () => {
+    const s = one({
+      id: 'k',
+      type: 'compare',
+      left: { indicator: 'return', ticker: 'Q', length: 1 },
+      op: '>',
+      right: { threshold: 0 },
+      tolerancePct: 10,
+    });
+    // Returns from day 2: +1% (true), 0 (tie: kept true), -0.99% (false), +0.1% (true).
+    expect(run(s, [100, 101, 101, 100, 100.1])).toEqual([true, true, false, true]);
+  });
+
+  it('ensemble members use the same band', () => {
+    const s = one({
+      id: 'e',
+      type: 'ensemble',
+      threshold: 0.5,
+      members: [
+        { left: dd, op: '>', right: { threshold: -10 }, tolerancePct: 10 }, // band [-11, -9]
+        { left: dd, op: '>', right: { threshold: -20 }, tolerancePct: 10 }, // band [-22, -18]
+      ],
+    });
+    // Drawdowns 0, -10, -19, -21, -23, -10:
+    //   m1: true, kept true, false, false, false, kept false
+    //   m2: true, true, kept true, kept true, false, true
+    expect(run(s, [100, 90, 81, 79, 77, 90], 'e')).toEqual([1, 1, 0.5, 0.5, 0, 0.5]);
+  });
+});

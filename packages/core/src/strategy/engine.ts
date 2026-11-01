@@ -186,16 +186,29 @@ function indicatorValues(o: IndicatorOperand, bars: RawBar[], s: number[]): (num
   }
 }
 
-/** One comparison's state through time: tolerance band, near-ties, plain first comparison. */
-function compareStep(
+/**
+ * One comparison's state through time: tolerance band, near-ties, plain first comparison.
+ *
+ * The band is the reference +- |reference| x t/100 (docs/indicators.md "Signals", compare;
+ * decisions log 2026-11-01; requirements 05 "symmetric hysteresis"): for a positive reference
+ * that is 05's reference x (1 +- t/100); the absolute value keeps the upper bound above the lower
+ * one when the reference is negative (a drawdown, a negative return), where reference x (1 + t/100)
+ * would be the lower bound and the band would be inverted. Computed as the two products
+ * reference x (1 +- t/100), the larger the upper bound: equal to reference +- |reference| x t/100
+ * (up to rounding, well inside the near-tie rule), and bit for bit what it was for a positive
+ * reference. A reference of exactly 0 gives a band of no width (owner question C27).
+ */
+export function compareStep(
   value: number,
   ref: number,
-  c: Comparison,
+  c: Pick<Comparison, 'op' | 'tolerancePct'>,
   prev: boolean | undefined,
 ): { state: boolean; tie: boolean } {
   const t = c.tolerancePct / 100;
-  const upper = ref * (1 + t);
-  const lower = ref * (1 - t);
+  const a = ref * (1 + t);
+  const b = ref * (1 - t);
+  const upper = ref < 0 ? b : a;
+  const lower = ref < 0 ? a : b;
   const near = (a: number, b: number) => Math.abs(a - b) <= NEAR_TIE * Math.abs(b);
   const tie = near(value, upper) || near(value, lower);
   const above = value > upper && !near(value, upper);

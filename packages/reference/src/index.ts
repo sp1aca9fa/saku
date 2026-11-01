@@ -326,11 +326,15 @@ export function refYangZhang(d: RefOhlc[], length: number): (number | undefined)
 
 type State = 'unset' | 'true' | 'false';
 
-/** One comparison step as a state machine (tolerance band, near-ties, plain first day). */
+/**
+ * One comparison step as a state machine (tolerance band, near-ties, plain first day). The band
+ * is right +- |right| x t/100 (docs/indicators.md "Signals", compare), so it stays symmetric and
+ * ordered for a negative reference and has zero width at a reference of 0.
+ */
 function refStep(value: number, ref: number, c: RefComparison, state: State): State {
   const t = (c.tolerancePct ?? 0) / 100;
-  const hi = ref * (1 + t);
-  const lo = ref * (1 - t);
+  const hi = ref + Math.abs(ref) * t;
+  const lo = ref - Math.abs(ref) * t;
   const tieWith = (bound: number) => Math.abs(value - bound) <= TIE * Math.abs(bound);
   if (state === 'unset') {
     if (tieWith(ref)) return 'false';

@@ -165,6 +165,42 @@ describe('core vs reference', () => {
   }
 });
 
+// docs/indicators.md "Signals", compare: the band is reference +- |reference| x t/100, so a
+// negative reference (a drawdown, a negative return) has its upper bound above the lower one.
+describe('core vs reference: tolerance bands on negative references', () => {
+  for (const seed of [11, 12, 13]) {
+    it(`agrees on seed ${seed}`, () => {
+      const bars = { X: walk(seed, 500, 0.05) };
+      const members = [
+        { indicator: 'drawdown', ticker: 'X', totalReturn: true },
+        { indicator: 'drawdown', ticker: 'X', length: 60, totalReturn: true },
+        { indicator: 'return', ticker: 'X', length: 20, totalReturn: true },
+      ].flatMap((left) =>
+        [-4, -8, -15].flatMap((level) =>
+          (['>', '<'] as const).map((op) => ({
+            left,
+            op,
+            right: { threshold: level },
+            tolerancePct: 25,
+          })),
+        ),
+      );
+      const strategy = Strategy.parse({
+        name: 'Negative references',
+        account: 'taxable',
+        safeState: { holdings: [{ ticker: 'X', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: members.map((m, i) => ({ id: `s${i}`, type: 'compare', ...m })),
+        allocations: [{ name: 'All', holdings: [{ ticker: 'X', weight: 100 }] }],
+      });
+      const core = evaluate(strategy, bars);
+      const ref = refEvaluate(strategy, bars);
+      expect(core.map((d) => d.date)).toEqual(ref.map((d) => d.date));
+      expect(core.map((d) => d.signals)).toEqual(ref.map((d) => d.signals));
+    });
+  }
+});
+
 describe('core vs reference: a reorder of the same holdings', () => {
   const mix = [
     { ticker: 'X', weight: 40 },
