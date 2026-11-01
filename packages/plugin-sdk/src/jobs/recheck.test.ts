@@ -220,7 +220,13 @@ const SECRET = 'k'.repeat(32);
 const AAA = [100, 101, 102, 103, 104, 105];
 const AAA2 = [50, 51, 52.0198, 53.0398, 54.0594, 55.0786];
 
-async function setup(o: { days?: number } = {}) {
+async function setup(
+  o: {
+    days?: number;
+    /** `library`: a version with no owner; `no_channel`: an owner with no channel. */
+    owner?: 'library' | 'no_channel';
+  } = {},
+) {
   const n = o.days ?? 5;
   const db = await testDb();
   await upsertSymbols(db, [
@@ -260,10 +266,12 @@ async function setup(o: { days?: number } = {}) {
     isAdmin: true,
   });
   await setSetting(db, 'time_zone', 'America/New_York');
-  await addChannel(db, owner, { type: 'fake', target: 'me', authSecret: SECRET });
+  if (o.owner === undefined) {
+    await addChannel(db, owner, { type: 'fake', target: 'me', authSecret: SECRET });
+  }
   // Registered after 01-08's close: the record starts with 01-09, the red day.
   const version = await registerVersion(db, {
-    ownerId: owner,
+    ownerId: o.owner === 'library' ? null : owner,
     name: 'Trend',
     strategy,
     at: new Date('2026-01-08T22:00:00Z'),
@@ -322,6 +330,7 @@ describe('the forward step and the alerts', () => {
       outcome: null,
     });
     expect(open!.provisionalSentAt).not.toBeNull();
+    expect(open!.provisionalChannels).toBe(1);
     // The provisional: the data problem in words, hourly until the deadline (install time zone),
     // the fallback safe state with exact holdings, the data health.
     expect(sent).toHaveLength(1);
@@ -394,9 +403,10 @@ describe('the forward step and the alerts', () => {
         },
       }),
     ]);
-    expect((await recheckOf(db, version.id, RED))!.finalSentAt).toBe(
-      (sentNotes[0]!.detail as { sentAt: string }).sentAt,
-    );
+    expect(await recheckOf(db, version.id, RED)).toMatchObject({
+      finalSentAt: (sentNotes[0]!.detail as { sentAt: string }).sentAt,
+      finalChannels: 1,
+    });
     // Later runs: nothing more (idempotent), nothing appended again.
     const again = await run(new Date('2026-01-12T13:20:00Z'));
     expect(again.f.appended).toBe(0);
@@ -592,11 +602,59 @@ describe('the forward step and the alerts', () => {
     const runId = await startRun(db, 'daily');
     await forward(db, { runId, sessions, to: RED, now: FIRST });
     expect((await sendRecheckAlerts(db, alerting(down))).failed).toHaveLength(1);
-    expect((await recheckOf(db, version.id, RED))!.provisionalSentAt).toBeNull();
+    expect(await recheckOf(db, version.id, RED)).toMatchObject({
+      provisionalSentAt: null,
+      provisionalChannels: null,
+    });
     expect((await sendRecheckAlerts(db, alerting(up))).sent).toBe(1);
     expect((await sendRecheckAlerts(db, alerting(up))).sent).toBe(0);
     expect(up.sent).toHaveLength(1);
     expect((await recheckOf(db, version.id, RED))!.provisionalSentAt).not.toBeNull();
+  });
+
+  it.each([
+    ['a library version', 'library'],
+    ['an owner with no channel', 'no_channel'],
+  ] as const)(
+    '%s: the re-check runs and closes, but no message is said to be sent',
+    async (_, owner) => {
+      const { db, version, run, correct, sent } = await setup({ owner });
+      expect((await run(FIRST)).failed).toEqual([]);
+      expect(await recheckOf(db, version.id, RED)).toMatchObject({
+        outcome: null,
+        provisionalSentAt: null,
+        provisionalChannels: 0,
+      });
+      await correct();
+      const at = new Date('2026-01-12T12:20:00Z');
+      expect((await run(at)).failed).toEqual([]);
+      expect((await forwardRecord(db, version.id))[0]).toMatchObject({
+        date: RED,
+        allocation: 'Risk on',
+      });
+      // Told to no channel: no sending time and no `red_recheck_sent` annotation; marked with 0
+      // so it is not looked at again.
+      expect(await recheckOf(db, version.id, RED)).toMatchObject({
+        outcome: 'cleared',
+        finalSentAt: null,
+        finalChannels: 0,
+      });
+      expect(await annotationsOf(db, version.id, 'red_recheck_sent')).toEqual([]);
+      expect((await run(new Date('2026-01-12T13:20:00Z'))).failed).toEqual([]);
+      expect(await annotationsOf(db, version.id, 'red_recheck_sent')).toEqual([]);
+      expect(sent).toEqual([]);
+    },
+  );
+
+  it('a day alert that is not a late safe state keeps "trade at", even when sent after the open', async () => {
+    const { run, correct, sent } = await setup();
+    // No red day (corrected before the first run); a catch-up run after Monday's open.
+    await correct();
+    expect((await run(new Date('2026-01-12T15:00:00Z'))).failed).toEqual([]);
+    expect(sent).toHaveLength(1);
+    const lines = sent[0]!.text.split('\n');
+    expect(lines).toContain('Trade at the US open on 2026-01-12.');
+    expect(sent[0]!.text).not.toContain('already passed');
   });
 
   it('nothing before the A1 gate (no forward records, no re-check)', async () => {

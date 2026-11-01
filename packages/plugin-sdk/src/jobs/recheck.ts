@@ -41,7 +41,8 @@ export function recheckDeadline(
 
 /**
  * At the first grading of a red day: `open` when the run's next hourly check still comes before the
- * deadline (`start` + period <= deadline, `start` the run's start, the timer's tick) and the
+ * deadline (`start` + period <= deadline, `start` when the run started its work, after the jobs lock;
+ * never earlier than its timer's tick, so start + period is at or after the next tick) and the
  * forward step itself is not past it (`clock` <= deadline); else `not_rechecked` (a late run, or
  * one so close to the deadline that no re-grading can follow): the safe state is recorded at once,
  * with no provisional message.
@@ -57,9 +58,9 @@ export function firstGrading(o: {
 }
 
 /**
- * A re-grading of an open re-check. `start`: the run's start (the timer's tick), which decides
- * whether this is the last hourly check before the deadline (the next tick, start + period, comes
- * after it); `clock`: the forward step's own clock, which decides only whether the grading is past
+ * A re-grading of an open re-check. `start`: when the run started its work (`firstGrading`),
+ * which decides whether this is the last hourly check before the deadline (no later check is
+ * counted before start + period); `clock`: the forward step's own clock, which decides only whether the grading is past
  * the deadline (no look-ahead):
  * - not red: `cleared` (the normal decision, yellow rules if yellow) when the forward step grades
  *   at or before the deadline; `late` when after it (data known after the deadline never clears);

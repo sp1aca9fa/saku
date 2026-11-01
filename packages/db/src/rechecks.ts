@@ -104,28 +104,46 @@ export async function closeRecheck(
 }
 
 /**
- * Records when the provisional or the final message reached its channels (once; returns whether
- * this call recorded it). The final's sending time also becomes a `red_recheck_sent` annotation on
- * the day's entry (requirements 04: the record keeps the final instruction with the time it was
- * sent; the entry's hashed `finalDecidedAt` is when it was decided), in the same transaction, so a
- * sending time is annotated exactly once.
+ * Marks the provisional or the final message as told (once; returns whether this call marked it),
+ * with the number of channels it reached (`channels`) and, when it reached at least one, the time
+ * it had reached them all (`at`). A message that reached no channel (a library version, an owner
+ * with no channel) records 0 and no sending time: nothing was sent, and the re-check is not looked
+ * at again. The final's sending time also becomes a `red_recheck_sent` annotation on the day's
+ * entry (requirements 04: the record keeps the final instruction with the time it was sent; the
+ * entry's hashed `finalDecidedAt` is when it was decided), in the same transaction, so a sending
+ * time is annotated exactly once and never for a final sent nowhere.
  */
 export async function markRecheckSent(
   db: Db,
   id: number,
   which: 'provisional' | 'final',
-  at: string,
+  told: { channels: number; at: string | null },
   runId: string | null = null,
 ): Promise<boolean> {
-  const column = which === 'provisional' ? redRechecks.provisionalSentAt : redRechecks.finalSentAt;
+  const { channels } = told;
+  if (!Number.isInteger(channels) || channels < 0) {
+    throw new Error(`Re-check ${id}: channel count ${channels} is not a whole number >= 0.`);
+  }
+  if (channels > 0 !== (told.at !== null)) {
+    throw new Error(`Re-check ${id}: a sending time goes with at least one channel reached.`);
+  }
+  const at = channels > 0 ? told.at : null;
+  const done =
+    which === 'provisional' ? redRechecks.provisionalChannels : redRechecks.finalChannels;
+  const sent = which === 'provisional' ? redRechecks.provisionalSentAt : redRechecks.finalSentAt;
   return db.transaction(async (tx) => {
     const [row] = await tx
       .update(redRechecks)
-      .set(which === 'provisional' ? { provisionalSentAt: at } : { finalSentAt: at })
-      .where(and(eq(redRechecks.id, id), isNull(column)))
+      .set(
+        which === 'provisional'
+          ? { provisionalSentAt: at, provisionalChannels: channels }
+          : { finalSentAt: at, finalChannels: channels },
+      )
+      // Not marked yet (a row from before 0015 may carry a sending time without a count).
+      .where(and(eq(redRechecks.id, id), isNull(done), isNull(sent)))
       .returning();
     if (!row) return false;
-    if (which === 'final') {
+    if (which === 'final' && at !== null) {
       await tx.insert(forwardAnnotations).values({
         versionId: row.versionId,
         date: row.date,
@@ -136,4 +154,11 @@ export async function markRecheckSent(
     }
     return true;
   });
+}
+
+/** Whether a re-check's provisional or final message is marked as told (sent, or to no channel). */
+export function recheckTold(r: Recheck, which: 'provisional' | 'final'): boolean {
+  return which === 'provisional'
+    ? r.provisionalChannels !== null || r.provisionalSentAt !== null
+    : r.finalChannels !== null || r.finalSentAt !== null;
 }

@@ -18,6 +18,7 @@ import {
   type Channel,
   type Db,
   type ForwardEntry,
+  alertDeliveries,
   alertSent,
   allRechecks,
   allVersions,
@@ -30,6 +31,7 @@ import {
   lastToldAllocation,
   markRecheckSent,
   recheckOf,
+  recheckTold,
   recordAlertSent,
   schema,
   standInList,
@@ -305,7 +307,9 @@ export async function sendDayAlert(
         execution: strategy.execution,
         entry: day,
         nextSession: o.sessions.after(day.date),
-        passed: executionPassed(o, strategy.execution, day.date),
+        // Only the safe-state alert of a red day recorded with no re-check can come after its
+        // execution point (a late run); every other day alert keeps the plain timing.
+        passed: d.notRechecked !== undefined && executionPassed(o, strategy.execution, day.date),
         // A drill reads nothing told before (the safe-state alert does not depend on it).
         lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
         ...(d.notRechecked !== undefined && { notRechecked: d.notRechecked }),
@@ -499,7 +503,10 @@ export async function sendRecheckMessage(
         message: d.message,
         deadline: shownDeadline(d.deadline, d.timeZone),
         nextSession: o.sessions.after(d.message.day.date),
-        passed: executionPassed(o, strategy.execution, d.message.day.date),
+        // Only a final (cleared, safe state stands, late) can come after the execution point; the
+        // provisional is sent while the re-check is open, before its deadline.
+        passed:
+          d.message.kind === 'final' && executionPassed(o, strategy.execution, d.message.day.date),
         lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
       },
       roomOn(o, channel, t),
@@ -515,8 +522,10 @@ export async function sendRecheckMessage(
  * provisional of each open re-check, the final of each closed one (`not_rechecked` has none: its
  * safe-state alert is the day's alert, `sendStrategyAlerts`). Driven by `red_rechecks` and
  * `alerts_sent`, so a failed delivery is tried again at the next run; a re-check is marked as told
- * (`provisional_sent_at`, `final_sent_at`; the final's time also as a `red_recheck_sent`
- * annotation on the entry) once a pass delivered to every channel, and is not
+ * once a pass leaves every channel delivered, with the number of channels reached and, when at
+ * least one, the last delivery's time (`provisional_sent_at`, `final_sent_at`; the final's time also
+ * as a `red_recheck_sent` annotation on the entry); with no channel (a library version, an owner
+ * with none) 0 and no time, so nothing claims a message was sent. A marked re-check is not
  * looked at again (a channel added later gets the next day's alert, as with day alerts). A
  * provisional not delivered before its re-check closed is not sent: the final supersedes it.
  * Nothing before the A1 gate (no forward records); never in a drill (the drill sends its own).
@@ -537,7 +546,7 @@ export async function sendRecheckAlerts(
   for (const r of await allRechecks(db)) {
     if (r.outcome === 'not_rechecked') continue;
     const which = r.outcome === null ? 'provisional' : 'final';
-    if ((which === 'provisional' ? r.provisionalSentAt : r.finalSentAt) !== null) continue;
+    if (recheckTold(r, which)) continue;
     const version = versions.get(r.versionId);
     const label = `${version?.name ?? 'unknown'} (${r.versionId}) ${r.date}`;
     if (!version) {
@@ -575,7 +584,23 @@ export async function sendRecheckAlerts(
       summary,
     );
     if (summary.failed.length === before) {
-      await markRecheckSent(db, r.id, which, new Date().toISOString(), o.runId ?? null);
+      // Every channel has it (this pass or an earlier one): marked as told with the channels it
+      // reached and the last delivery's time; none (a library version, an owner with no channel)
+      // records 0 and no sending time, so no `red_recheck_sent` claims a final nobody got.
+      const delivered = version.ownerId
+        ? await alertDeliveries(db, version.ownerId, {
+            subject: version.id,
+            date: r.date,
+            type: which === 'provisional' ? 'recheck_provisional' : 'recheck_final',
+          })
+        : { channels: 0, lastAt: null };
+      await markRecheckSent(
+        db,
+        r.id,
+        which,
+        { channels: delivered.channels, at: delivered.lastAt },
+        o.runId ?? null,
+      );
     }
   }
   return summary;

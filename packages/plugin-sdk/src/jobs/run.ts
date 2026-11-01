@@ -65,6 +65,14 @@ export interface RunOptions {
   seriesSessions: Sessions | undefined;
   now: Date;
   /**
+   * When the run started its work, read after it acquired the jobs lock (requirements 04 "Red
+   * re-check before execution": decides whether this run is the last check before a re-check
+   * deadline). A run that started late (the machine busy or asleep) is judged from when it really
+   * started, never from the timer's tick: start + period is at or after the next tick, so a later
+   * check is counted only when one surely comes before the deadline. Default: `now`.
+   */
+  start?: Date;
+  /**
    * The run's clock: the fetch time stored with values (`known_at` of a value without a
    * publication time) and the time the checks look from (values known by then count), read in
    * that order, so a value fetched by the run is known to its checks. Default: the system clock.
@@ -406,10 +414,10 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         runId,
         sessions,
         to: target,
-        // Requirements 04 "Red re-check before execution": the run's start (the timer's tick)
+        // Requirements 04 "Red re-check before execution": the run's start (after the jobs lock)
         // decides whether this is the last check before a deadline; the step's clock whether it
         // is past one.
-        start: now,
+        start: o.start ?? now,
         now: o.clock?.() ?? new Date(),
       });
       if (f.skipped) log.info(`Forward records: ${f.skipped}`);

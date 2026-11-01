@@ -767,14 +767,28 @@ export const redRechecks = sqliteTable(
      * the safe-state instruction the provisional message gives as the fallback.
      */
     provisional: text('provisional', { mode: 'json' }).notNull(),
-    /** When the provisional message reached every channel it was sent to (null: not yet). */
+    /**
+     * When the provisional message had reached every channel it was sent to: the last channel's
+     * delivery time (null: not yet, or told to no channel, `provisionalChannels` 0).
+     */
     provisionalSentAt: text('provisional_sent_at'),
+    /**
+     * How many channels the provisional reached when the re-check was marked as told (migration
+     * 0015; null: not marked yet). 0: no channel (a library version, an owner with none): nothing
+     * was sent and no sending time is recorded, but it is not looked at again.
+     */
+    provisionalChannels: integer('provisional_channels'),
     /** The run's clock when the final instruction was decided and the entry appended. */
     finalAt: text('final_at'),
     finalRunId: text('final_run_id').references(() => jobRuns.id),
     outcome: text('outcome', { enum: RECHECK_OUTCOMES }),
-    /** When the final message reached every channel it was sent to (null: not yet). */
+    /**
+     * When the final message had reached every channel it was sent to: the last channel's delivery
+     * time (null: not yet, or told to no channel, `finalChannels` 0).
+     */
     finalSentAt: text('final_sent_at'),
+    /** As `provisionalChannels`, for the final message (0: no `red_recheck_sent` annotation). */
+    finalChannels: integer('final_channels'),
   },
   (t) => [
     uniqueIndex('red_rechecks_key_idx').on(t.versionId, t.date),

@@ -221,6 +221,10 @@ try {
     sessions,
     seriesSessions,
     now,
+    // The time the run starts its work: read here, with the jobs lock held (taken above; a run
+    // that finds it held exits), never the timer's tick. It decides whether this run is the last
+    // re-check before a deadline (requirements 04 "Red re-check before execution").
+    start: new Date(),
     log,
     context: (info) => pluginContext(info, log, { finalAfter }),
     alerting: {

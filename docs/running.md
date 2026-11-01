@@ -91,9 +91,12 @@ install's time zone.
   the first red grading (time, reasons, deadline) a `red_recheck` annotation. Corrections after
   the deadline are annotations, as before. `pnpm strategy list` shows an open re-check on the
   version's line (`<date> red, re-check open until <deadline>`).
-- Whether a run is the last check before the deadline is decided by when it started (the timer's
-  tick at :20), not by how long its steps took. A message sent after the open says the instruction
-  applied at that open.
+- Whether a run is the last check before the deadline is decided by when it started its work
+  (after taking the jobs lock; normally just after the :20 tick, later when the machine was busy or
+  asleep), not by how long its steps took. A final message, or the safe-state alert of a day not
+  re-checked, sent after the open says the instruction applied at that open.
+- A final message that reached no channel (a library version, an owner with no channel) records
+  no sending time and no `red_recheck_sent` annotation; the re-check still closes.
 - A re-check that cannot close (the latest re-check run after its deadline failed for that
   strategy, e.g. its definition no longer parses) is not run again every hour: that run's
   job-failure alert stands; fix the cause, then `pnpm daily --force`.

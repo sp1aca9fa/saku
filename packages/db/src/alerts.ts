@@ -2,7 +2,7 @@
 // query is scoped to the channel's owner. Delivery is idempotent per (channel, subject, date,
 // type), where the subject is a strategy version or a job type.
 import { decryptSecret, encryptSecret } from '@saku/auth';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from './client';
 import { activityLog, alertsSent, notificationChannels, users } from './schema';
 
@@ -135,6 +135,33 @@ export async function recordAlertSent(
     .insert(alertsSent)
     .values({ ownerId: channel.ownerId, channelId: channel.id, ...key, allocation })
     .onConflictDoNothing();
+}
+
+/**
+ * The owner's channels an alert key was delivered to (one `alerts_sent` row per channel), and the
+ * latest delivery time among them (null when none).
+ */
+export async function alertDeliveries(
+  db: Db,
+  ownerId: string,
+  key: AlertKey,
+): Promise<{ channels: number; lastAt: string | null }> {
+  const [row] = await db
+    .select({
+      channels: sql<number>`count(distinct ${alertsSent.channelId})`,
+      lastAt: sql<string | null>`max(${alertsSent.sentAt})`,
+    })
+    .from(alertsSent)
+    .where(
+      and(
+        eq(alertsSent.ownerId, ownerId),
+        eq(alertsSent.subject, key.subject),
+        eq(alertsSent.date, key.date),
+        eq(alertsSent.type, key.type),
+      ),
+    );
+  const channels = Number(row?.channels ?? 0);
+  return { channels, lastAt: channels > 0 ? (row?.lastAt ?? null) : null };
 }
 
 /** The allocation the channel was last told for a subject, among alerts of the given types. */

@@ -11,6 +11,7 @@ import {
   appendForward,
   createUser,
   forwardRecord,
+  recheckOf,
   registerVersion,
   schema,
   seriesPointInTime,
@@ -1302,6 +1303,47 @@ describe('an issuer source declaring what it publishes', () => {
       .where(eq(schema.checkResults.checkName, 'nav_premium'));
     expect(premium.length).toBeGreaterThan(0);
     expect(premium.map((x) => x.date)).not.toContain(TARGET);
+  });
+});
+
+describe('a red day: the re-check is judged from when the run started its work', () => {
+  // TARGET (Friday 2026-01-16) is red: the secondary's close differs. Its deadline is Monday's
+  // open less 60 minutes, 08:30 New York (13:30Z).
+  const red = () => [barSource('p'), barSource('s', false, { date: TARGET, factor: 1.01 })];
+  const recheck = async (db: Awaited<ReturnType<typeof testDb>>, versionId: string) =>
+    (await recheckOf(db, versionId, TARGET))?.outcome;
+
+  it('a run whose tick was 07:20 but that started its work at 08:25 opens no re-check', async () => {
+    const { db, version } = await setup();
+    const { notifier } = fakeNotifier();
+    const tick = new Date('2026-01-19T12:20:00Z');
+    const started = new Date('2026-01-19T13:25:00Z');
+    const r = await runJob(
+      db,
+      plugins(red()),
+      options(notifier, { now: tick, start: started, clock: () => started }),
+    );
+    expect(r.ok).toBe(true);
+    // No hourly check is left before 08:30: the safe state at once, not re-checked.
+    expect(await recheck(db, version.id)).toBe('not_rechecked');
+    expect((await forwardRecord(db, version.id)).at(-1)).toMatchObject({
+      date: TARGET,
+      safeStateApplied: true,
+    });
+  });
+
+  it('the same run started at its 07:20 tick opens one', async () => {
+    const { db, version } = await setup();
+    const { notifier } = fakeNotifier();
+    const tick = new Date('2026-01-19T12:20:00Z');
+    const r = await runJob(
+      db,
+      plugins(red()),
+      options(notifier, { now: tick, start: tick, clock: () => tick }),
+    );
+    expect(r.ok).toBe(true);
+    expect(await recheck(db, version.id)).toBeNull();
+    expect((await forwardRecord(db, version.id)).map((e) => e.date)).not.toContain(TARGET);
   });
 });
 

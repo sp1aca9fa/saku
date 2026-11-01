@@ -64,8 +64,8 @@ export interface ForwardOptions {
    */
   now?: Date;
   /**
-   * The run's start, the hourly timer's tick: whether this run is the last check before a
-   * deadline (the next tick comes after it). Default: `now`.
+   * When the run started its work, after the jobs lock (`RunOptions.start`): whether this run is
+   * the last check before a deadline (the next tick comes before start + period). Default: `now`.
    */
   start?: Date;
 }
