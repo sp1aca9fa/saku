@@ -406,3 +406,79 @@ describe('reference B1: data-error rules (contract clarification)', () => {
     expect(refGarmanKlass(refOhlc(split, false), 1)).toEqual([0, 0]);
   });
 });
+
+describe('reference: days without a decision (docs/indicators.md, equity curves)', () => {
+  // X closes 100..104, 150, 106..109; the 150 day has no low, so a Parkinson length-1 signal has
+  // no value that day only (every other day it is positive). The day is not evaluated and the
+  // backtest holds the safe state (cash at 0%) from it, traded like any decision.
+  const xs = [100, 101, 102, 103, 104, 150, 106, 107, 108, 109];
+  const ds = xs.map((_, i) => `2026-02-${String(2 + i).padStart(2, '0')}`);
+  const bars: Record<string, RefBar[]> = {
+    X: xs.map((c, i) => ({
+      date: ds[i]!,
+      open: c,
+      high: c * 1.01,
+      low: i === 5 ? undefined : c * 0.99,
+      close: c,
+      divCash: 0,
+      splitFactor: 1,
+      closeIsSplitAdjusted: false,
+    })),
+  };
+  const s: RefStrategy = {
+    execution: 'next_close',
+    costs: { feePct: 0.1 },
+    signals: [
+      {
+        id: 'on',
+        type: 'compare',
+        left: { indicator: 'volatility', ticker: 'X', length: 1, method: 'parkinson' },
+        op: '>',
+        right: { threshold: 0 },
+      },
+    ],
+    allocations: [
+      { name: 'in', when: { all: ['on'] }, holdings: [{ ticker: 'X', weight: 100 }] },
+      { name: 'out', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+    ],
+    safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+  };
+
+  it('the 150 day is not evaluated, its return is compounded, the safe state is traded', () => {
+    const days = refEvaluate(s, bars);
+    expect(days.map((d) => d.date)).toEqual(ds.filter((_, i) => i !== 5));
+    expect(days.every((d) => d.allocation === 'in')).toBe(true);
+    const r = refBacktest(s, days, bars, () => 0);
+    expect(r.dates).toEqual(ds);
+    // Hand computation, next_close, cost 0.1% x turnover:
+    //   day 0: decide X; equity 1 (nothing held).
+    //   day 1: buy X at the close, turnover 1: 0.999.
+    //   days 2-4: X 102/101, 103/101, 104/101 of it.
+    //   day 5 (150, not evaluated): X moves to 150/101; the decision is the safe state (cash).
+    //   day 6: X moves to 106/101, then the switch to cash, turnover 2: x 0.998. Decide X again.
+    //   day 7: cash earns 0; switch back to X: x 0.998.
+    //   days 8-9: X 108/107, 109/107.
+    const w = 0.999 * (106 / 101) * 0.998;
+    const want = [
+      1,
+      0.999,
+      (0.999 * 102) / 101,
+      (0.999 * 103) / 101,
+      (0.999 * 104) / 101,
+      (0.999 * 150) / 101,
+      w,
+      w * 0.998,
+      (w * 0.998 * 108) / 107,
+      (w * 0.998 * 109) / 107,
+    ];
+    expect(r.equity.length).toBe(want.length);
+    r.equity.forEach((e, i) => expect(e).toBeCloseTo(want[i]!, 12));
+    expect(r.switches).toBe(2);
+  });
+
+  it('a date that is not evaluated without a safe state is an error, not a guess', () => {
+    const days = refEvaluate(s, bars);
+    const { safeState: _, ...noSafe } = s;
+    expect(() => refBacktest(noSafe, days, bars, () => 0)).toThrow(/safe state/);
+  });
+});

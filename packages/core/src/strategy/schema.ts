@@ -60,7 +60,12 @@ const comparison = {
 export const Comparison = z.strictObject(comparison);
 
 /** Indicators whose value is a price level (rescaled by a split), not a percentage. */
-const PRICE_LEVELS: readonly string[] = ['price', 'sma', 'ema', 'high', 'low'];
+export const PRICE_LEVELS: readonly string[] = ['price', 'sma', 'ema', 'high', 'low'];
+/** Indicators whose value is a percentage (not rescaled by a split). */
+export const PERCENTAGES: readonly string[] = ['return', 'volatility', 'drawdown'];
+
+const plainLevel = (o: Operand) =>
+  'indicator' in o && PRICE_LEVELS.includes(o.indicator) && !o.totalReturn;
 
 /**
  * A plain price level (`totalReturn: false`: price, SMA, EMA, N-day high or low) compared with a
@@ -73,10 +78,19 @@ const PRICE_LEVELS: readonly string[] = ['price', 'sma', 'ema', 'high', 'low'];
  * the message does not suggest it.
  */
 export function plainPriceAgainstLevel(c: { left: Operand; right: Operand }): boolean {
-  const plain = (o: Operand) =>
-    'indicator' in o && PRICE_LEVELS.includes(o.indicator) && !o.totalReturn;
   const level = (o: Operand) => 'threshold' in o;
-  return (plain(c.left) && level(c.right)) || (level(c.left) && plain(c.right));
+  return (plainLevel(c.left) && level(c.right)) || (level(c.left) && plainLevel(c.right));
+}
+
+/**
+ * A plain price level compared with a percentage operand (return, volatility, drawdown): the
+ * same flaw as a fixed level (C18 (a), B1 review): a split rescales the plain price and not the
+ * percentage, so the comparison flips with nothing having happened (and the two are not in the
+ * same unit). Refused like a fixed level.
+ */
+export function plainPriceAgainstPercentage(c: { left: Operand; right: Operand }): boolean {
+  const pct = (o: Operand) => 'indicator' in o && PERCENTAGES.includes(o.indicator);
+  return (plainLevel(c.left) && pct(c.right)) || (pct(c.left) && plainLevel(c.right));
 }
 
 export const PLAIN_PRICE_AGAINST_LEVEL =
@@ -84,6 +98,12 @@ export const PLAIN_PRICE_AGAINST_LEVEL =
   'split rescales earlier plain prices, so the level would mean something else after one. ' +
   'Compare the fund with its own average, or use a percentage (return, volatility or drawdown) ' +
   'against the level, instead';
+
+export const PLAIN_PRICE_AGAINST_PERCENTAGE =
+  'a plain price, average, high or low (totalReturn: false) is compared with a percentage ' +
+  '(return, volatility or drawdown): a split rescales earlier plain prices but not the ' +
+  'percentage, so the comparison would change after one. Compare price levels with price ' +
+  'levels, and percentages with percentages or a fixed level, instead';
 
 export const Signal = z.discriminatedUnion('type', [
   z.strictObject({ id: z.string().min(1), type: z.literal('compare'), ...comparison }),
@@ -166,6 +186,9 @@ export const Strategy = z
       for (const { c, path } of comparisons) {
         if (plainPriceAgainstLevel(c)) {
           ctx.addIssue({ code: 'custom', message: PLAIN_PRICE_AGAINST_LEVEL, path });
+        }
+        if (plainPriceAgainstPercentage(c)) {
+          ctx.addIssue({ code: 'custom', message: PLAIN_PRICE_AGAINST_PERCENTAGE, path });
         }
       }
     });

@@ -54,6 +54,8 @@ export interface RefStrategy {
     when?: { all?: string[]; any?: string[]; none?: string[] };
     holdings: { ticker: string; weight: number }[];
   }[];
+  /** Held on a date that is not evaluated (docs/indicators.md "Days without a decision"). */
+  safeState?: { holdings: { ticker: string; weight: number }[] };
 }
 
 export interface RefDay {
@@ -355,37 +357,60 @@ export function refEvaluate(s: RefStrategy, bars: Record<string, RefBar[]>): Ref
       if (c.right.ticker) tickers.add(c.right.ticker);
     }
   }
-  const valueOf = (o: RefOperand, date: string): number | undefined => {
-    if (o.threshold !== undefined && o.indicator === undefined) return o.threshold;
+  // An operand's whole array over its ticker's bars, computed once per evaluation.
+  const operandValues = (o: RefOperand): (number | undefined)[] => {
     const list = bars[o.ticker!]!;
-    const i = list.findIndex((b) => b.date === date);
     const series = o.totalReturn ? refTotalReturn(list) : refPrice(list);
     switch (o.indicator) {
       case 'price':
-        return series[i];
+        return series;
       case 'sma':
-        return refSma(series, o.length!)[i];
+        return refSma(series, o.length!);
       case 'ema':
-        return refEma(series, o.length!)[i];
+        return refEma(series, o.length!);
       case 'return':
-        return refReturn(series, o.length!)[i];
+        return refReturn(series, o.length!);
       case 'drawdown':
-        return refDrawdown(series, o.length)[i];
+        return refDrawdown(series, o.length);
       case 'high':
-        return refHigh(series, o.length!)[i];
+        return refHigh(series, o.length!);
       case 'low':
-        return refLow(series, o.length!)[i];
+        return refLow(series, o.length!);
       case 'volatility': {
         const method = o.method ?? 'close';
-        if (method === 'close') return refVolatility(series, o.length!)[i];
+        if (method === 'close') return refVolatility(series, o.length!);
         const d = refOhlc(list, o.totalReturn ?? false);
-        if (method === 'parkinson') return refParkinson(d, o.length!)[i];
-        if (method === 'garman_klass') return refGarmanKlass(d, o.length!)[i];
-        return refYangZhang(d, o.length!)[i];
+        if (method === 'parkinson') return refParkinson(d, o.length!);
+        if (method === 'garman_klass') return refGarmanKlass(d, o.length!);
+        return refYangZhang(d, o.length!);
       }
       default:
         throw new Error(`reference: unknown indicator ${String(o.indicator)}`);
     }
+  };
+  // Cache keyed by the full operand (every field that changes the array).
+  const cache = new Map<string, (number | undefined)[]>();
+  const indexOf = new Map<string, Map<string, number>>();
+  const valueOf = (o: RefOperand, date: string): number | undefined => {
+    if (o.threshold !== undefined && o.indicator === undefined) return o.threshold;
+    const key = JSON.stringify([
+      o.indicator,
+      o.ticker,
+      o.length ?? null,
+      o.totalReturn ?? false,
+      o.method ?? 'close',
+    ]);
+    let values = cache.get(key);
+    if (values === undefined) {
+      values = operandValues(o);
+      cache.set(key, values);
+    }
+    let dateIndex = indexOf.get(o.ticker!);
+    if (dateIndex === undefined) {
+      dateIndex = new Map(bars[o.ticker!]!.map((b, i) => [b.date, i]));
+      indexOf.set(o.ticker!, dateIndex);
+    }
+    return values[dateIndex.get(date)!];
   };
   let dates: string[] | undefined;
   for (const t of tickers) {
@@ -444,13 +469,18 @@ export function refEvaluate(s: RefStrategy, bars: Record<string, RefBar[]>): Ref
 /**
  * Equity curve: a position is a set of share-like units per holding; each session is split into
  * the night (close to open, with the ex-date dividend and the split) and the day (open to close).
+ *
+ * Sessions (docs/indicators.md "Days without a decision"): every date on which every ticker in
+ * `bars` has a bar, from the first evaluated day on. Each session's returns are compounded; a
+ * session without an evaluated day takes the strategy's safe state as its decision, traded like
+ * any other decision. One equity point per session (`dates` names them).
  */
 export function refBacktest(
-  s: Pick<RefStrategy, 'execution' | 'costs'>,
+  s: Pick<RefStrategy, 'execution' | 'costs' | 'safeState'>,
   days: RefDay[],
   bars: Record<string, RefBar[]>,
   cashRate: (date: string) => number,
-): { equity: number[]; switches: number } {
+): { equity: number[]; dates: string[]; switches: number } {
   const execution = s.execution ?? 'next_open';
   const costRate = (s.costs?.slippageBps ?? 0) / 1e4 + (s.costs?.feePct ?? 0) / 100;
   const parse = (ticker: string) => {
@@ -470,6 +500,7 @@ export function refBacktest(
     const { base, L, E } = parse(ticker);
     const list = bars[base]!;
     const i = list.findIndex((b) => b.date === date);
+    if (i < 1) throw new Error(`reference: no bar or no previous bar for ${base} on ${date}`);
     const b = list[i]!;
     const p = list[i - 1]!;
     const k = b.closeIsSplitAdjusted ? 1 : b.splitFactor;
@@ -511,11 +542,35 @@ export function refBacktest(
       .sort()
       .join('\n');
 
+  // Sessions: dates every ticker in `bars` has, from the first evaluated day on.
+  const decided = new Map(days.map((d) => [d.date, d.holdings]));
+  let sessions: string[] = [];
+  const tickers = Object.keys(bars);
+  if (tickers.length > 0) {
+    const counts = new Map<string, number>();
+    for (const t of tickers)
+      for (const b of bars[t]!) counts.set(b.date, (counts.get(b.date) ?? 0) + 1);
+    sessions = [...counts].filter(([, n]) => n === tickers.length).map(([date]) => date);
+  }
+  // An evaluated day is never dropped: if a ticker lacks its bar, valuing it fails loudly.
+  const known = new Set(sessions);
+  for (const d of days) if (!known.has(d.date)) sessions.push(d.date);
+  sessions.sort();
+  const first = days.length ? [...days.map((d) => d.date)].sort()[0]! : undefined;
+  sessions = first === undefined ? [] : sessions.filter((date) => date >= first);
+  const decisionOn = (date: string): RefDay['holdings'] => {
+    const h = decided.get(date);
+    if (h) return h;
+    if (!s.safeState)
+      throw new Error(`reference: ${date} is not evaluated and there is no safe state`);
+    return s.safeState.holdings;
+  };
+
   const equity: number[] = [];
   let current: string | undefined;
   let queued: RefDay['holdings'] | undefined;
-  for (let i = 0; i < days.length; i++) {
-    const d = days[i]!;
+  for (let i = 0; i < sessions.length; i++) {
+    const d = { date: sessions[i]!, holdings: decisionOn(sessions[i]!) };
     if (i > 0) {
       if (execution === 'next_open' && queued) {
         move(d.date, 'night');
@@ -543,5 +598,5 @@ export function refBacktest(
     }
     equity.push(Object.keys(value).length === 0 ? 1 : total());
   }
-  return { equity, switches };
+  return { equity, dates: sessions, switches };
 }

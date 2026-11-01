@@ -7,7 +7,14 @@
 // unresolved stand-in price up to the day is moved by the margin test.
 import type { HealthStatus, RawBar, TradingDate } from '../domain';
 import { CASH_USD, parseTicker } from './backtest';
-import { type StrategyDay, evaluate, operandBars, signalLookbacks, signalTickers } from './engine';
+import {
+  type StrategyDay,
+  evaluate,
+  operandBars,
+  signalLookbacks,
+  signalTickers,
+  whyUndecided,
+} from './engine';
 import type { Comparison, Holding, Strategy } from './schema';
 
 export const SAFE_STATE = 'Safe state';
@@ -244,12 +251,18 @@ export function forwardDecision(
   }
 
   let day: StrategyDay | undefined;
+  let failed = false;
   try {
     day = dayOf(strategy, bars, date);
   } catch (e) {
+    failed = true;
     flag('red', `evaluation:${e instanceof Error ? e.message : String(e)}`);
   }
-  if (!day) flag('red', 'no_decision');
+  if (!day) {
+    // Name the operand and the day at fault (`whyUndecided`), not only that there is no decision.
+    const why = failed ? [] : whyUndecided(strategy, bars, date);
+    for (const r of why.length > 0 ? why : ['no_decision']) flag('red', r);
+  }
 
   // Decision-margin test over every unresolved stand-in price inside the signals' lookback (the
   // day's own and earlier ones, `readsStandIn`), all at once: every corner of their bands (each close at its low or

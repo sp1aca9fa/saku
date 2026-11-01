@@ -1819,6 +1819,18 @@ function checkText(layer: string, check: string): string | undefined {
   return layer !== 'D' && hasText(shared) ? shared : undefined;
 }
 
+/** An operand's name in reason codes (core `whyUndecided`) in words, from `indicators.*`. */
+const INDICATOR_TEXT: Record<string, string> = {
+  volatility: 'volatilityClose',
+  parkinson: 'volatilityParkinson',
+  garman_klass: 'volatilityGarmanKlass',
+  yang_zhang: 'volatilityYangZhang',
+};
+function indicatorName(t: Translate, name: string): string {
+  const key = `indicators.${INDICATOR_TEXT[name] ?? name}.name`;
+  return hasText(key) ? t(key) : name;
+}
+
 export function describeReason(t: Translate, code: string): string {
   const i = code.indexOf(':');
   const hasSubject = i > 0 && !code.startsWith('stand_in_refused:');
@@ -1842,6 +1854,18 @@ export function describeReason(t: Translate, code: string): string {
     const key =
       m[1] === 'red' ? 'lookbackRed' : m[1] === 'missing' ? 'lookbackMissing' : 'lookbackUngraded';
     text = t(`alerts.reason.${key}`, { date: m[2]! });
+  } else if (
+    (m = /^(range_missing|range_invalid|value_invalid)\((\w+)\)@(\d{4}-\d{2}-\d{2})$/.exec(rest))
+  ) {
+    const key = {
+      range_missing: 'rangeMissing',
+      range_invalid: 'rangeInvalid',
+      value_invalid: 'valueInvalid',
+    }[m[1]!]!;
+    text = t(`alerts.reason.${key}`, { indicator: indicatorName(t, m[2]!), date: m[3]! });
+  } else if ((m = /^(warm_up|no_value)\((\w+)\)$/.exec(rest))) {
+    const key = m[1] === 'warm_up' ? 'warmUp' : 'noValue';
+    text = t(`alerts.reason.${key}`, { indicator: indicatorName(t, m[2]!) });
   } else if ((m = /^stale\((\d+)\)@(.+)$/.exec(rest))) {
     text = t('alerts.reason.stale', { days: m[1]!, source: m[2]! });
   } else if ((m = /^issuer_unavailable@(.+)$/.exec(rest))) {

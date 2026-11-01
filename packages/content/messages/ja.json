@@ -130,7 +130,12 @@
       "issuerUnavailable": "発行体のデータを取得できませんでした({source})",
       "issuer_nav_tolerance_invalid": "発行体の基準価額の許容幅の設定が無効です。設定し直してください(pnpm settings set issuer_nav_tolerance)",
       "notGreen": "緑ではありません",
-      "evaluation": "戦略を評価できませんでした"
+      "evaluation": "戦略を評価できませんでした",
+      "rangeMissing": "{indicator}の値がありません: {date} の始値・高値・安値のいずれかが欠けています(推定はしません)",
+      "rangeInvalid": "{indicator}の値がありません: {date} の始値・高値・安値・終値が整合しません(その日の値幅の外、または正でない値)",
+      "valueInvalid": "{indicator}の値がありません: 参照する {date} の価格が正でないか数値ではありません",
+      "warmUp": "{indicator}の値はまだありません: 履歴が足りません(ウォームアップ)",
+      "noValue": "この日の{indicator}の値がありません"
     },
     "recompute": {
       "title": "Saku: 現在のエンジンは記録済みの {count} 日を異なる判断にします",

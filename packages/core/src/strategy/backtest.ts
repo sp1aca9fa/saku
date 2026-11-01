@@ -32,9 +32,16 @@ export function readsCashRate(ticker: string): boolean {
 }
 
 export interface BacktestInput {
-  strategy: Pick<Strategy, 'execution' | 'costs'>;
+  /**
+   * The safe state is the decision of a session without an evaluated day (`sessions`); a
+   * backtest that meets one without it fails rather than guess.
+   */
+  strategy: Pick<Strategy, 'execution' | 'costs'> & { safeState?: Strategy['safeState'] };
   days: StrategyDay[];
-  /** Bars of every holding's base ticker, sorted by date. */
+  /**
+   * Bars of every ticker the strategy depends on (what it reads and holds, as `dependencies`),
+   * sorted by date. Their common dates are the sessions (`sessions`).
+   */
   bars: Record<string, RawBar[]>;
   /**
    * USD cash rate in percent a year, as known before the date's session (point in time).
@@ -45,6 +52,8 @@ export interface BacktestInput {
 
 export interface EquityPoint {
   date: TradingDate;
+  /** False on a session without an evaluated day: its decision was the safe state. */
+  decided: boolean;
   /** Value at the date's close, 1 at the first decision. */
   equity: number;
   /** Weights held at the close, after any trade that day. */
@@ -89,8 +98,38 @@ export function sameHoldings(a: readonly Holding[], b: readonly Holding[]): bool
   return sa.every((h, i) => h.ticker === sb[i]!.ticker && h.weight === sb[i]!.weight);
 }
 
+/**
+ * The sessions an equity curve runs over (docs/indicators.md "Equity curves", "Days without a
+ * decision"): every date on which every ticker in `bars` has a bar, and every evaluated day, from
+ * the first evaluated day on. A session that is not an evaluated day (an operand had no value, a
+ * signal ticker had no bar) still counts: the holdings' returns of every session are compounded,
+ * never skipped, and its decision is the strategy's safe state, traded like any decision (as the
+ * forward record does on a day without a decision).
+ */
+export function sessions(days: StrategyDay[], bars: Record<string, RawBar[]>): TradingDate[] {
+  if (days.length === 0) return [];
+  const first = days.reduce((a, d) => (d.date < a ? d.date : a), days[0]!.date);
+  const tickers = Object.keys(bars);
+  const count = new Map<TradingDate, number>();
+  for (const t of tickers) {
+    for (const b of bars[t]!) count.set(b.date, (count.get(b.date) ?? 0) + 1);
+  }
+  const out = new Set<TradingDate>(days.map((d) => d.date));
+  for (const [date, n] of count) if (n === tickers.length && date >= first) out.add(date);
+  return [...out].sort();
+}
+
 export function backtest(input: BacktestInput): BacktestResult {
-  const { days, strategy } = input;
+  const { strategy } = input;
+  const decided = new Map(input.days.map((d) => [d.date, d]));
+  const days = sessions(input.days, input.bars).map((date) => {
+    const day = decided.get(date);
+    if (day) return { date, holdings: day.holdings, decided: true };
+    if (!strategy.safeState) {
+      throw new Error(`${date} has no decision and the strategy no safe state to take.`);
+    }
+    return { date, holdings: strategy.safeState.holdings, decided: false };
+  });
   const costRate = (strategy.costs.slippageBps ?? 0) / 10_000 + (strategy.costs.feePct ?? 0) / 100;
   const index = new Map<string, Map<TradingDate, number>>();
   const barAt = (ticker: string, date: TradingDate): [RawBar, RawBar] => {
@@ -183,7 +222,7 @@ export function backtest(input: BacktestInput): BacktestResult {
         pending = held && sameHoldings(held, day.holdings) ? undefined : day.holdings;
       }
     }
-    points.push({ date: day.date, equity, weights: { ...weights }, traded });
+    points.push({ date: day.date, decided: day.decided, equity, weights: { ...weights }, traded });
   });
   return { points, switches, costs };
 }

@@ -142,20 +142,26 @@ interface FullBar {
 }
 
 /**
- * The day when it is usable, else undefined (docs/indicators.md, B1 "Open, high and low on the
- * series' basis"). A missing open, high or low gives no value for any window holding the day
- * (never estimated from the close); a high below a low, an open or close outside [low, high], or
- * a non-positive or non-finite value is a data error (layer A reports it) and gives no value
- * either. Checked on the series basis: all four are scaled by one positive factor, which keeps
- * their order exact, so the result is the raw bar's.
+ * Why a day cannot be read by the range-based volatilities (docs/indicators.md, B1 "Open, high
+ * and low on the series' basis"), or undefined when it can: `missing` when its open, high or low
+ * is missing (never estimated from the close); `invalid` for a data error (a high below a low, an
+ * open or close outside [low, high], a non-positive or non-finite value; layer A reports an
+ * inconsistent bar). Either gives no value for any window holding the day. Checked on the series
+ * basis: all four are scaled by one positive factor, which keeps their order exact, so the result
+ * is the raw bar's.
  */
-function full(b: SeriesBar): FullBar | undefined {
+export function rangeProblem(b: SeriesBar): 'missing' | 'invalid' | undefined {
   const { open, high, low, close } = b;
-  if (open === undefined || high === undefined || low === undefined) return undefined;
-  if (![open, high, low, close].every(positive)) return undefined;
-  if (high < low) return undefined;
-  if (open < low || open > high || close < low || close > high) return undefined;
-  return { open, high, low, close };
+  if (open === undefined || high === undefined || low === undefined) return 'missing';
+  if (![open, high, low, close].every(positive)) return 'invalid';
+  if (high < low) return 'invalid';
+  if (open < low || open > high || close < low || close > high) return 'invalid';
+  return undefined;
+}
+
+/** The day when it is usable (`rangeProblem` finds none), else undefined. */
+function full(b: SeriesBar): FullBar | undefined {
+  return rangeProblem(b) === undefined ? (b as FullBar) : undefined;
 }
 
 /** The last N usable days ending at bar i, or undefined when one of them is not usable. */
@@ -242,6 +248,7 @@ function sampleVariance(xs: number[]): number {
   return xs.reduce((a, x) => a + (x - mean) ** 2, 0) / (xs.length - 1);
 }
 
-const positive = (v: number) => Number.isFinite(v) && v > 0;
+/** A usable price: finite and above 0. */
+export const positive = (v: number) => Number.isFinite(v) && v > 0;
 const finiteOrUndefined = (v: number | undefined) =>
   v !== undefined && Number.isFinite(v) ? v : undefined;

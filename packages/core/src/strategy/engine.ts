@@ -10,6 +10,8 @@ import {
   garmanKlass,
   parkinson,
   periodReturn,
+  positive,
+  rangeProblem,
   rollingHigh,
   rollingLow,
   sma,
@@ -214,22 +216,8 @@ function conditionHolds(when: Condition, on: (id: string) => boolean): boolean {
   );
 }
 
-/**
- * Evaluates a strategy (frequency daily) on every date all its signal tickers have a bar, from
- * the first date every signal is defined (after the warm-up). A later date where an operand has
- * no value (a range-based volatility whose window holds a day without an open, high or low, or
- * with a data error) is not evaluated either: no decision that day, never a guessed value.
- */
-export function evaluate(strategy: Strategy, bars: Record<string, RawBar[]>): StrategyDay[] {
-  if (strategy.evaluation.frequency !== 'daily') {
-    throw new Error('Only daily evaluation is supported so far.');
-  }
-  const tickers = signalTickers(strategy);
-  for (const t of tickers) {
-    if (!bars[t]?.length) throw new Error(`No bars for ${t}.`);
-  }
-
-  // Each indicator over its ticker's own history, looked up by date.
+/** Each indicator over its ticker's own history, looked up by date (computed once per operand). */
+function context(bars: Record<string, RawBar[]>) {
   const values = new Map<string, Map<TradingDate, number | undefined>>();
   const seriesCache = new Map<string, number[]>();
   const series = (ticker: string, totalReturn: boolean) => {
@@ -252,6 +240,128 @@ export function evaluate(strategy: Strategy, bars: Record<string, RawBar[]>): St
     }
     return byDate.get(date);
   };
+  return { series, lookup };
+}
+
+/** An operand's name in reason codes: the indicator, or a volatility's method other than close. */
+const operandName = (o: IndicatorOperand) =>
+  o.indicator === 'volatility' && o.method && o.method !== 'close' ? o.method : o.indicator;
+
+/**
+ * Why `date` has no decision (`evaluate` gave none), as reason codes naming the ticker, the
+ * indicator and the day at fault (requirements 04: the instruction says what is wrong), for each
+ * operand without a value that date:
+ * - `T:range_missing(<method>)@<day>`: a range volatility's window holds a day without an open,
+ *   high or low (never estimated);
+ * - `T:range_invalid(<method>)@<day>`: ... a day whose open, high, low and close are inconsistent
+ *   (an open or close outside [low, high], a high below the low) or not positive;
+ * - `T:value_invalid(<indicator>)@<day>`: a value it reads is not positive or not finite;
+ * - `T:warm_up(<indicator>)`: not enough history yet;
+ * - `T:no_value(<indicator>)`: none of these found (a negative variance from rounding, say).
+ * Empty when every operand has a value (a signal ticker without a bar that day: its data health
+ * says so).
+ */
+export function whyUndecided(
+  strategy: Strategy,
+  bars: Record<string, RawBar[]>,
+  date: TradingDate,
+): string[] {
+  const { series, lookup } = context(bars);
+  const out: string[] = [];
+  const add = (code: string) => {
+    if (!out.includes(code)) out.push(code);
+  };
+  for (const c of strategy.signals.flatMap(comparisonsOf)) {
+    for (const o of [c.left, c.right]) {
+      if ('threshold' in o) continue;
+      const list = bars[o.ticker];
+      const i = list?.findIndex((b) => b.date === date) ?? -1;
+      if (i < 0 || lookup(o, date) !== undefined) continue;
+      const name = operandName(o);
+      const t = `${o.ticker}:`;
+      const from = firstRead(o, i);
+      if (from < 0) {
+        add(`${t}warm_up(${name})`);
+        continue;
+      }
+      const s = series(o.ticker, o.totalReturn);
+      let found = false;
+      const fault = (code: string) => {
+        found = true;
+        add(code);
+      };
+      if (o.indicator === 'volatility' && name !== 'volatility') {
+        const days = onSeriesBasis(list!, s);
+        // Yang-Zhang reads only the close of the day before its window.
+        const first = name === 'yang_zhang' ? from + 1 : from;
+        if (name === 'yang_zhang' && !positive(days[from]!.close)) {
+          fault(`${t}value_invalid(${name})@${list![from]!.date}`);
+        }
+        for (let j = first; j <= i; j++) {
+          const p = rangeProblem(days[j]!);
+          if (p) fault(`${t}range_${p}(${name})@${list![j]!.date}`);
+        }
+      } else {
+        // `return` reads its two ends; the others every value of their window.
+        const read =
+          o.indicator === 'return'
+            ? [from, i]
+            : Array.from({ length: i - from + 1 }, (_, k) => from + k);
+        const usable = o.indicator === 'return' || o.indicator === 'drawdown' ? positive : isFinite;
+        for (const j of read) {
+          if (!usable(s[j]!)) fault(`${t}value_invalid(${name})@${list![j]!.date}`);
+        }
+      }
+      if (!found) add(`${t}no_value(${name})`);
+    }
+  }
+  return out;
+}
+
+const isFinite = (v: number) => Number.isFinite(v);
+
+/**
+ * The first of its ticker's bars an operand's value at bar `i` reads (docs/indicators.md, the
+ * warm-up column), or -1 when the history is too short: an EMA and the all-time drawdown read
+ * from the first bar.
+ */
+function firstRead(o: IndicatorOperand, i: number): number {
+  switch (o.indicator) {
+    case 'price':
+      return i;
+    case 'sma':
+    case 'high':
+    case 'low':
+      return i - o.length + 1;
+    case 'ema':
+      return i < o.length - 1 ? -1 : 0;
+    case 'return':
+      return i - o.length;
+    case 'drawdown':
+      return o.length === undefined ? 0 : i - o.length + 1;
+    case 'volatility':
+      return o.method === 'parkinson' || o.method === 'garman_klass'
+        ? i - o.length + 1
+        : i - o.length;
+  }
+}
+
+/**
+ * Evaluates a strategy (frequency daily) on every date all its signal tickers have a bar, from
+ * the first date every signal is defined (after the warm-up). A later date where an operand has
+ * no value (a range-based volatility whose window holds a day without an open, high or low, or
+ * with a data error) is not evaluated either: no decision that day, never a guessed value.
+ */
+export function evaluate(strategy: Strategy, bars: Record<string, RawBar[]>): StrategyDay[] {
+  if (strategy.evaluation.frequency !== 'daily') {
+    throw new Error('Only daily evaluation is supported so far.');
+  }
+  const tickers = signalTickers(strategy);
+  for (const t of tickers) {
+    if (!bars[t]?.length) throw new Error(`No bars for ${t}.`);
+  }
+
+  const { lookup } = context(bars);
 
   const dateSets = tickers.map((t) => new Set(bars[t]!.map((b) => b.date)));
   const dates =

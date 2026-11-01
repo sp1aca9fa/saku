@@ -1,14 +1,14 @@
 // Tests only (not exported from the package).
-import { Strategy } from './schema';
+import { PRICE_LEVELS, Strategy } from './schema';
 
-const PRICE_LEVELS = ['price', 'sma', 'ema', 'high', 'low'];
 const plainable = (o: Record<string, unknown>) =>
   PRICE_LEVELS.includes(o.indicator as string) && o.totalReturn !== true;
 
 /**
- * Parses `s` with its plain price-level operands (price, SMA, EMA, high, low; not total return) made plain again after the
- * schema's checks, so a plain price against a fixed level passes, which the schema refuses
- * (decisions log 2026-11-01, C18 (a): a split rescales earlier plain prices). For tests of the
+ * Parses `s` with its plain price-level operands (`PRICE_LEVELS`, not total return) made plain
+ * again after the schema's checks, so a plain price against a fixed level or a percentage passes,
+ * which the schema refuses (decisions log 2026-11-01, C18 (a): a split rescales earlier plain
+ * prices). For tests of the
  * engine's own math (tolerance bands, near-ties, lookbacks) on exact closes without splits, where
  * the operand kind does not matter: the engine evaluates whatever comparison it is given.
  */

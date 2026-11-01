@@ -6,7 +6,15 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { totalReturnIndex } from '../adjusted';
 import type { RawBar } from '../domain';
-import { evaluate, onSeriesBasis, operandBars, signalLookbacks, splitAdjusted } from './engine';
+import {
+  evaluate,
+  onSeriesBasis,
+  operandBars,
+  signalLookbacks,
+  splitAdjusted,
+  whyUndecided,
+} from './engine';
+import { forwardDecision } from './forward';
 import {
   type SeriesBar,
   drawdown,
@@ -19,7 +27,7 @@ import {
   volatility,
   yangZhang,
 } from './indicators';
-import { Strategy } from './schema';
+import { PLAIN_PRICE_AGAINST_PERCENTAGE, Strategy } from './schema';
 import { parsePlainAgainstLevel } from './testkit';
 
 const relClose = (a: number | undefined, b: number) =>
@@ -332,6 +340,45 @@ describe('B1 operands in a strategy', () => {
     expect(states(close, list).map((d) => d[0])).toEqual([day(2), day(3), day(4), day(5)]);
   });
 
+  it('names the operand and the day at fault when a date has no decision', () => {
+    const x = (o: object) => ({ ticker: 'X', ...o });
+    const list = bars();
+    delete list[3]!.low;
+    list[4]!.close = 12.5; // above its high of 12.3
+    const range = Strategy.parse(
+      oneSignal(x({ indicator: 'volatility', method: 'yang_zhang', length: 2 }), '<', {
+        threshold: 100,
+      }),
+    );
+    expect(whyUndecided(range, { X: list }, day(4))).toEqual([
+      'X:range_missing(yang_zhang)@' + day(3),
+      'X:range_invalid(yang_zhang)@' + day(4),
+    ]);
+    expect(whyUndecided(range, { X: list }, day(1))).toEqual(['X:warm_up(yang_zhang)']);
+    // A day with a decision has nothing to name; a date without a bar neither.
+    expect(whyUndecided(range, { X: list }, day(2))).toEqual([]);
+    expect(whyUndecided(range, { X: list }, '2027-01-01')).toEqual([]);
+
+    const ret = Strategy.parse(
+      oneSignal(x({ indicator: 'return', length: 2 }), '>', { threshold: 0 }),
+    );
+    const zero = bars();
+    zero[1]!.close = 0;
+    expect(whyUndecided(ret, { X: zero }, day(3))).toEqual([`X:value_invalid(return)@${day(1)}`]);
+    const ema = Strategy.parse(
+      oneSignal(x({ indicator: 'price' }), '>', x({ indicator: 'ema', length: 4 })),
+    );
+    expect(whyUndecided(ema, { X: bars() }, day(2))).toEqual(['X:warm_up(ema)']);
+
+    // The forward decision names it instead of a bare no_decision (red, the safe state).
+    const d = forwardDecision(range, day(4), { X: list }, { X: { status: 'green', reasons: [] } });
+    expect(d).toMatchObject({ safeStateApplied: true, dataStatus: 'red' });
+    expect(d.reasons).toEqual([
+      'X:range_missing(yang_zhang)@' + day(3),
+      'X:range_invalid(yang_zhang)@' + day(4),
+    ]);
+  });
+
   it('operandBars and lookbacks: EMA and the all-time drawdown read the whole history', () => {
     const o = (p: object) => ({ ticker: 'X', ...p }) as Parameters<typeof operandBars>[0];
     expect(operandBars(o({ indicator: 'ema', length: 3 }))).toBe(Infinity);
@@ -425,6 +472,31 @@ describe('B1 operands: schema', () => {
     }
     // On total return it is not refused by C18 (a) (open decision C26).
     expect(ok(x({ indicator, length: 5, totalReturn: true }))).toBe(true);
+  });
+
+  // B1 review: a split rescales the plain price, not the percentage.
+  it.each([
+    ['price', 'return'],
+    ['sma', 'volatility'],
+    ['ema', 'drawdown'],
+    ['high', 'volatility'],
+    ['low', 'return'],
+  ])('a plain %s against a %s (a percentage) is refused', (level, pct) => {
+    const plain = x({ indicator: level, ...(level !== 'price' && { length: 5 }) });
+    const percentage = x({ indicator: pct, length: 5 });
+    for (const [l, r] of [
+      [plain, percentage],
+      [percentage, plain],
+    ] as const) {
+      const res = Strategy.safeParse(withLeft(l, r));
+      expect(res.success).toBe(false);
+      expect(res.error!.issues.map((i) => i.message)).toContain(PLAIN_PRICE_AGAINST_PERCENTAGE);
+    }
+    // On total return it is not refused by this rule (C26 open), nor a percentage against one.
+    expect(ok({ ...plain, totalReturn: true }, percentage)).toBe(true);
+    expect(ok(percentage, x({ indicator: 'volatility', method: 'parkinson', length: 3 }))).toBe(
+      true,
+    );
   });
 
   it.each([

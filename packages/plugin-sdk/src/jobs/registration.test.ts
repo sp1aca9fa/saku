@@ -16,6 +16,7 @@ import { testDb } from '@saku/db/testing';
 import { and, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import {
+  RANGE_VOLATILITY_REFUSAL,
   SAME_CLOSE_REFUSAL,
   registrationProblems,
   registrationReport,
@@ -157,6 +158,34 @@ describe('registrationProblems', () => {
     expect(problems[3]).toMatch(/^AAA: its full history has not been checked; run pnpm verify/);
     expect(problems).toHaveLength(4);
   });
+
+  // Decision C32: opens, highs and lows are not cross-checked yet.
+  it.each(['parkinson', 'garman_klass', 'yang_zhang'])(
+    'refuses a %s volatility (open, high and low are not checked yet), in an ensemble too',
+    async (method) => {
+      const { db, pass } = await setup();
+      await pass();
+      const vol = { indicator: 'volatility', ticker: 'AAA', length: 5, method };
+      const base = strategy();
+      const withSignals = (signals: unknown[]) =>
+        Strategy.parse({
+          ...base,
+          signals,
+          allocations: [
+            { name: 'In', when: { all: ['A'] }, holdings: [{ ticker: 'AAA', weight: 100 }] },
+            ...base.allocations,
+          ],
+        });
+      const range = { left: vol, op: '<', right: { threshold: 25 } };
+      const close = { ...range, left: { ...vol, method: 'close' } };
+      const compare = (c: object) => ({ id: 'A', type: 'compare', ...c });
+      expect(await check(db, withSignals([compare(range)]))).toEqual([RANGE_VOLATILITY_REFUSAL]);
+      const ensemble = { id: 'A', type: 'ensemble', threshold: 0.5, members: [close, range] };
+      expect(await check(db, withSignals([ensemble]))).toEqual([RANGE_VOLATILITY_REFUSAL]);
+      // The close method (the default) is not refused.
+      expect(await check(db, withSignals([compare(close)]))).toEqual([]);
+    },
+  );
 
   it('refuses a ticker with no full pass (a daily run does not count)', async () => {
     const { db, ids } = await setup();

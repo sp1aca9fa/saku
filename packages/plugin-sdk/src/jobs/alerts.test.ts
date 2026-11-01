@@ -697,6 +697,22 @@ describe('reason codes in words', () => {
       'UPRO: the main source was missing and no stand-in passed the checks',
     );
     expect(describeReason(t, 'DTB3:missing@none')).toBe('DTB3: no value yet (none)');
+    // A day without a decision names the operand and the day at fault (core `whyUndecided`).
+    expect(describeReason(t, 'AAA:range_missing(parkinson)@2026-01-07')).toBe(
+      'AAA: Parkinson volatility has no value: the open, high or low of 2026-01-07 is missing (never estimated)',
+    );
+    expect(describeReason(t, 'AAA:range_invalid(yang_zhang)@2026-01-07')).toMatch(
+      /^AAA: Yang-Zhang volatility has no value: .* 2026-01-07 do not fit together/,
+    );
+    expect(describeReason(t, 'AAA:value_invalid(return)@2026-01-07')).toBe(
+      'AAA: Return over N days has no value: a price of 2026-01-07 it reads is not positive or not a number',
+    );
+    expect(describeReason(t, 'AAA:warm_up(ema)')).toBe(
+      'AAA: Exponential moving average (EMA) has no value yet: not enough history (warm-up)',
+    );
+    expect(describeReason(translator('ja'), 'AAA:range_missing(garman_klass)@2026-01-07')).toBe(
+      'AAA: ガーマン・クラス・ボラティリティの値がありません: 2026-01-07 の始値・高値・安値のいずれかが欠けています(推定はしません)',
+    );
     // What the signals read before the day (requirements 04 "Red in the lookback", stand-in 6).
     expect(describeReason(t, 'SPY:lookback_red@2026-11-03')).toBe(
       'SPY: the data of 2026-11-03, which the signals still read, is red (unreliable)',

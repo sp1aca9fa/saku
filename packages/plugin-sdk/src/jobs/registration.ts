@@ -7,6 +7,8 @@
 // - `forward_records_from` must be set (the record opens after the A1 gate, stage-a A2).
 // - `same_close` execution is refused: it trades at a close not yet known when the signal is
 //   computed; it exists only for testfol parity tests (05 "Execution model").
+// - A range volatility (parkinson, garman_klass, yang_zhang) is refused: it reads opens, highs
+//   and lows, which no check compares between sources yet (decision C32, docs/indicators.md B1).
 // - Every ticker the strategy depends on (its signals and holdings, as core `dependencies`, and the
 //   holdings of its declared safe state, which it holds on red days) must be an active symbol.
 // - Each such symbol must have passed the data checks over its full history (03 intro: "usable
@@ -69,6 +71,28 @@ const LISTED = 10;
 export const SAME_CLOSE_REFUSAL =
   'same_close trades at a close that is not yet known; it is for testfol parity only. Use next_open.';
 
+/** Volatility methods that read each day's open, high and low (docs/indicators.md, B1). */
+const RANGE_METHODS: readonly string[] = ['parkinson', 'garman_klass', 'yang_zhang'];
+
+export const RANGE_VOLATILITY_REFUSAL =
+  "a range volatility (parkinson, garman_klass or yang_zhang) reads each day's open, high and " +
+  'low, which are not cross-checked between sources yet (decision C32): a wrong high or low ' +
+  'would pass as a green day and move the signal. Use method close until that check exists; ' +
+  'backtests may use range methods.';
+
+/** Whether a signal reads a range volatility (refused until open/high/low are checked, C32). */
+export function readsRangeVolatility(strategy: Strategy): boolean {
+  return strategy.signals
+    .flatMap((s) => (s.type === 'compare' ? [s] : s.members))
+    .flatMap((c) => [c.left, c.right])
+    .some(
+      (o) =>
+        'indicator' in o &&
+        o.indicator === 'volatility' &&
+        RANGE_METHODS.includes(o.method ?? 'close'),
+    );
+}
+
 /** The tickers registration checks: what the strategy reads or holds, its safe state included. */
 export function registrationTickers(strategy: Strategy): string[] {
   const safe = strategy.safeState.holdings
@@ -112,6 +136,7 @@ export async function registrationReport(
     );
   }
   if (strategy.execution === 'same_close') problems.push(SAME_CLOSE_REFUSAL);
+  if (readsRangeVolatility(strategy)) problems.push(RANGE_VOLATILITY_REFUSAL);
 
   const known = new Map((await activeSymbols(db)).map((s) => [s.ticker, s.id]));
   const tickers = registrationTickers(strategy);

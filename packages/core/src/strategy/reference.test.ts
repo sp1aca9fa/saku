@@ -132,6 +132,15 @@ const setup = (execution: string, members: number[]) =>
     ],
   });
 
+/** One equity point per session on both sides, matched by date, within 1e-9 relative. */
+function expectSameEquity(a: ReturnType<typeof backtest>, b: ReturnType<typeof refBacktest>) {
+  expect(a.points.map((p) => p.date)).toEqual(b.dates);
+  const theirs = new Map(b.dates.map((d, i) => [d, b.equity[i]!]));
+  for (const p of a.points) {
+    expect(Math.abs(p.equity / theirs.get(p.date)! - 1), p.date).toBeLessThanOrEqual(1e-9);
+  }
+}
+
 describe('core vs reference', () => {
   for (const seed of [1, 2, 3]) {
     for (const execution of ['next_open', 'next_close', 'same_close']) {
@@ -150,9 +159,7 @@ describe('core vs reference', () => {
         const a = backtest({ strategy, days: core, bars, cashRate });
         const b = refBacktest(strategy, ref, bars, cashRate);
         expect(a.switches).toBe(b.switches);
-        a.points.forEach((p, i) => {
-          expect(Math.abs(p.equity / b.equity[i]! - 1)).toBeLessThanOrEqual(1e-9);
-        });
+        expectSameEquity(a, b);
       });
     }
   }
@@ -187,9 +194,7 @@ describe('core vs reference: a reorder of the same holdings', () => {
       // Per 10-day cycle: mix -> other -> reordered mix -> cash -> mix, 4 switches (reorders: none).
       expect(a.switches).toBe(b.switches);
       expect(a.switches).toBe(4 * 6);
-      a.points.forEach((p, i) => {
-        expect(Math.abs(p.equity / b.equity[i]! - 1)).toBeLessThanOrEqual(1e-9);
-      });
+      expectSameEquity(a, b);
     });
   }
 });
@@ -467,6 +472,8 @@ describe('core vs reference: whole strategies with every B1 operand (random OHLC
 
   it('signals, allocations and equity agree on both series bases', () => {
     let evaluated = 0;
+    /** Sessions without a decision (the safe state), valued by both. */
+    let undecided = 0;
     const allocations = new Set<string>();
     fc.assert(
       fc.property(ohlcWalk, params, (bars, p) => {
@@ -568,22 +575,23 @@ describe('core vs reference: whole strategies with every B1 operand (random OHLC
         evaluated += core.length;
         for (const d of core) allocations.add(d.allocation);
 
-        // Equity on the evaluated days, when every open the trades may read is a usable price.
-        const days = new Set(core.map((d) => d.date));
+        // Equity on every session from the first evaluated day (days without a decision
+        // included), when every open the trades may read is a usable price.
+        const first = core[0]?.date;
         const usable = (o: number | undefined) => o !== undefined && o > 0 && Number.isFinite(o);
-        if (!bars.every((b) => !days.has(b.date) || usable(b.open))) return;
+        if (first === undefined || !bars.every((b) => b.date < first || usable(b.open))) return;
         const cashRate = (date: string) => 1 + (Date.parse(date) % 7) / 10;
         const sub = { X: bars };
         const a = backtest({ strategy, days: core, bars: sub, cashRate });
         const b = refBacktest(strategy, ref, sub, cashRate);
         expect(a.switches).toBe(b.switches);
-        a.points.forEach((pt, i) => {
-          expect(Math.abs(pt.equity / b.equity[i]! - 1)).toBeLessThanOrEqual(1e-9);
-        });
+        expectSameEquity(a, b);
+        undecided += a.points.filter((pt) => !pt.decided).length;
       }),
       RUNS,
     );
     expect(evaluated).toBeGreaterThan(0);
+    expect(undecided).toBeGreaterThan(0);
     expect(allocations.size).toBe(3);
   });
 });

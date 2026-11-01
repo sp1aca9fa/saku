@@ -130,7 +130,12 @@
       "issuerUnavailable": "issuer data could not be fetched ({source})",
       "issuer_nav_tolerance_invalid": "the issuer NAV tolerance setting is invalid; reset it (pnpm settings set issuer_nav_tolerance)",
       "notGreen": "not green",
-      "evaluation": "the strategy could not be evaluated"
+      "evaluation": "the strategy could not be evaluated",
+      "rangeMissing": "{indicator} has no value: the open, high or low of {date} is missing (never estimated)",
+      "rangeInvalid": "{indicator} has no value: the open, high, low and close of {date} do not fit together (outside the day's range, or not positive)",
+      "valueInvalid": "{indicator} has no value: a price of {date} it reads is not positive or not a number",
+      "warmUp": "{indicator} has no value yet: not enough history (warm-up)",
+      "noValue": "{indicator} has no value this day"
     },
     "recompute": {
       "title": "Saku: the engine now decides {count} recorded days differently",

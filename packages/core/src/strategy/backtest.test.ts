@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { RawBar } from '../domain';
 import { backtest, parseTicker, sameHoldings, summary } from './backtest';
-import type { StrategyDay } from './engine';
-import type { Holding } from './schema';
+import { type StrategyDay, evaluate } from './engine';
+import { type Holding, Strategy } from './schema';
 
 const D = ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08'];
 const bar = (date: string, close: number, extra: Partial<RawBar> = {}): RawBar => ({
@@ -142,11 +142,76 @@ describe('backtest', () => {
     expect(r.points[2]!.equity).toBeCloseTo(1, 12);
   });
 
+  // docs/indicators.md "Equity curves", "Days without a decision" (B1 review): a session that
+  // is not evaluated still counts; its decision is the safe state, traded like any decision.
+  it('a day without a decision: its returns count and the safe state is traded', () => {
+    const closes = [100, 101, 102, 103, 104, 150, 106, 107, 108, 109];
+    const dates = closes.map((_, i) =>
+      new Date(Date.UTC(2026, 0, 5) + i * 86_400_000).toISOString().slice(0, 10),
+    );
+    const x = closes.map((c, i) =>
+      bar(dates[i]!, c, { open: c, high: c * 1.01, ...(i !== 5 && { low: c * 0.99 }) }),
+    );
+    const strategy = Strategy.parse({
+      name: 'Gap',
+      account: 'taxable',
+      execution: 'next_close',
+      safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+      evaluation: { frequency: 'daily' },
+      signals: [
+        {
+          id: 'A',
+          type: 'compare',
+          left: { indicator: 'volatility', method: 'parkinson', ticker: 'X', length: 1 },
+          op: '<',
+          right: { threshold: 1e6 },
+        },
+      ],
+      allocations: [
+        { name: 'In', when: { all: ['A'] }, holdings: [{ ticker: 'X', weight: 100 }] },
+        { name: 'Out', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+      ],
+    });
+    const days = evaluate(strategy, { X: x });
+    // Day 5 (close 150) has no low: Parkinson has no value, no decision.
+    expect(days.map((d) => d.date)).toEqual(dates.filter((_, i) => i !== 5));
+    const r = backtest({ strategy, days, bars: { X: x }, cashRate: none });
+    expect(r.points.map((p) => p.date)).toEqual(dates);
+    expect(r.points.map((p) => p.decided)).toEqual(dates.map((_, i) => i !== 5));
+    // X from day 1's close; day 5 decides the safe state (cash), traded at day 6's close, so
+    // day 6 is still X's (150 -> 106); day 6 decides X again, traded at day 7's close.
+    const want = [
+      1,
+      1,
+      102 / 101,
+      103 / 101,
+      104 / 101,
+      150 / 101,
+      106 / 101,
+      106 / 101,
+      (106 / 101) * (108 / 107),
+      (106 / 101) * (109 / 107),
+    ];
+    r.points.forEach((p, i) => expect(p.equity).toBeCloseTo(want[i]!, 12));
+    expect(r.points[6]!.weights).toEqual({ CASH_USD: 1 });
+    expect(r.points[7]!.weights).toEqual({ X: 1 });
+    expect(r.switches).toBe(2);
+    // Without a safe state to take, the gap is not guessed.
+    expect(() =>
+      backtest({
+        strategy: { execution: 'next_close', costs: {} },
+        days,
+        bars: { X: x },
+        cashRate: none,
+      }),
+    ).toThrow(/no decision/);
+  });
+
   it('summarizes growth and the deepest drawdown', () => {
     const s = summary([
-      { date: '2025-01-01', equity: 1, weights: {}, traded: false },
-      { date: '2025-07-02', equity: 0.8, weights: {}, traded: false },
-      { date: '2026-01-01', equity: 1.1, weights: {}, traded: false },
+      { decided: true, date: '2025-01-01', equity: 1, weights: {}, traded: false },
+      { decided: true, date: '2025-07-02', equity: 0.8, weights: {}, traded: false },
+      { decided: true, date: '2026-01-01', equity: 1.1, weights: {}, traded: false },
     ]);
     expect(s.maxDrawdown).toBeCloseTo(-0.2, 12);
     expect(s.cagr).toBeCloseTo(1.1 ** (365.25 / 365) - 1, 12);

@@ -1,6 +1,8 @@
 // Layer E on stored data (requirements 04, 13; `pnpm verify` and the weekly run). For every
 // registered version, over today's canonical bars of what it reads:
-// - core vs reference: the same days, signals and allocations; equity within 1e-9 relative;
+// - core vs reference: the same days, signals and allocations; the same sessions (a session
+//   without a decision included, docs/indicators.md "Days without a decision") and equity on each
+//   within 1e-9 relative, matched by date;
 // - incremental vs full: sampled days decided and valued from the bars up to that day only (as
 //   the daily run does) equal the full-history pass on those days (no look-ahead, no state that
 //   depends on later data).
@@ -54,12 +56,15 @@ export async function integrity(
     let strategy: Strategy;
     let bars: Bars;
     let core: StrategyDay[];
-    let equity: number[];
+    /** Core's equity per session, by date. */
+    let equity: Map<TradingDate, number>;
     try {
       strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
       bars = barsOf(await loadRows(dependencies(strategy), o.to));
       core = evaluate(strategy, bars);
-      equity = backtest({ strategy, days: core, bars, cashRate }).points.map((p) => p.equity);
+      equity = new Map(
+        backtest({ strategy, days: core, bars, cashRate }).points.map((p) => [p.date, p.equity]),
+      );
     } catch (e) {
       // Neither check can run: both are red, and the other versions are still checked.
       for (const check of INTEGRITY_CHECKS) {
@@ -79,7 +84,7 @@ type Bars = Parameters<typeof evaluate>[1];
 function compareReference(
   strategy: Strategy,
   core: StrategyDay[],
-  equity: number[],
+  equity: Map<TradingDate, number>,
   bars: Bars,
   cashRate: (date: TradingDate) => number | undefined,
   result: Result,
@@ -102,13 +107,20 @@ function compareReference(
       });
       // Core succeeded, so no day it valued needed an unknown rate; the reference reads the rate
       // on every day (times a zero weight where unused), so an unknown one is passed as 0 there.
-      const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? 0).equity;
-      equity.forEach((e, i) => {
-        const dev = relative(e, b[i]!);
-        if (!(dev <= INTEGRITY_TOLERANCE))
-          problems.push(`${core[i]!.date}: equity ${e} vs ${b[i]}`);
-        if (dev > worst) worst = dev;
-      });
+      // Matched by date: both value every session, those without a decision included.
+      const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? 0);
+      const theirs = new Map(b.dates.map((d, i) => [d, b.equity[i]!]));
+      const ours = [...equity.keys()];
+      if (ours.length !== b.dates.length || ours.some((d) => !theirs.has(d))) {
+        problems.push(`sessions differ (core ${ours.length}, reference ${b.dates.length})`);
+      } else {
+        for (const [date, e] of equity) {
+          const r = theirs.get(date)!;
+          const dev = relative(e, r);
+          if (!(dev <= INTEGRITY_TOLERANCE)) problems.push(`${date}: equity ${e} vs ${r}`);
+          if (dev > worst) worst = dev;
+        }
+      }
     }
   } catch (e) {
     problems.push(`reference could not evaluate: ${String(e)}`);
@@ -119,7 +131,7 @@ function compareReference(
 function compareIncremental(
   strategy: Strategy,
   core: StrategyDay[],
-  equity: number[],
+  equity: Map<TradingDate, number>,
   bars: Bars,
   cashRate: (date: TradingDate) => number | undefined,
   result: Result,
@@ -146,9 +158,15 @@ function compareIncremental(
       }
       const signals = signalsDiffer(last.signals, core[i]!.signals);
       if (signals.length) problems.push(`${date}: signals ${signals.join(', ')}`);
-      const e = backtest({ strategy, days, bars: upTo, cashRate }).points.at(-1)!.equity;
-      const dev = relative(e, equity[i]!);
-      if (!(dev <= INTEGRITY_TOLERANCE)) problems.push(`${date}: equity ${e} vs ${equity[i]}`);
+      const point = backtest({ strategy, days, bars: upTo, cashRate }).points.at(-1)!;
+      const full = equity.get(date);
+      if (point.date !== date || full === undefined) {
+        problems.push(`${date}: no equity on that day (${point.date})`);
+        continue;
+      }
+      const e = point.equity;
+      const dev = relative(e, full);
+      if (!(dev <= INTEGRITY_TOLERANCE)) problems.push(`${date}: equity ${e} vs ${full}`);
       if (dev > worst) worst = dev;
     } catch (e) {
       problems.push(`${date}: ${String(e)}`);
