@@ -196,9 +196,14 @@ const close = (a: number, b: number, what: string) =>
 function compare(core: ReturnType<typeof backtest>, ref: ReturnType<typeof refBacktest>) {
   expect(core.points.map((p) => p.date)).toEqual(ref.dates);
   core.points.forEach((p, i) => {
-    // Both ran: every session had what it needs, so core priced every point.
-    expect(p.equity, `equity ${p.date}`).not.toBeNull();
-    close(p.equity!, ref.equity[i]!, `equity ${p.date}`);
+    // A point is null on both or on neither (unusable FX, docs/indicators.md "Base-currency
+    // cash"); a null point gives the same reason on both.
+    const r = ref.equity[i];
+    expect(p.equity === null, `equity null ${p.date}`).toBe(r === null);
+    if (p.equity === null) {
+      const why = ref.unknown?.find((u) => u.date === p.date)?.reason;
+      expect(p.unknown?.reason, `reason ${p.date}`).toBe(why);
+    } else close(p.equity, r!, `equity ${p.date}`);
   });
   expect(core.switches).toBe(ref.switches);
   expect(core.conversions?.count).toBe(ref.conversions?.count);
@@ -243,7 +248,6 @@ const seen = {
   nullPoints: 0,
   invalidPoints: 0,
   refusedBoth: 0,
-  referencePending: 0,
   lostAfterConversion: 0,
 };
 
@@ -330,9 +334,7 @@ describe('core vs reference: base currency (seeded)', () => {
       it(`seed ${seed}, ${execution}: CASH_BASE with FX holes: core values the other sessions`, () => {
         // Contract round 2 (docs/indicators.md "Base-currency cash"): a session without a usable
         // FX has no value; later sessions with one are valued; a trade with CASH_BASE on such a
-        // session leaves every later point unknown. Until the reference implements this it
-        // refuses the run: then core is checked against the contract alone (each null point
-        // names its FX), and the full comparison runs once the reference agrees.
+        // session leaves every later point unknown. Core and reference are compared on it.
         const strategy = strategyFor(execution);
         const o = {
           baseCurrency: 'JPY',
@@ -342,13 +344,8 @@ describe('core vs reference: base currency (seeded)', () => {
         const cashRate = (date: string) => 1 + (Date.parse(date) % 7) / 10;
         const days = evaluate(strategy, bars);
         const core = backtest({ strategy, days, bars, cashRate, ...o });
-        let ref: ReturnType<typeof refBacktest> | undefined;
-        try {
-          ref = refBacktest(strategy, refEvaluate(strategy, bars), bars, cashRate, o);
-        } catch {
-          seen.referencePending++;
-        }
-        if (ref) compare(core, ref);
+        const ref = refBacktest(strategy, refEvaluate(strategy, bars), bars, cashRate, o);
+        compare(core, ref);
         for (const p of core.points) {
           if (p.equity === null) {
             expect(p.unknown!.reason).toMatch(/FX rate \(USDJPY\)/);

@@ -2,6 +2,7 @@
 // tickers and weights is no trade. Written against the reference only (no @saku/core).
 import { describe, expect, it } from 'vitest';
 import {
+  refMetrics,
   refWholeShareBook,
   refParseTicker,
   refAnnualize,
@@ -865,7 +866,7 @@ describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
     // Day 1 at the close 110: x = 100 x 1000 / (100 x 110) = 9.09, n = 9, residual 10.
     // Day 2: 10 + 9 x 121 = 1099.
     near(amounts(r), [1000, 1000, 1099]);
-    near(r.equity, [1, 1, 1.099]);
+    near(r.equity as number[], [1, 1, 1.099]);
     expect(r.weights![0]).toEqual({});
     expect(r.weights![2]!.X).toBeCloseTo(1089 / 1099, 12);
     expect(r.weights![2]!.CASH_USD).toBeCloseTo(10 / 1099, 12);
@@ -1641,10 +1642,58 @@ describe('reference: base currency, CASH_BASE, FX spread (docs/indicators.md)', 
       /unknown deposit rate on 2026-11-05/,
     );
     expect(() => run({ ...ok, depositRate: () => NaN })).toThrow(/invalid deposit rate/);
+  });
+
+  it('unusable FX on a session while holding CASH_BASE: that point is null, later ones are valued', () => {
+    // Entry at D1's close at 150: 0.998 x 150 = 149.7 base units. D2: x 1.001, FX unknown: null.
+    // D3: 149.7 x 1.001^2 / 160 = 0.998 x 1.001^2 x 0.9375 (the units were carried).
+    const run = (fx: Record<string, number | undefined>) =>
+      refBacktest(strategy('next_close'), decide([CB, CB, CB, CB]), { H }, () => 0, {
+        baseCurrency: 'JPY',
+        fxRate: table(fx),
+        depositRate: () => 25.2,
+      });
+    const r = run({ [D[0]!]: 150, [D[1]!]: 150, [D[3]!]: 160 });
+    expect(r.equity[2]).toBeNull();
+    near([r.equity[0]!, r.equity[1]!, r.equity[3]!], [1, 0.998, 0.998 * 1.001 ** 2 * 0.9375]);
+    expect(r.unknown).toEqual([{ date: D[2], reason: `no FX rate (USDJPY) known for ${D[2]}` }]);
+    expect(r.base!.equity[2]).toBeNull();
+    expect(r.base!.unknownFx).toEqual([D[2]]);
+    expect(r.base!.equity[3]).toBeCloseTo(0.998 * 1.001 ** 2 * 150, 12);
+    // An FX of 0: the same, with its own reason, listed as invalid.
+    const z = run({ [D[0]!]: 150, [D[1]!]: 150, [D[2]!]: 0, [D[3]!]: 160 });
+    expect(z.equity[2]).toBeNull();
+    expect(z.unknown).toEqual([
+      { date: D[2], reason: `the FX rate (USDJPY) for ${D[2]} is 0, not above 0` },
+    ]);
+    expect(z.base!.invalidFx).toEqual([D[2]]);
+    expect(z.equity[3]).toBeCloseTo(0.998 * 1.001 ** 2 * 0.9375, 12);
+  });
+
+  it('a conversion on a session with unusable FX: that point and every later one is null', () => {
+    // D1: into H (no CASH_BASE, no FX read, D1's FX is unknown and not needed). D2: into
+    // CASH_BASE at an unknown FX: cannot be priced. D3: back to H: still counted as a switch, no
+    // costs or conversions.
+    const r = refBacktest(strategy('next_close'), decide([HH, CB, HH, HH]), { H }, () => 0, {
+      baseCurrency: 'JPY',
+      fxRate: table({ [D[0]!]: 150, [D[3]!]: 150 }),
+      depositRate: () => 0,
+    });
+    expect(r.equity).toEqual([1, 1, null, null]);
+    const why =
+      `a trade with CASH_BASE on ${D[2]} could not be priced (no FX rate (USDJPY) known for ` +
+      `${D[2]}); the position is unknown from then on`;
+    expect(r.unknown).toEqual([
+      { date: D[2], reason: why },
+      { date: D[3], reason: why },
+    ]);
+    expect(r.switches).toBe(2);
+    expect(r.conversions).toBeUndefined();
+    expect(r.base!.equity).toEqual([150, null, null, null]);
+    // Metrics refuse a null point (never read as 0 or skipped).
     expect(() =>
-      run({ ...ok, fxRate: table({ [D[0]!]: 150, [D[1]!]: 150, [D[3]!]: 150 }) }),
-    ).toThrow(/unknown FX on 2026-11-04/);
-    expect(() => run({ ...ok, fxRate: () => 0 })).toThrow(/invalid FX/);
+      refMetrics({ points: r.dates.map((date, i) => ({ date, equity: r.equity[i] as number })) }),
+    ).toThrow(/equity on 2026-11-04 is not a finite number/);
   });
 
   it('the ticker grammar: CASH_BASE takes no parameters', () => {

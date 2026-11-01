@@ -385,6 +385,25 @@ describe('CASH_BASE', () => {
     expect(() => summary(r.points)).toThrow(/equity of 2026-01-06 is unknown/);
   });
 
+  it('a position lost while CASH_BASE is held still counts later switches', () => {
+    // CASH_BASE from D[0] (held in base units), sold on D[1] whose FX is unknown: lost there.
+    // Later changes (back to CASH_BASE on D[2], to X on D[3]) still count, as with every FX known.
+    const input: BacktestInput = {
+      strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0.1, fxSpreadPct: 1 } },
+      days: decide(['CASH_BASE', 'X', 'CASH_BASE', 'X']),
+      bars: { X: D.map((d) => bar(d, 100)) },
+      cashRate: none,
+      baseCurrency: 'JPY',
+      depositRate: deposit,
+    };
+    const r = backtest({ ...input, fxRate: at({ [D[0]!]: 150, [D[2]!]: 150, [D[3]!]: 150 }) });
+    expect(r.points.map((p) => p.equity)).toEqual([expect.any(Number), null, null, null]);
+    expect(r.points.slice(1).map((p) => p.unknown!.date)).toEqual([D[1], D[1], D[1]]);
+    const known = backtest({ ...input, fxRate: () => 150 });
+    expect(known.switches).toBe(3);
+    expect(r.switches).toBe(known.switches);
+  });
+
   it('needs the base currency; with base USD nothing converts and no FX is read', () => {
     const input: BacktestInput = {
       strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0, fxSpreadPct: 1 } },

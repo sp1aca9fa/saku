@@ -543,14 +543,19 @@ export function refBacktest(
     throw new Error(`reference: base currency ${JSON.stringify(baseCurrency)} is not an ISO code`);
   }
   const foreign = baseCurrency !== undefined && baseCurrency !== 'USD';
-  /** The session's FX (base units per USD), checked; 1 for a USD base (never read). */
-  const fxOf = (date: string): number => {
-    if (!foreign) return 1;
+  /**
+   * The session's FX (base units per USD), or why it is unusable (docs/indicators.md
+   * "Unusable FX"); 1 for a USD base (never read).
+   */
+  const fxOf = (date: string): { fx: number } | { why: string } => {
+    if (!foreign) return { fx: 1 };
     const fx = options?.fxRate?.(date);
-    if (fx === undefined) throw new Error(`reference: unknown FX on ${date}`);
-    if (!Number.isFinite(fx) || !(fx > 0))
-      throw new Error(`reference: invalid FX ${fx} on ${date}`);
-    return fx;
+    const pair = `USD${baseCurrency}`;
+    if (fx === undefined) return { why: `no FX rate (${pair}) known for ${date}` };
+    if (!Number.isFinite(fx) || !(fx > 0)) {
+      return { why: `the FX rate (${pair}) for ${date} is ${fx}, not above 0` };
+    }
+    return { fx };
   };
   /** A covered day's deposit rate for CASH_BASE, checked. */
   const depositOf = (day: string): number => {
@@ -579,7 +584,7 @@ export function refBacktest(
    */
   const dailyReturn = (ticker: string, day: string, kind: 'night' | 'day' | 'whole'): number => {
     if (ticker === 'CASH_USD') return kind === 'day' ? 0 : rate(day);
-    // CASH_BASE: its deposit rate per covered day; its FX move is applied once per step (move).
+    // CASH_BASE (in base units): its deposit rate per covered day; FX only when valued.
     if (ticker === 'CASH_BASE') return kind === 'day' ? 0 : depositOf(day) / 100 / 252;
     const { base, L, E } = parse(ticker);
     const b = steps().barOn(base, day);
@@ -599,11 +604,26 @@ export function refBacktest(
     return L * r - financing - E / 100 / 252;
   };
 
-  let value: Record<string, number> = {}; // money per holding
+  // Money per holding: USD for every ticker, base-currency units for CASH_BASE (docs/indicators.md
+  // "Base-currency cash": held in base units, valued at each session's FX).
+  let value: Record<string, number> = {};
   let switches = 0;
   const conversions = { count: 0, fxSpread: 0 };
-  const total = () => Object.values(value).reduce((a, b) => a + b, 0);
+  // Set when a trade with CASH_BASE could not be priced: the position is unknown from then on.
+  let lost: string | undefined;
+  /** USD value per holding on a session, or why it cannot be valued (unusable FX). */
+  const usdValues = (date: string): { usd: Record<string, number> } | { why: string } => {
+    const usd = { ...value };
+    if (usd.CASH_BASE !== undefined) {
+      const f = fxOf(date);
+      if ('why' in f) return f;
+      usd.CASH_BASE = usd.CASH_BASE / f.fx;
+    }
+    return { usd };
+  };
+  const sum = (r: Record<string, number>) => Object.values(r).reduce((a, b) => a + b, 0);
   const move = (prevDate: string, date: string, part: 'night' | 'day' | 'whole') => {
+    if (lost !== undefined) return; // the position is unknown: nothing to move
     const covered = part === 'day' ? [date] : steps().covered(prevDate, date);
     for (const t of Object.keys(value)) {
       if (t !== 'CASH_USD' && t !== 'CASH_BASE') {
@@ -621,31 +641,40 @@ export function refBacktest(
         }
         value[t] = value[t]! * growth;
       }
-      // CASH_BASE: its USD value moves with the base currency, fx(prev) / fx(date), once per step
-      // in the night part or the whole day (nothing in the open-to-close part).
-      if (t === 'CASH_BASE' && part !== 'day') {
-        const growth = fxOf(prevDate) / fxOf(date);
-        if (!Number.isFinite(growth) || !(growth > 0)) {
-          throw new Error(`reference: FX growth ${growth} for CASH_BASE on ${date}`);
-        }
-        value[t] = value[t]! * growth;
-      }
     }
   };
-  const rebalance = (holdings: { ticker: string; weight: number }[]) => {
-    const before = total();
-    const start = Object.keys(value).length === 0;
-    const wealth = start ? 1 : before;
+  const rebalance = (holdings: { ticker: string; weight: number }[], date: string) => {
+    const start = lost === undefined && Object.keys(value).length === 0;
+    if (lost !== undefined) {
+      switches++; // still counted; costs and conversions cannot be priced
+      return;
+    }
+    // A trade that holds or targets CASH_BASE converts at this session's FX.
+    const involves =
+      value.CASH_BASE !== undefined || holdings.some((h) => h.ticker === 'CASH_BASE');
+    const f = involves ? fxOf(date) : { fx: 1 };
+    if ('why' in f) {
+      lost =
+        `a trade with CASH_BASE on ${date} could not be priced (${f.why}); ` +
+        'the position is unknown from then on';
+      value = {};
+      if (!start) switches++;
+      return;
+    }
+    const usd = usdValues(date);
+    if ('why' in usd) throw new Error(`reference: ${usd.why}`); // unreachable: f was usable
+    const held = usd.usd;
+    const wealth = start ? 1 : sum(held);
     const goal: Record<string, number> = {};
     for (const h of holdings) goal[h.ticker] = (wealth * h.weight) / 100;
     let traded = 0;
-    for (const t of new Set([...Object.keys(value), ...Object.keys(goal)])) {
-      traded += Math.abs((goal[t] ?? 0) - (value[t] ?? 0));
+    for (const t of new Set([...Object.keys(held), ...Object.keys(goal)])) {
+      traded += Math.abs((goal[t] ?? 0) - (held[t] ?? 0));
     }
     if (start) traded = wealth;
     // FX spread (docs/indicators.md "FX spread"): |change in CASH_BASE weight| x value x spread;
     // the start is in USD (weight 0 before), and a USD base converts nothing.
-    const converted = foreign ? Math.abs((goal.CASH_BASE ?? 0) - (value.CASH_BASE ?? 0)) : 0;
+    const converted = foreign ? Math.abs((goal.CASH_BASE ?? 0) - (held.CASH_BASE ?? 0)) : 0;
     const spread = converted > 0 ? converted * fxSpread() : 0;
     if (converted > 0) {
       conversions.count++;
@@ -653,7 +682,11 @@ export function refBacktest(
     }
     const after = wealth - traded * costRate - spread;
     value = {};
-    for (const h of holdings) value[h.ticker] = (after * h.weight) / 100;
+    for (const h of holdings) {
+      const usdAmount = (after * h.weight) / 100;
+      // USD sold into CASH_BASE buys (amount x fx) base units.
+      value[h.ticker] = h.ticker === 'CASH_BASE' ? usdAmount * f.fx : usdAmount;
+    }
     if (!start) switches++;
   };
   // A position's identity: its (ticker, weight) pairs as a multiset, so listing the same
@@ -735,10 +768,11 @@ export function refBacktest(
   const doTrade = (h: RefDay['holdings'], date: string, time: 'open' | 'close') => {
     if (ws) {
       if (ws.trade(h, date, time)) switches++;
-    } else rebalance(h);
+    } else rebalance(h, date);
   };
 
-  const equity: number[] = [];
+  const equity: (number | null)[] = [];
+  const unknown: { date: string; reason: string }[] = [];
   let current: string | undefined;
   let queued: RefDay['holdings'] | undefined;
   for (let i = 0; i < sessions.length; i++) {
@@ -770,11 +804,23 @@ export function refBacktest(
       queued = want === current ? undefined : d.holdings;
     }
     if (ws) ws.point(d.date);
-    else equity.push(Object.keys(value).length === 0 ? 1 : total());
+    else if (lost !== undefined) {
+      equity.push(null);
+      unknown.push({ date: d.date, reason: lost });
+    } else if (Object.keys(value).length === 0) equity.push(1);
+    else {
+      const usd = usdValues(d.date);
+      if ('why' in usd) {
+        // This session's FX is unusable while CASH_BASE is held: no value; the units are kept.
+        equity.push(null);
+        unknown.push({ date: d.date, reason: usd.why });
+      } else equity.push(sum(usd.usd));
+    }
   }
   const out: RefBacktestResult = ws
     ? { ...ws.result(), dates: sessions, switches }
     : { equity, dates: sessions, switches };
+  if (!ws && unknown.length > 0) out.unknown = unknown;
   if (!ws && conversions.count > 0) {
     out.conversions = { ...conversions, tax: 'not_applied' };
   }
@@ -810,7 +856,7 @@ function refBaseSeries(
   });
   const series: RefBaseSeries = {
     currency,
-    equity: r.equity.map((e, i) => (fx[i] === null ? null : e * fx[i]!)),
+    equity: r.equity.map((e, i) => (e === null || fx[i] === null ? null : e * fx[i]!)),
     unknownFx,
     invalidFx,
   };
@@ -866,8 +912,11 @@ export interface RefTrade {
 }
 
 export interface RefBacktestResult {
-  equity: number[];
+  /** Null on a session that cannot be valued (docs/indicators.md "Unusable FX"). */
+  equity: (number | null)[];
   dates: string[];
+  /** The null points and why (fractional; only when there are any). */
+  unknown?: { date: string; reason: string }[];
   switches: number;
   /** Whole shares only: the value at each close, with its currency. */
   value?: RefMoney[];

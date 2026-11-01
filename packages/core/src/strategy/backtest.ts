@@ -366,7 +366,10 @@ function fractionalBook(
       const entered = units !== undefined || Object.keys(weights).length > 0;
       const target = targetWeights(to);
       if (lost) {
+        // The amounts are unknown, but what is held is not: a later change still counts as a
+        // switch (docs/indicators.md "Base-currency cash"). `weights` then only says what is held.
         if (entered) switches++;
+        weights = target;
         return;
       }
       if (!base || (!units && !(CASH_BASE in target))) {
@@ -385,6 +388,8 @@ function fractionalBook(
           reason: `a trade with ${CASH_BASE} on ${date} could not be priced (${read.reason}); the position is unknown from then on`,
         };
         units = undefined;
+        // Only what is held, for counting later switches (never valued: every close is null).
+        weights = target;
         return;
       }
       let value = equity;
