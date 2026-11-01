@@ -145,6 +145,11 @@ describe('whole shares', () => {
     expect(t.shares).toEqual({ X: 3 });
     expect(t.residualCash.amount).toBeCloseTo(7.014, 12);
     expect(t.residualCash.amount).toBeGreaterThanOrEqual(0);
+    // A true quotient 1e-9 below a whole number is not float noise: 21.020999978979 / 3.003 is
+    // 6.999999993..., so 6 shares (a 1e-9 snap bought 7 and left -2.1e-8, failing a valid run).
+    const edge = at(100, '21.020999978979', 3, { feePct: 0.1 });
+    expect(edge.shares).toEqual({ X: 6 });
+    expect(edge.residualCash.amount).toBeCloseTo(21.020999978979 - 18 - 0.018, 12);
   });
 
   it('costs on the shares traded; sizing leaves room for them', () => {
@@ -481,18 +486,44 @@ describe('whole shares', () => {
         fc.constantFrom<Execution>('next_open', 'next_close', 'same_close'),
         fc.integer({ min: 0, max: 500 }),
         fc.double({ min: 0, max: 5, noNaN: true }),
-        fc.integer({ min: 1, max: 100_000 }),
-        (rows, execution, slippageBps, feePct, amount) => {
+        fc.oneof(
+          fc.record({ cents: fc.integer({ min: 1, max: 10_000_000 }) }),
+          // Just below k whole shares of the first trade: k x p x (1 + c) / (1 + small).
+          fc.record({
+            k: fc.integer({ min: 1, max: 1000 }),
+            small: fc.oneof(
+              fc.double({ min: 0, max: 1e-8, noNaN: true }),
+              fc.double({ min: 1e-12, max: 2e-9, noNaN: true }),
+              fc.constantFrom(0, 1e-12, 1e-10, 9.99e-10, 1e-9, 1.01e-9),
+            ),
+          }),
+        ),
+        (rows, execution, slippageBps, feePct, amountSpec) => {
           const bars = {
             X: rows.map(([o, c], i) => bar(D[i]!, c, { open: o })),
             Y: rows.map(([, , o, c], i) => bar(D[i]!, c, { open: o })),
           };
           const days = rows.map((row) => targets[row[4]]!);
-          const r = run(execution, days, bars, String(amount), {
+          const c = slippageBps / 10_000 + feePct / 100;
+          let amount: string;
+          if ('cents' in amountSpec) {
+            amount = (amountSpec.cents / 100).toFixed(2);
+          } else {
+            const first = days[0]![0]!;
+            const tradeDay = execution === 'same_close' ? 0 : 1;
+            const p =
+              first.ticker === 'CASH_USD'
+                ? 1
+                : execution === 'next_open'
+                  ? bars[first.ticker as 'X' | 'Y'][tradeDay]!.open!
+                  : bars[first.ticker as 'X' | 'Y'][tradeDay]!.close;
+            const a = (amountSpec.k * p * (1 + c) * 100) / (first.weight * (1 + amountSpec.small));
+            amount = a.toFixed(12);
+          }
+          const r = run(execution, days, bars, amount, {
             costs: { slippageBps, feePct },
             cashRate: () => 2,
           });
-          const c = slippageBps / 10_000 + feePct / 100;
           const at = (t: string, date: string, open: boolean) => {
             const b = bars[t as 'X' | 'Y'].find((x) => x.date === date)!;
             return open ? b.open! : b.close;
@@ -509,9 +540,10 @@ describe('whole shares', () => {
             for (const [k, n] of Object.entries(t.shares)) {
               expect(Number.isInteger(n) && n >= 0).toBe(true);
               bought += n * price(k);
-              // Never over the ticker's share of the budget, and one more share would be.
+              // Never over the ticker's share of the budget beyond float noise (the sizing snap,
+              // 1e-12), and one more share would be over it.
               const share = (weightOf(Object.keys(t.shares), k) / 100) * B;
-              expect(n * price(k) * (1 + c)).toBeLessThanOrEqual(share * (1 + 1e-9));
+              expect(n * price(k) * (1 + c)).toBeLessThanOrEqual(share * (1 + 2e-12));
               expect((n + 1) * price(k) * (1 + c)).toBeGreaterThan(share * (1 - 1e-9));
             }
             expect(t.residualCash.amount).toBeGreaterThanOrEqual(0);
@@ -523,7 +555,7 @@ describe('whole shares', () => {
           }
         },
       ),
-      { numRuns: 300 },
+      { numRuns: 3000 },
     );
   });
 });

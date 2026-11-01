@@ -248,8 +248,17 @@ function wholeSharesAmount(ws: WholeShares): number {
   return amount;
 }
 
-/** Relative distance within which a float product counts as the whole number (float noise). */
+/**
+ * Relative distance within which a split's share product counts as the whole number (float noise
+ * and split ratios given to a few decimals); also the residual cash's allowance below 0.
+ */
 const NEAR_WHOLE = 1e-9;
+/**
+ * Relative distance within which a sizing quotient counts as the whole number: float noise only
+ * (a few ulps, about 1e-16), 1000 times below the residual's allowance (`NEAR_WHOLE`), so a snap
+ * never spends more than float noise and never trips the residual check.
+ */
+const SIZING_NOISE = 1e-12;
 
 const usd = (amount: number): UsdAmount => ({ amount, currency: 'USD' });
 
@@ -330,13 +339,13 @@ function wholeBook(deps: {
       const zeroShares: string[] = [];
       for (const [t, w] of target) {
         if (t === CASH_USD) continue;
-        // x = (weight x B) / (100 x p x (1 + c)); within 1e-9 (relative) of a whole number it is
-        // that number (float noise: 58 x 100 / 200 must give 29, not 28.999...), then floor.
+        // x = (weight x B) / (100 x p x (1 + c)); within 1e-12 (relative, float noise only) of a
+        // whole number it is that number (58 x 100 / 200 must give 29, not 28.999...), then floor.
         const x = (w * budget) / (100 * prices.get(t)! * (1 + c));
         const near = Math.round(x);
         const n = Math.max(
           0,
-          Math.floor(Math.abs(x - near) <= NEAR_WHOLE * Math.abs(x) ? near : x),
+          Math.floor(Math.abs(x - near) <= SIZING_NOISE * Math.abs(x) ? near : x),
         );
         next.set(t, n);
         if (n === 0) zeroShares.push(t);
@@ -351,7 +360,8 @@ function wholeBook(deps: {
       let residual = value - bought - cost;
       if (residual < 0) {
         // Exact arithmetic keeps it at 0 or above (docs/indicators.md "Whole shares"), up to the
-        // sizing's snap (at most 1e-9 x B); below 0 by more is a fault, never a silent clamp.
+        // sizing's snap (at most 1e-12 x B) and float noise; below 0 by more than 1e-9 x V is a
+        // fault, never a silent clamp.
         if (residual < -NEAR_WHOLE * value) {
           throw new Error(`Whole shares on ${date}: the residual cash ${residual} is below 0.`);
         }
