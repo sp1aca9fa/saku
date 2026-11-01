@@ -137,7 +137,7 @@ function expectSameEquity(a: ReturnType<typeof backtest>, b: ReturnType<typeof r
   expect(a.points.map((p) => p.date)).toEqual(b.dates);
   const theirs = new Map(b.dates.map((d, i) => [d, b.equity[i]!]));
   for (const p of a.points) {
-    expect(Math.abs(p.equity / theirs.get(p.date)! - 1), p.date).toBeLessThanOrEqual(1e-9);
+    expect(Math.abs(p.equity! / theirs.get(p.date)! - 1), p.date).toBeLessThanOrEqual(1e-9);
   }
 }
 

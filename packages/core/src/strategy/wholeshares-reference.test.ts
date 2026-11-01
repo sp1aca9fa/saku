@@ -264,7 +264,7 @@ function expectSame(label: string, a: BacktestResult, b: RefBacktestResult) {
       Math.abs(p.value!.amount / v - 1),
       `${at} value ${p.value!.amount} vs ${v}`,
     ).toBeLessThanOrEqual(TOL);
-    expect(Math.abs(p.equity / b.equity[i]! - 1), `${at} equity`).toBeLessThanOrEqual(TOL);
+    expect(Math.abs(p.equity! / b.equity[i]! - 1), `${at} equity`).toBeLessThanOrEqual(TOL);
     const w = b.weights![i]!;
     for (const t of new Set([...Object.keys(p.weights), ...Object.keys(w)])) {
       expect(Math.abs((p.weights[t] ?? 0) - (w[t] ?? 0)), `${at} weight ${t}`).toBeLessThanOrEqual(

@@ -215,6 +215,54 @@ describe('registrationProblems', () => {
     );
   });
 
+  it('CASH_BASE: refuses an FX the forward record would refuse (stale, or disputed), with why', async () => {
+    const { db, pass } = await setup();
+    await pass();
+    const s = strategy({ safe: 'CASH_BASE' });
+    await setSetting(db, 'base_currency', 'XXX');
+    await addDepositRate(db, { ratePct: '0.2', from: D[0], currency: 'XXX' });
+    await db.insert(schema.sourceRoles).values([
+      { dataKind: 'fx', pluginKey: 'fp', role: 'primary', position: 0 },
+      { dataKind: 'fx', pluginKey: 'fs1', role: 'secondary', position: 1 },
+    ]);
+    // The last value is from 2025-12-26: more than 5 sessions behind through.
+    await storeFx(db, {
+      source: 'fp',
+      kind: 'valuation',
+      rates: [
+        { pair: 'USDXXX', date: '2025-12-26', rate: 150, publishedAt: '2025-12-26T15:00:00Z' },
+      ],
+      fetchedAt: '2025-12-26T16:00:00Z',
+    });
+    const [stale] = await check(db, s);
+    expect(stale).toMatch(
+      new RegExp(
+        `^The strategy may hold CASH_BASE and USDXXX is stale: its last value \\(2025-12-26\\) is \\d+ sessions behind ${LAST}: run pnpm jobs daily \\(or check the FX source\\) first\\.$`,
+      ),
+    );
+    // A recent value the current secondary found wrong: refused too.
+    await storeFx(db, {
+      source: 'fp',
+      kind: 'valuation',
+      rates: [{ pair: 'USDXXX', date: D[2], rate: 149, publishedAt: `${D[2]}T15:00:00Z` }],
+      fetchedAt: `${D[2]}T16:00:00Z`,
+    });
+    const runId = await startRun(db, 'daily');
+    await db.insert(schema.checkResults).values({
+      runId,
+      layer: 'B',
+      checkName: 'fx_match',
+      symbolId: null,
+      source: 'fs1',
+      date: D[2],
+      status: 'red',
+      expected: 149,
+    });
+    expect(await check(db, s)).toEqual([
+      `The strategy may hold CASH_BASE and USDXXX of ${D[2]} disagrees with fs1 (fx_match red): run pnpm jobs daily (or check the FX source) first.`,
+    ]);
+  });
+
   it('refuses same_close, and lists every reason at once', async () => {
     const { db } = await setup({ recordsFrom: false });
     const problems = await check(db, strategy({ execution: 'same_close', ticker: 'ZZZ' }));

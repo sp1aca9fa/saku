@@ -60,8 +60,11 @@ export async function integrity(
     let strategy: Strategy;
     let bars: Bars;
     let core: StrategyDay[];
-    /** Core's equity per session, by date. */
-    let equity: Map<TradingDate, number>;
+    /**
+     * Core's equity per session, by date; null where it has no value (CASH_BASE held over a
+     * session without a usable FX, docs/indicators.md "Base-currency cash").
+     */
+    let equity: Map<TradingDate, number | null>;
     // Only a version registered before C2's cost freeze reads an omitted cost as 0 (as when it
     // was recorded); for any other an omitted cost fails (docs/indicators.md "Costs").
     const omittedCostsAsZero = !version.costsResolved;
@@ -102,7 +105,7 @@ type Bars = Parameters<typeof evaluate>[1];
 function compareReference(
   strategy: Strategy,
   core: StrategyDay[],
-  equity: Map<TradingDate, number>,
+  equity: Map<TradingDate, number | null>,
   bars: Bars,
   cashRate: (date: TradingDate) => number | undefined,
   omittedCostsAsZero: boolean,
@@ -131,13 +134,18 @@ function compareReference(
       // on every day (times a zero weight where unused), so an unknown one is passed as 0 there.
       // Matched by date: both value every session, those without a decision included.
       const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? 0, { omittedCostsAsZero, ...base });
-      const theirs = new Map(b.dates.map((d, i) => [d, b.equity[i]!]));
+      const theirs = new Map<TradingDate, number | null>(b.dates.map((d, i) => [d, b.equity[i]!]));
       const ours = [...equity.keys()];
       if (ours.length !== b.dates.length || ours.some((d) => !theirs.has(d))) {
         problems.push(`sessions differ (core ${ours.length}, reference ${b.dates.length})`);
       } else {
         for (const [date, e] of equity) {
           const r = theirs.get(date)!;
+          // A point without a value agrees only with a point without one.
+          if (e === null || r === null) {
+            if (e !== r) problems.push(`${date}: equity ${e} vs ${r}`);
+            continue;
+          }
           const dev = relative(e, r);
           if (!(dev <= INTEGRITY_TOLERANCE)) problems.push(`${date}: equity ${e} vs ${r}`);
           if (dev > worst) worst = dev;
@@ -153,7 +161,7 @@ function compareReference(
 function compareIncremental(
   strategy: Strategy,
   core: StrategyDay[],
-  equity: Map<TradingDate, number>,
+  equity: Map<TradingDate, number | null>,
   bars: Bars,
   cashRate: (date: TradingDate) => number | undefined,
   omittedCostsAsZero: boolean,
@@ -196,6 +204,10 @@ function compareIncremental(
         continue;
       }
       const e = point.equity;
+      if (e === null || full === null) {
+        if (e !== full) problems.push(`${date}: equity ${e} vs ${full}`);
+        continue;
+      }
       const dev = relative(e, full);
       if (!(dev <= INTEGRITY_TOLERANCE)) problems.push(`${date}: equity ${e} vs ${full}`);
       if (dev > worst) worst = dev;

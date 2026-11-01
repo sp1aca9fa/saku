@@ -15,11 +15,16 @@
 // - `pointInTime` (the forward record and its integrity checks): each date's deposit rate as known
 //   at that date's read time (`knownBy` = `cashReadAt(date)`), so a later correction or backfill
 //   never changes what an earlier day computed. Drafts may read the latest corrected value.
-// - `guard` (the forward record): an FX value is refused (unknown, with the reason in
-//   `fxProblem`) when, at the read time, it is more than MAX_STALE_DAYS sessions behind (or the
-//   lag cannot be counted on the calendar), or when the latest cross-check of its observation
-//   (`fx_match`, any secondary) is red. A step holding CASH_BASE then has no equity (null, with
-//   the reason); the USD-only versions never read FX.
+// - `guard` (the forward record and registration): each session's FX is graded at its read
+//   time (`fxProblem`):
+//   - refused (red; the value is not used, so a point that needs it has no equity, with the
+//     reason): more than MAX_STALE_DAYS sessions behind, a lag the calendar cannot count, or the
+//     latest cross-check of that value by a current secondary (`fx_match`) is red;
+//   - warning (yellow; used, and the run reports it): 2 to MAX_STALE_DAYS sessions behind, or no
+//     current secondary checked that value (single source: never green, requirements 04).
+//   A cross-check counts only from a secondary in today's FX roles that compared the value read
+//   (its `expected` is the current primary's value): a check against a former primary, or an
+//   earlier vintage, says nothing about this value. The USD-only versions never read FX.
 import type { TradingDate } from '@saku/core';
 import { type Sessions, seriesHealthAtOpen } from '@saku/data';
 import { type Db, depositRateReader, fxPointInTime, getSetting, schema } from '@saku/db';
@@ -27,12 +32,18 @@ import { and, asc, eq, isNull } from 'drizzle-orm';
 import { cashReadAt } from './cash';
 import { roles } from './verify';
 
+/** A session's FX grade at its read time (`guard`): refused, or used with a warning. */
+export interface FxProblem {
+  level: 'red' | 'yellow';
+  reason: string;
+}
+
 export interface BaseCurrencyInputs {
   baseCurrency?: string;
   fxRate?: (date: TradingDate) => number | undefined;
   depositRate?: (date: TradingDate) => number | undefined;
-  /** With `guard`: why the FX of a session was refused (undefined: not refused). */
-  fxProblem?: (date: TradingDate) => string | undefined;
+  /** With `guard`: the session's FX grade (undefined: green, or no value at all). */
+  fxProblem?: (date: TradingDate) => FxProblem | undefined;
 }
 
 /** The deposit rate in percent a year read as a number, or undefined; invalid values throw. */
@@ -51,21 +62,22 @@ export function depositRateOf(
   };
 }
 
-/** Observation dates whose latest FX cross-check (`fx_match`) from some secondary is red. */
-async function redFxObservations(db: Db): Promise<Map<TradingDate, string>> {
+/** The FX cross-checks (`fx_match`) by observation date, in the order they were stored. */
+async function fxMatches(
+  db: Db,
+): Promise<Map<TradingDate, { source: string | null; status: string; expected: number | null }[]>> {
   const c = schema.checkResults;
   const rows = await db
-    .select({ date: c.date, source: c.source, status: c.status })
+    .select({ date: c.date, source: c.source, status: c.status, expected: c.expected })
     .from(c)
     .where(and(eq(c.checkName, 'fx_match'), isNull(c.symbolId)))
     .orderBy(asc(c.id));
-  const latest = new Map<string, { date: TradingDate; source: string | null; status: string }>();
-  for (const r of rows) latest.set(`${r.date}\u0000${r.source ?? ''}`, r);
-  const red = new Map<TradingDate, string>();
-  for (const r of latest.values()) {
-    if (r.status === 'red' && !red.has(r.date)) red.set(r.date, r.source ?? 'unknown');
-  }
-  return red;
+  const out = new Map<
+    TradingDate,
+    { source: string | null; status: string; expected: number | null }[]
+  >();
+  for (const r of rows) out.set(r.date, [...(out.get(r.date) ?? []), r]);
+  return out;
 }
 
 export async function baseCurrencyInputs(
@@ -77,30 +89,56 @@ export async function baseCurrencyInputs(
   const depositRate = depositRateOf(await depositRateReader(db), o);
   if (baseCurrency === 'USD') return { baseCurrency, depositRate };
   const pair = `USD${baseCurrency}`;
-  const primary = (await roles(db, 'fx')).primary;
+  const fxRoles = await roles(db, 'fx');
+  const primary = fxRoles.primary;
   const fx = primary ? await fxPointInTime(db, pair, primary) : undefined;
   const read = (date: TradingDate) => fx?.asOf(date, cashReadAt(date));
   if (!o.guard) return { baseCurrency, fxRate: (date) => read(date)?.value, depositRate };
 
   const { sessions } = o.guard;
-  const red = await redFxObservations(db);
-  const problem = (date: TradingDate): string | undefined => {
+  const secondaries = new Set(fxRoles.secondaries);
+  const matches = await fxMatches(db);
+  const problem = (date: TradingDate): FxProblem | undefined => {
     const v = read(date);
     if (v === undefined) return undefined;
+    const red = (reason: string): FxProblem => ({ level: 'red', reason });
     const h = seriesHealthAtOpen(sessions, date, v.date);
     if (h.status === 'unknown') {
-      return `${pair} of ${v.date} read for ${date}: its lag cannot be counted on the calendar (${h.outside} outside it)`;
+      return red(
+        `${pair} of ${v.date} read for ${date}: its lag cannot be counted on the calendar (${h.outside} outside it)`,
+      );
     }
     if (h.status === 'red') {
-      return `${pair} is stale: its last value (${v.date}) is ${h.behind} sessions behind ${date}`;
+      return red(
+        `${pair} is stale: its last value (${v.date}) is ${h.behind} sessions behind ${date}`,
+      );
     }
-    const by = red.get(v.date);
-    if (by !== undefined) return `${pair} of ${v.date} disagrees with ${by} (fx_match red)`;
+    // The latest check of this value by each current secondary.
+    const latest = new Map<string, string>();
+    for (const m of matches.get(v.date) ?? []) {
+      if (m.source !== null && secondaries.has(m.source) && m.expected === v.value) {
+        latest.set(m.source, m.status);
+      }
+    }
+    const disputed = [...latest].find(([, status]) => status === 'red');
+    if (disputed) return red(`${pair} of ${v.date} disagrees with ${disputed[0]} (fx_match red)`);
+    if (h.status === 'yellow') {
+      return {
+        level: 'yellow',
+        reason: `${pair} is ${h.behind} sessions behind ${date} (last value ${v.date})`,
+      };
+    }
+    if (latest.size === 0) {
+      return {
+        level: 'yellow',
+        reason: `${pair} of ${v.date} is from ${primary} alone: no current secondary checked it`,
+      };
+    }
     return undefined;
   };
   return {
     baseCurrency,
-    fxRate: (date) => (problem(date) === undefined ? read(date)?.value : undefined),
+    fxRate: (date) => (problem(date)?.level === 'red' ? undefined : read(date)?.value),
     depositRate,
     fxProblem: problem,
   };

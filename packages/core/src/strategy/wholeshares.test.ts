@@ -605,7 +605,7 @@ describe('whole shares', () => {
       });
       const whole = run(execution, list, bars, '1000000000000', { cashRate: () => 2.52 });
       whole.points.forEach((p, i) => {
-        expect(p.equity).toBeCloseTo(fractional.points[i]!.equity, 9);
+        expect(p.equity).toBeCloseTo(fractional.points[i]!.equity!, 9);
         expect(p.traded).toBe(fractional.points[i]!.traded);
       });
       expect(whole.switches).toBe(fractional.switches);

@@ -465,7 +465,7 @@ describe('bars between sessions', () => {
       bars: { X: xs, Y: dates.map((d) => bar(d, 10)) },
       cashRate: (d) => rates[d] ?? 0,
     });
-    expect(gap.points[1]!.equity).toBeCloseTo(daily.points[3]!.equity, 14);
+    expect(gap.points[1]!.equity).toBeCloseTo(daily.points[3]!.equity!, 14);
   });
 
   it('cash over a gap earns each covered day (a date some holdable ticker has a bar)', () => {

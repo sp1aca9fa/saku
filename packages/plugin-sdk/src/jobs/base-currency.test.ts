@@ -228,7 +228,7 @@ describe('the forward record reads the deposit rate point in time', () => {
   });
 });
 
-describe('the forward record refuses a stale or disputed FX', () => {
+describe('the forward record grades each FX it reads', () => {
   const sessions = new Sessions({
     id: 't',
     version: 't',
@@ -237,8 +237,12 @@ describe('the forward record refuses a stale or disputed FX', () => {
     holidays: [],
   });
   const W = sessions.between('2026-01-05', '2026-01-16');
+  type Db = Awaited<ReturnType<typeof testDb>>;
 
-  async function withFx(dates: readonly string[]) {
+  async function withFx(
+    rates: Record<string, number>,
+    o: { source?: string; secondaries?: string[] } = {},
+  ) {
     const db = await testDb();
     await setSetting(db, 'base_currency', 'XXX');
     await db.insert(schema.depositRates).values({
@@ -248,109 +252,222 @@ describe('the forward record refuses a stale or disputed FX', () => {
       actor: 't',
       createdAt: '2026-01-01T00:00:00.000Z',
     });
-    await db
-      .insert(schema.sourceRoles)
-      .values({ dataKind: 'fx', pluginKey: 'fp', role: 'primary', position: 0 });
-    await storeFx(db, {
-      source: 'fp',
+    await db.insert(schema.sourceRoles).values([
+      { dataKind: 'fx', pluginKey: o.source ?? 'fp', role: 'primary', position: 0 },
+      ...(o.secondaries ?? ['fs1', 'fs2']).map((pluginKey, i) => ({
+        dataKind: 'fx',
+        pluginKey,
+        role: 'secondary' as const,
+        position: i + 1,
+      })),
+    ]);
+    await store(db, o.source ?? 'fp', rates);
+    return db;
+  }
+  /** Rates published long before the dates they are for (known at every read). */
+  const store = (db: Db, source: string, rates: Record<string, number>) =>
+    storeFx(db, {
+      source,
       kind: 'valuation',
-      rates: dates.map((date) => ({
+      rates: Object.entries(rates).map(([date, rate]) => ({
         pair: 'USDXXX',
         date,
-        rate: 150,
+        rate,
         publishedAt: '2026-01-01T00:00:00Z',
       })),
       fetchedAt: '2026-01-02T00:00:00Z',
     });
-    return db;
-  }
-  const guarded = (db: Awaited<ReturnType<typeof testDb>>) =>
-    baseCurrencyInputs(db, { pointInTime: true, guard: { sessions } });
+  /** A cross-check of `date`'s value (`expected`: the primary's rate it compared). */
+  const checked = async (
+    db: Db,
+    rows: { date: string; source: string; status: 'green' | 'red'; expected: number }[],
+  ) => {
+    const runId = await startRun(db, 'daily');
+    await db.insert(schema.checkResults).values(
+      rows.map((r) => ({
+        runId,
+        layer: 'B' as const,
+        checkName: 'fx_match',
+        symbolId: null,
+        source: r.source,
+        date: r.date,
+        status: r.status,
+        expected: r.expected,
+      })),
+    );
+  };
+  /** Every date green: checked by fs1 against the primary's 150. */
+  const allChecked = (db: Db, dates: readonly string[]) =>
+    checked(
+      db,
+      dates.map((date) => ({ date, source: 'fs1', status: 'green', expected: 150 })),
+    );
+  const guarded = (db: Db) => baseCurrencyInputs(db, { pointInTime: true, guard: { sessions } });
   const longBars = { AAA: W.map((d) => bar(d, 100, 100)) };
   const held = (upTo: number) => W.slice(0, upTo + 1).map((d) => day(d, 'CASH_BASE'));
+  /** The forward entry of W[n], from the bars up to it (as the forward step reads them). */
+  const entry = (base: Awaited<ReturnType<typeof guarded>>, n: number) => {
+    const unknown: string[] = [];
+    const warnings: string[] = [];
+    const days = held(n);
+    const upTo = { AAA: longBars.AAA.slice(0, n + 1) };
+    const equity = forwardEquity(
+      strategy('CASH_BASE'),
+      days.slice(0, -1),
+      upTo,
+      () => 0,
+      days.at(-1)!,
+      false,
+      (r) => unknown.push(r),
+      base,
+      (r) => warnings.push(r),
+    );
+    return { equity, unknown, warnings };
+  };
 
-  it('more than MAX_STALE_DAYS sessions behind at the read: refused, with the reason', async () => {
-    // The last rate is W[0]'s: W[6] reads it 5 sessions behind (allowed), W[7] 6 (refused).
-    const db = await withFx([W[0]!]);
+  it('a source down 6 sessions while CASH_BASE is held: W[7] has no value, W[8] has one again', async () => {
+    // Rates for W[0] and from W[8] on; W[1] to W[7] read W[0]'s (1 to 7 sessions behind).
+    const rates = { [W[0]!]: 150, [W[8]!]: 160, [W[9]!]: 160 };
+    const db = await withFx(rates);
+    await allChecked(db, [W[0]!]);
+    await checked(
+      db,
+      [W[8]!, W[9]!].map((date) => ({ date, source: 'fs1', status: 'green', expected: 160 })),
+    );
     const base = await guarded(db);
+    // Sessions strictly between the value and the read: 0 or 1 green (the normal lag); 2 to 5
+    // used, with a warning; 6 refused.
+    expect(base.fxProblem!(W[1]!)).toBeUndefined();
+    expect(base.fxProblem!(W[2]!)).toBeUndefined();
+    expect(base.fxProblem!(W[3]!)).toEqual({
+      level: 'yellow',
+      reason: `USDXXX is 2 sessions behind ${W[3]} (last value ${W[0]})`,
+    });
     expect(base.fxRate!(W[6]!)).toBe(150);
     expect(base.fxRate!(W[7]!)).toBeUndefined();
-    expect(base.fxProblem!(W[7]!)).toBe(
-      `USDXXX is stale: its last value (${W[0]}) is 6 sessions behind ${W[7]}`,
-    );
-    const problems: string[] = [];
-    const s = strategy('CASH_BASE');
-    const days = held(7);
-    expect(
-      forwardEquity(
-        s,
-        days.slice(0, -1),
-        longBars,
-        () => 0,
-        days.at(-1)!,
-        false,
-        (r) => problems.push(r),
-        base,
-      ),
-    ).toBeNull();
-    expect(problems).toEqual([
-      `No FX rate (USDXXX) known for ${W[7]}: CASH_BASE is held. (USDXXX is stale: its last value (${W[0]}) is 6 sessions behind ${W[7]})`,
+    expect(base.fxProblem!(W[7]!)).toEqual({
+      level: 'red',
+      reason: `USDXXX is stale: its last value (${W[0]}) is 6 sessions behind ${W[7]}`,
+    });
+    const w3 = entry(base, 3);
+    expect(w3.equity).not.toBeNull();
+    expect(w3.warnings).toEqual([`USDXXX is 2 sessions behind ${W[3]} (last value ${W[0]})`]);
+    const w7 = entry(base, 7);
+    expect(w7.equity).toBeNull();
+    expect(w7.unknown).toEqual([
+      `no FX rate (USDXXX) known for ${W[7]}: USDXXX is stale: its last value (${W[0]}) is 6 sessions behind ${W[7]}`,
     ]);
-    // Unguarded (drafts, integrity) the same value is read: asOf alone bounds by observations.
-    expect((await baseCurrencyInputs(db)).fxRate!(W[7]!)).toBe(150);
-    // A USD-only version is not touched.
+    // Recovered: W[8] is valued (the yen amount from W[1]'s open, 7 days of deposit, at 160).
+    const w8 = entry(base, 8);
+    expect(w8.unknown).toEqual([]);
+    expect(w8.warnings).toEqual([]);
+    expect(w8.equity).toBeCloseTo((0.995 * 150 * 1.0001 ** 7) / 160, 14);
+  });
+
+  it('a conversion on a refused day leaves every later entry unknown', async () => {
+    const db = await withFx({ [W[0]!]: 150, [W[9]!]: 160 });
+    await allChecked(db, [W[0]!]);
+    await checked(db, [{ date: W[9]!, source: 'fs1', status: 'green', expected: 160 }]);
+    const base = await guarded(db);
+    // AAA through W[5], CASH_BASE decided on W[6]'s close: the entry at W[7]'s open reads W[7]'s
+    // FX, refused (6 sessions behind). W[9]'s FX is good, but what the entry bought is unknown.
+    const days = [
+      ...W.slice(0, 6).map((d) => day(d, 'AAA')),
+      ...W.slice(6, 10).map((d) => day(d, 'CASH_BASE')),
+    ];
+    const at = (n: number) => {
+      const unknown: string[] = [];
+      const e = forwardEquity(
+        strategy('CASH_BASE'),
+        days.slice(0, n),
+        { AAA: longBars.AAA.slice(0, n + 1) },
+        () => 0,
+        days[n]!,
+        false,
+        (r) => unknown.push(r),
+        base,
+      );
+      return { e, unknown };
+    };
+    expect(at(6).e).toBeCloseTo(1, 14);
+    for (const n of [7, 8, 9]) {
+      expect(at(n).e).toBeNull();
+      expect(at(n).unknown[0]).toMatch(
+        new RegExp(
+          `a trade with CASH_BASE on ${W[7]} could not be priced .*: USDXXX is stale: its last value \\(${W[0]}\\) is 6 sessions behind ${W[7]}`,
+        ),
+      );
+    }
+  });
+
+  it('a rate a current secondary graded red: refused; a later green from it clears it', async () => {
+    const rates = Object.fromEntries(W.map((d) => [d, 150]));
+    const db = await withFx(rates);
+    await allChecked(db, W);
+    await checked(db, [{ date: W[2]!, source: 'fs2', status: 'red', expected: 150 }]);
+    const base = await guarded(db);
+    expect(base.fxRate!(W[1]!)).toBe(150);
+    expect(base.fxRate!(W[2]!)).toBeUndefined();
+    expect(base.fxProblem!(W[2]!)).toEqual({
+      level: 'red',
+      reason: `USDXXX of ${W[2]} disagrees with fs2 (fx_match red)`,
+    });
+    expect(entry(base, 2).equity).toBeNull();
+    // W[3] has its own good rate: valued again.
+    expect(entry(base, 3).equity).not.toBeNull();
+    await checked(db, [{ date: W[2]!, source: 'fs2', status: 'green', expected: 150 }]);
+    expect((await guarded(db)).fxRate!(W[2]!)).toBe(150);
+  });
+
+  it('only current secondaries checking the current primary count: a primary switch', async () => {
+    const db = await withFx(Object.fromEntries(W.map((d) => [d, 150])));
+    // fs2 disputed the old primary's 150 on W[2]; a former secondary disputed it too.
+    await checked(db, [
+      { date: W[2]!, source: 'fs2', status: 'red', expected: 150 },
+      { date: W[2]!, source: 'gone', status: 'red', expected: 150 },
+    ]);
+    expect((await guarded(db)).fxRate!(W[2]!)).toBeUndefined();
+    // The primary is now fq (151 on every date): fs2's check was of another value.
+    await store(db, 'fq', Object.fromEntries(W.map((d) => [d, 151])));
+    await db.delete(schema.sourceRoles);
+    await db.insert(schema.sourceRoles).values([
+      { dataKind: 'fx', pluginKey: 'fq', role: 'primary', position: 0 },
+      { dataKind: 'fx', pluginKey: 'fs2', role: 'secondary', position: 1 },
+    ]);
+    const base = await guarded(db);
+    expect(base.fxRate!(W[2]!)).toBe(151);
+    // Nothing checked fq's value: single source, used with a warning.
+    expect(base.fxProblem!(W[2]!)).toEqual({
+      level: 'yellow',
+      reason: `USDXXX of ${W[2]} is from fq alone: no current secondary checked it`,
+    });
+    const w2 = entry(base, 2);
+    expect(w2.equity).not.toBeNull();
+    expect(w2.warnings).toEqual([
+      `USDXXX of ${W[2]} is from fq alone: no current secondary checked it`,
+    ]);
+    // A version holding AAA that day reads no FX: no warning.
+  });
+
+  it('a USD-only version reads no FX at all', async () => {
+    const db = await withFx({ [W[0]!]: 150 });
+    const base = await guarded(db);
     const usd = strategy('CASH_USD');
     const plain = W.slice(0, 8).map((d) => day(d, 'AAA'));
+    const warnings: string[] = [];
     expect(
       forwardEquity(
         usd,
         plain.slice(0, -1),
-        longBars,
+        { AAA: longBars.AAA.slice(0, 8) },
         () => 0,
         plain.at(-1)!,
         false,
         undefined,
         base,
+        (r) => warnings.push(r),
       ),
     ).toBe(1);
-  });
-
-  it('a rate the cross-check graded red (fx_match): refused, with the source', async () => {
-    const db = await withFx(W);
-    const runId = await startRun(db, 'daily');
-    const result = (status: 'green' | 'red', source: string) => ({
-      runId,
-      layer: 'B' as const,
-      checkName: 'fx_match',
-      symbolId: null,
-      source,
-      date: W[2]!,
-      status,
-    });
-    await db.insert(schema.checkResults).values([result('green', 'fs1'), result('red', 'fs2')]);
-    const base = await guarded(db);
-    expect(base.fxRate!(W[1]!)).toBe(150);
-    // W[2]'s own rate is known before its open here (published long before).
-    expect(base.fxRate!(W[2]!)).toBeUndefined();
-    expect(base.fxProblem!(W[2]!)).toBe(`USDXXX of ${W[2]} disagrees with fs2 (fx_match red)`);
-    const s = strategy('CASH_BASE');
-    const days = held(3);
-    const problems: string[] = [];
-    expect(
-      forwardEquity(
-        s,
-        days.slice(0, -1),
-        longBars,
-        () => 0,
-        days.at(-1)!,
-        false,
-        (r) => problems.push(r),
-        base,
-      ),
-    ).toBeNull();
-    expect(problems[0]).toMatch(/fx_match red/);
-    // A later run's green grade for the same source clears it.
-    await db.insert(schema.checkResults).values(result('green', 'fs2'));
-    expect((await guarded(db)).fxRate!(W[2]!)).toBe(150);
+    expect(warnings).toEqual([]);
   });
 });

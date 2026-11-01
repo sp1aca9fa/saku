@@ -109,9 +109,15 @@ export interface EquityPoint {
   date: TradingDate;
   /** False on a session without an evaluated day: its decision was the safe state. */
   decided: boolean;
-  /** Value at the date's close, 1 at the first decision. */
-  equity: number;
-  /** Weights held at the close, after any trade that day. */
+  /**
+   * Value at the date's close, 1 at the first decision. Null when it cannot be priced: CASH_BASE
+   * is held and the session's FX is not usable, or an earlier conversion could not be priced
+   * (`unknown`; docs/indicators.md "Base-currency cash").
+   */
+  equity: number | null;
+  /** Why `equity` is null, and the session whose FX was missing. */
+  unknown?: { date: TradingDate; reason: string };
+  /** Weights held at the close, after any trade that day (empty when `equity` is null). */
   weights: Record<string, number>;
   /** With whole shares only: the value at the date's close (the initial amount until the first trade). */
   value?: UsdAmount;
@@ -266,22 +272,42 @@ interface Book {
   /** Trades to `to` at the session's open or close. */
   trade(to: Holding[], date: TradingDate, at: ExecutionPoint): void;
   /** The point's values at the date's close. */
-  close(date: TradingDate): { equity: number; weights: Record<string, number>; value?: number };
+  close(date: TradingDate): {
+    equity: number | null;
+    weights: Record<string, number>;
+    value?: number;
+    unknown?: { date: TradingDate; reason: string };
+  };
   costs(): number;
   switches(): number;
   /** Trades that converted between USD and CASH_BASE (fractional book only). */
   conversions?(): Conversions | undefined;
 }
 
+/** A session's FX as a trade or a valuation reads it: a usable rate, or why there is none. */
+type FxRead = { fx: number } | { reason: string };
+
 /**
  * The fractional book (docs/indicators.md "Equity curves": weights, costs on turnover; "FX
  * spread": `spreadRate`, fxSpreadPct / 100, on |change in CASH_BASE weight|; undefined when
  * nothing converts: base currency USD, or no CASH_BASE).
+ *
+ * Without CASH_BASE held (or with base currency USD) it keeps weights and the equity, exactly as
+ * before the base-currency layer. While CASH_BASE is held and converts (`base`), it keeps each
+ * USD holding's amount (equity units) and CASH_BASE's amount in the base currency, which grows
+ * by the deposit rate only; a point is the USD amounts plus that amount / the session's FX, so it
+ * needs only its own FX (docs/indicators.md "Base-currency cash").
  */
 function fractionalBook(
   costRate: number,
   holdingReturn: (ticker: string, prev: TradingDate, date: TradingDate, segment: Segment) => number,
   spreadRate?: number,
+  base?: {
+    /** The session's FX, or why it is not usable. */
+    fx: (date: TradingDate) => FxRead;
+    /** CASH_BASE's growth over part of a step in the base currency (the deposit rate only). */
+    growth: (prev: TradingDate, date: TradingDate, segment: Segment) => number;
+  },
 ): Book {
   let equity = 1;
   let weights: Record<string, number> = {};
@@ -289,8 +315,42 @@ function fractionalBook(
   let switches = 0;
   let converted = 0;
   let spreadCosts = 0;
+  /** While CASH_BASE is held (base mode): the USD holdings' amounts and CASH_BASE's in base units. */
+  let units: { usd: Record<string, number>; base: number } | undefined;
+  /** A trade with CASH_BASE could not be priced: every later point is unknown. */
+  let lost: { date: TradingDate; reason: string } | undefined;
+
+  /** Pays the trade's costs on value `value` from `current` weights; the value after them. */
+  const pay = (current: Record<string, number>, target: Record<string, number>, value: number) => {
+    const tickers = new Set([...Object.keys(current), ...Object.keys(target)]);
+    let turnover = 0;
+    for (const t of tickers) turnover += Math.abs((target[t] ?? 0) - (current[t] ?? 0));
+    let cost = turnover * costRate;
+    // The converted part pays the FX spread on top (|change in CASH_BASE weight| x value).
+    // Without CASH_BASE before or after, nothing converts: the cost is exactly as before.
+    if (spreadRate !== undefined && (CASH_BASE in target || CASH_BASE in current)) {
+      const change = Math.abs((target[CASH_BASE] ?? 0) - (current[CASH_BASE] ?? 0));
+      if (change > 0) {
+        const spread = change * spreadRate;
+        cost += spread;
+        spreadCosts += spread;
+        converted++;
+      }
+    }
+    costs += cost;
+    return value * (1 - cost);
+  };
+
   return {
     grow(prev, date, segment) {
+      if (lost) return;
+      if (units) {
+        for (const t of Object.keys(units.usd)) {
+          units.usd[t] = units.usd[t]! * growthOf(t, date, holdingReturn(t, prev, date, segment));
+        }
+        units.base *= base!.growth(prev, date, segment);
+        return;
+      }
       const entries = Object.entries(weights);
       if (entries.length === 0) return;
       let total = 0;
@@ -302,29 +362,69 @@ function fractionalBook(
       equity *= total;
       weights = Object.fromEntries(Object.entries(next).map(([t, v]) => [t, v / total]));
     },
-    trade(to) {
+    trade(to, date) {
+      const entered = units !== undefined || Object.keys(weights).length > 0;
       const target = targetWeights(to);
-      const tickers = new Set([...Object.keys(weights), ...Object.keys(target)]);
-      let turnover = 0;
-      for (const t of tickers) turnover += Math.abs((target[t] ?? 0) - (weights[t] ?? 0));
-      let cost = turnover * costRate;
-      // The converted part pays the FX spread on top (|change in CASH_BASE weight| x value).
-      // Without CASH_BASE before or after, nothing converts: the cost is exactly as before.
-      if (spreadRate !== undefined && (CASH_BASE in target || CASH_BASE in weights)) {
-        const change = Math.abs((target[CASH_BASE] ?? 0) - (weights[CASH_BASE] ?? 0));
-        if (change > 0) {
-          const spread = change * spreadRate;
-          cost += spread;
-          spreadCosts += spread;
-          converted++;
-        }
+      if (lost) {
+        if (entered) switches++;
+        return;
       }
-      equity *= 1 - cost;
-      costs += cost;
-      if (Object.keys(weights).length > 0) switches++;
-      weights = target;
+      if (!base || (!units && !(CASH_BASE in target))) {
+        // No CASH_BASE before or after (or nothing converts): as before the base-currency layer.
+        equity = pay(weights, target, equity);
+        if (entered) switches++;
+        weights = target;
+        return;
+      }
+      // CASH_BASE held or targeted: the trade values and converts at the session's FX.
+      if (entered) switches++;
+      const read = base.fx(date);
+      if (!('fx' in read)) {
+        lost = {
+          date,
+          reason: `a trade with ${CASH_BASE} on ${date} could not be priced (${read.reason}); the position is unknown from then on`,
+        };
+        units = undefined;
+        return;
+      }
+      let value = equity;
+      let current = weights;
+      if (units) {
+        const baseUsd = units.base / read.fx;
+        value = baseUsd;
+        for (const v of Object.values(units.usd)) value += v;
+        current = Object.fromEntries([
+          ...Object.entries(units.usd).map(([t, v]) => [t, v / value]),
+          [CASH_BASE, baseUsd / value],
+        ]);
+      }
+      const after = pay(current, target, value);
+      if (CASH_BASE in target) {
+        const usd: Record<string, number> = {};
+        for (const [t, w] of Object.entries(target)) if (t !== CASH_BASE) usd[t] = after * w;
+        units = { usd, base: after * target[CASH_BASE]! * read.fx };
+        weights = {};
+      } else {
+        units = undefined;
+        equity = after;
+        weights = target;
+      }
     },
-    close: () => ({ equity, weights: { ...weights } }),
+    close(date) {
+      if (lost) return { equity: null, weights: {}, unknown: lost };
+      if (!units) return { equity, weights: { ...weights } };
+      const read = base!.fx(date);
+      if (!('fx' in read))
+        return { equity: null, weights: {}, unknown: { date, reason: read.reason } };
+      const baseUsd = units.base / read.fx;
+      let value = baseUsd;
+      for (const v of Object.values(units.usd)) value += v;
+      const shares = Object.fromEntries([
+        ...Object.entries(units.usd).map(([t, v]) => [t, v / value]),
+        [CASH_BASE, baseUsd / value],
+      ]);
+      return { equity: value, weights: shares };
+    },
     costs: () => costs,
     switches: () => switches,
     conversions: () =>
@@ -593,20 +693,6 @@ export function mayHoldCashBase(
   return allHoldings({ strategy, days: [] }).some((h) => h.ticker === CASH_BASE);
 }
 
-/**
- * The run failed because CASH_BASE is held over a session without a known FX rate (the caller
- * can add why it is unknown, e.g. the forward record's refusal of a stale or disputed rate).
- */
-export class FxUnknownError extends Error {
-  constructor(
-    readonly pair: string,
-    readonly date: TradingDate,
-  ) {
-    super(`No FX rate (${pair}) known for ${date}: ${CASH_BASE} is held.`);
-    this.name = 'FxUnknownError';
-  }
-}
-
 /** An ISO 4217 code as the base currency is given: three capital letters. */
 const CURRENCY_CODE = /^[A-Z]{3}$/;
 
@@ -710,14 +796,21 @@ export function backtest(input: BacktestInput): BacktestResult {
     }
     return rate / 100 / 252;
   };
-  /** The session's FX as CASH_BASE's valuation needs it: known, finite and above 0, or a failure. */
-  const fxHeld = (date: TradingDate): number => {
+  /** The session's FX as CASH_BASE needs it: known, finite and above 0, or why it is not. */
+  const fxOf = (date: TradingDate): FxRead => {
     const fx = input.fxRate?.(date);
-    if (fx === undefined) throw new FxUnknownError(`USD${baseCurrency}`, date);
+    if (fx === undefined) return { reason: `no FX rate (USD${baseCurrency}) known for ${date}` };
     if (!Number.isFinite(fx) || fx <= 0) {
-      throw new Error(`The FX rate (USD${baseCurrency}) for ${date} is ${fx}: not above 0.`);
+      return { reason: `the FX rate (USD${baseCurrency}) for ${date} is ${fx}, not above 0` };
     }
-    return fx;
+    return { fx };
+  };
+  /** CASH_BASE's growth over part of a step: the deposit rate per covered day, in date order. */
+  const depositGrowth = (prev: TradingDate, date: TradingDate, segment: Segment): number => {
+    if (segment === 'intraday') return 1;
+    let growth = 1;
+    for (const d of covered(prev, date)) growth *= growthOf(CASH_BASE, d, depositDay(d));
+    return growth;
   };
   // One covered day of a holding (requirements 05: synthetic leverage is daily): L x the base's
   // return that day, minus (L - 1) x that day's cash rate / 252 and E / 100 / 252.
@@ -756,11 +849,11 @@ export function backtest(input: BacktestInput): BacktestResult {
       return growth - 1;
     }
     if (ticker === CASH_BASE) {
-      // The deposit rate per covered day, then the step's FX move: (product of 1 + rate / 100 /
-      // 252) x (fx(prev) / fx(date)). With base USD the FX factor is 1 and nothing is read.
+      // Only with base USD (no FX): the deposit rate per covered day. A converting CASH_BASE is
+      // held in base units by the book (`depositGrowth`, valued at each session's FX).
+      if (converts) throw new Error(`${CASH_BASE} in base units is grown by the book.`);
       let growth = 1;
       for (const d of days) growth *= growthOf(ticker, d, depositDay(d));
-      if (converts) growth *= fxHeld(prev) / fxHeld(date);
       return growth - 1;
     }
     const t = parseTicker(ticker);
@@ -832,7 +925,14 @@ export function backtest(input: BacktestInput): BacktestResult {
   // Only a strategy that may convert reads the FX spread (an omitted one is 0 only for callers
   // that read omitted costs as 0).
   const spreadRate = converts ? (strategy.costs.fxSpreadPct ?? 0) / 100 : undefined;
-  const book: Book = whole ?? fractionalBook(costRate, holdingReturn, spreadRate);
+  const book: Book =
+    whole ??
+    fractionalBook(
+      costRate,
+      holdingReturn,
+      spreadRate,
+      converts ? { fx: fxOf, growth: depositGrowth } : undefined,
+    );
 
   const points: EquityPoint[] = [];
   const pushPoint = (date: TradingDate, isDecided: boolean, traded: boolean) => {
@@ -841,6 +941,7 @@ export function backtest(input: BacktestInput): BacktestResult {
       date,
       decided: isDecided,
       equity: c.equity,
+      ...(c.unknown && { unknown: c.unknown }),
       weights: c.weights,
       ...(c.value !== undefined && { value: usd(c.value) }),
       traded,
@@ -922,7 +1023,7 @@ function baseSeries(
         fx = undefined;
       }
     }
-    if (fx === undefined) {
+    if (fx === undefined || p.equity === null) {
       return { date: p.date, equity: null, ...(p.value && { value: null }) };
     }
     return {
@@ -934,15 +1035,33 @@ function baseSeries(
   return { currency, points: out, unknownFx, invalidFx };
 }
 
+/** A point with a value (`equity` not null). */
+export type PricedPoint = EquityPoint & { equity: number };
+
+/**
+ * The points as priced points, for a reader that needs every value (summary, metrics), or a
+ * failure naming the first point without one: never skipped, never read as 0.
+ */
+export function pricedPoints(points: readonly EquityPoint[]): PricedPoint[] {
+  const missing = points.find((p) => p.equity === null);
+  if (missing) {
+    throw new Error(
+      `The equity of ${missing.date} is unknown (${missing.unknown?.reason ?? 'no reason given'}).`,
+    );
+  }
+  return points as PricedPoint[];
+}
+
 /** Compound annual growth over calendar time, and the deepest fall from a previous peak. */
 export function summary(points: EquityPoint[]): { cagr: number; maxDrawdown: number } {
-  if (points.length < 2) return { cagr: 0, maxDrawdown: 0 };
-  const first = points[0]!;
-  const last = points.at(-1)!;
+  const known = pricedPoints(points);
+  if (known.length < 2) return { cagr: 0, maxDrawdown: 0 };
+  const first = known[0]!;
+  const last = known.at(-1)!;
   const years = (Date.parse(last.date) - Date.parse(first.date)) / (365.25 * 86_400_000);
   let peak = -Infinity;
   let maxDrawdown = 0;
-  for (const p of points) {
+  for (const p of known) {
     peak = Math.max(peak, p.equity);
     maxDrawdown = Math.min(maxDrawdown, p.equity / peak - 1);
   }

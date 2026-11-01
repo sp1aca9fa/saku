@@ -144,24 +144,26 @@ function holdingName(t: Translate, ticker: string, cashBase: CashBaseAlert | und
 /**
  * When the instruction changes the CASH_BASE weight from what the channel was last told (nothing
  * told: from none; an allocation whose holdings are unknown counts as a change), the lines that
- * say to convert that part and that tax on conversion is not applied (docs/indicators.md "FX
- * spread"). None for a version that cannot hold CASH_BASE.
+ * say to convert that part (never cut) and that tax on conversion is not applied (cut first when
+ * the channel is small; docs/indicators.md "FX spread"). None for a version that cannot hold
+ * CASH_BASE.
  */
 function cashBaseLines(
   t: Translate,
   cashBase: CashBaseAlert | undefined,
   holdings: readonly Holding[],
   lastTold: string | undefined,
-): { keep: string }[] {
+): Part[] {
   if (!cashBase) return [];
   const weight = (hs: readonly Holding[] | undefined) =>
     hs?.find((h) => h.ticker === CASH_BASE)?.weight ?? 0;
   const before = lastTold === undefined ? [] : cashBase.holdingsOf(lastTold);
   if (before !== undefined && weight(before) === weight(holdings)) return [];
   if (before === undefined && weight(holdings) === 0) return [];
+  // The instruction (convert) arrives whole; the note may be cut on a small channel.
   return [
     { keep: t('alerts.cashBase.convert', { currency: cashBase.currency }) },
-    { keep: t('alerts.cashBase.note') },
+    t('alerts.cashBase.note'),
   ];
 }
 

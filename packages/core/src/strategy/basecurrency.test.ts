@@ -2,7 +2,7 @@
 // cash", "FX spread"; spec 2026-11-02 base-currency). Hand-worked values.
 import { describe, expect, it } from 'vitest';
 import type { RawBar, TradingDate } from '../domain';
-import { type BacktestInput, backtest, heldTickers } from './backtest';
+import { type BacktestInput, backtest, heldTickers, summary } from './backtest';
 import type { StrategyDay } from './engine';
 import { strategyTickers } from './forward';
 import { Strategy } from './schema';
@@ -72,7 +72,7 @@ describe('base-currency series', () => {
       fxRate: at({ [D[0]!]: 150, [D[2]!]: 152 }),
     });
     expect(r.points).toEqual(usd.points);
-    expect(r.base!.points.map((p) => p.equity)).toEqual([150, null, usd.points[2]!.equity * 152]);
+    expect(r.base!.points.map((p) => p.equity)).toEqual([150, null, usd.points[2]!.equity! * 152]);
     expect(r.base!.unknownFx).toEqual([D[1]]);
     expect(r.base!.invalidFx).toEqual([]);
     // A value that is not finite or not above 0 is never a rate: no base value, listed apart.
@@ -307,7 +307,7 @@ describe('CASH_BASE', () => {
     expect(r.points[1]!.equity).toBeCloseTo(1.0001 * 1.0002 * (150 / 140), 15);
   });
 
-  it('fails on an unknown deposit rate or FX while held, never 0; reads neither otherwise', () => {
+  it('fails on an unknown deposit rate while held (never 0); an unusable FX leaves its point without a value', () => {
     const run = (o: Partial<BacktestInput>, tickers = ['CASH_BASE', 'CASH_BASE']) =>
       backtest({
         strategy: { execution: 'same_close', costs },
@@ -322,19 +322,67 @@ describe('CASH_BASE', () => {
     expect(() => run({ depositRate: () => undefined })).toThrow(/No deposit rate known/);
     expect(() => run({ depositRate: undefined })).toThrow(/No deposit rate known/);
     expect(() => run({ depositRate: () => Number.NaN })).toThrow(/not a finite number/);
-    expect(() => run({ fxRate: at({ [D[0]!]: 150 }) })).toThrow(
-      /No FX rate \(USDJPY\) known for 2026-01-06/,
+    // Held from D0's close; D1's FX unknown: D1 has no value, with the reason.
+    const d1 = run({ fxRate: at({ [D[0]!]: 150 }) });
+    expect(d1.points.map((p) => p.equity)).toEqual([1, null]);
+    expect(d1.points[1]!.unknown).toEqual({
+      date: D[1],
+      reason: 'no FX rate (USDJPY) known for 2026-01-06',
+    });
+    expect(d1.points[1]!.weights).toEqual({});
+    // The entry into CASH_BASE on D0 cannot be priced: every point from it on is unknown.
+    const d0 = run({ fxRate: at({ [D[1]!]: 150 }) });
+    expect(d0.points.map((p) => p.equity)).toEqual([null, null]);
+    expect(d0.points.map((p) => p.unknown!.date)).toEqual([D[0], D[0]]);
+    expect(d0.points[1]!.unknown!.reason).toMatch(
+      /a trade with CASH_BASE on 2026-01-05 could not be priced \(no FX rate \(USDJPY\) known for 2026-01-05\)/,
     );
-    expect(() => run({ fxRate: at({ [D[1]!]: 150 }) })).toThrow(
-      /No FX rate \(USDJPY\) known for 2026-01-05/,
-    );
-    expect(() => run({ fxRate: () => 0 })).toThrow(/not above 0/);
+    expect(run({ fxRate: () => 0 }).points[0]!.unknown!.reason).toMatch(/is 0, not above 0/);
     // Held only from D1's close on: the step D0 -> D1 is X's, so neither is read for it.
     const later = run({ depositRate: () => undefined, fxRate: at({ [D[1]!]: 150 }) }, [
       'X',
       'CASH_BASE',
     ]);
     expect(later.points.map((p) => p.equity)).toEqual([1, 1]);
+  });
+
+  it('a session without FX costs only that session: the next one with FX is valued', () => {
+    const r = backtest({
+      strategy: { execution: 'same_close', costs },
+      days: decide(['CASH_BASE', 'CASH_BASE', 'CASH_BASE', 'CASH_BASE']),
+      bars: {},
+      cashRate: none,
+      baseCurrency: 'JPY',
+      fxRate: at({ [D[0]!]: 150, [D[2]!]: 160, [D[3]!]: 160 }),
+      depositRate: deposit,
+    });
+    // Held as 150 yen per unit of equity from D0; the yen amount earns 0.0001 a day throughout.
+    const e = r.points.map((p) => p.equity);
+    expect(e[0]).toBe(1);
+    expect(e[1]).toBeNull();
+    expect(e[2]).toBeCloseTo((150 * 1.0001 ** 2) / 160, 15);
+    expect(e[3]).toBeCloseTo((150 * 1.0001 ** 3) / 160, 15);
+    expect(r.base!.points.map((p) => p.equity)).toEqual([150, null, e[2]! * 160, e[3]! * 160]);
+    expect(r.base!.unknownFx).toEqual([D[1]]);
+  });
+
+  it('a conversion on a session without FX leaves every later point unknown', () => {
+    const r = backtest({
+      strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0.1, fxSpreadPct: 1 } },
+      days: decide(['X', 'CASH_BASE', 'X', 'X']),
+      bars: { X: D.map((d) => bar(d, 100)) },
+      cashRate: none,
+      baseCurrency: 'JPY',
+      fxRate: at({ [D[0]!]: 150, [D[2]!]: 150, [D[3]!]: 150 }),
+      depositRate: deposit,
+    });
+    expect(r.points.map((p) => p.equity)).toEqual([0.999, null, null, null]);
+    expect(r.points.slice(1).map((p) => p.unknown!.date)).toEqual([D[1], D[1], D[1]]);
+    // The trades still count; their costs cannot be priced and are left out.
+    expect(r.switches).toBe(2);
+    expect(r.costs).toBeCloseTo(0.001, 15);
+    expect(r.conversions).toBeUndefined();
+    expect(() => summary(r.points)).toThrow(/equity of 2026-01-06 is unknown/);
   });
 
   it('needs the base currency; with base USD nothing converts and no FX is read', () => {

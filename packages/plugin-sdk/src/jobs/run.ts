@@ -434,6 +434,9 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
           );
         }
         for (const r of f.finals) log.info(`${r.version}: ${r.date} re-check final: ${r.outcome}`);
+        // Recorded on a yellow FX (late or single source): computed with a visible warning.
+        if (f.warnings.length > 0)
+          log.warn('Forward: recorded with warnings', { warnings: f.warnings });
         if (f.problems.length > 0) {
           log.warn('Forward: days not recorded', { problems: f.problems });
           markIncomplete('forward');

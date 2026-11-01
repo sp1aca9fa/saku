@@ -2027,16 +2027,35 @@ describe('alerts for a version that may hold CASH_BASE', () => {
     reasons: [],
     ...o,
   });
+  const alertOf = (lang: string, entry: DayEntry, lastTold?: string, max = Infinity) =>
+    strategyAlert(
+      translator(lang),
+      lang,
+      {
+        versionId: 'v',
+        name: 'Deposit',
+        execution: 'next_open',
+        entry,
+        nextSession: '2026-01-06',
+        cashBase: cashBaseOf(strategy, 'XXX'),
+        ...(lastTold !== undefined && { lastTold }),
+      },
+      max,
+    )!;
   const text = (lang: string, entry: DayEntry, lastTold?: string) =>
-    strategyAlert(translator(lang), lang, {
-      versionId: 'v',
-      name: 'Deposit',
-      execution: 'next_open',
-      entry,
-      nextSession: '2026-01-06',
-      cashBase: cashBaseOf(strategy, 'XXX'),
-      ...(lastTold !== undefined && { lastTold }),
-    })!.text;
+    alertOf(lang, entry, lastTold).text;
+
+  it('a small channel: the convert line arrives whole, the note is cut first', () => {
+    const t = translator('en');
+    const whole = text('en', day('Mix'), 'In');
+    const note = t('alerts.cashBase.note');
+    // Room for everything but the note (its line becomes "…").
+    const small = alertOf('en', day('Mix'), 'In', whole.length - note.length + 1);
+    expect(small.needed).toBeUndefined();
+    expect(small.text).toContain(t('alerts.cashBase.convert', { currency: 'XXX' }));
+    expect(small.text).not.toContain(note);
+    expect(small.text).toContain('…');
+  });
 
   it.each(['en', 'ja'])(
     '%s: names CASH_BASE as cash in the base currency and says to convert',

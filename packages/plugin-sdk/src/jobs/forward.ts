@@ -19,7 +19,8 @@ import {
   canonicalJson,
   evaluate,
   forwardDecision,
-  FxUnknownError,
+  CASH_BASE,
+  type EquityPoint,
   mayHoldCashBase,
   NEAR_TIE,
   zonedInstant,
@@ -94,6 +95,12 @@ export interface ForwardSummary {
   finals: { version: string; date: TradingDate; outcome: 'cleared' | 'safe_state' | 'late' }[];
   /** Anything else that kept a version's days from being recorded (the run is incomplete). */
   problems: string[];
+  /**
+   * Days recorded on data graded yellow outside the strategy's own grade (a CASH_BASE value read
+   * on an FX 2 to 5 sessions late or from a single source): computed with a visible warning
+   * (requirements 04 yellow), logged; the run stays complete.
+   */
+  warnings: string[];
 }
 
 /**
@@ -192,6 +199,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     rechecks: [],
     finals: [],
     problems: [],
+    warnings: [],
   };
   const from = await getSetting(db, 'forward_records_from');
   if (!from) return { ...summary, skipped: 'forward records not started (forward_records_from)' };
@@ -345,6 +353,8 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
         // Recorded with an unknown equity, and reported: the run is not a silent success.
         (reason) => summary.problems.push(`${name} ${date}: equity unknown: ${reason}`),
         base,
+        // Recorded, with the FX warning reported (a single-source or late FX is never green).
+        (reason) => summary.warnings.push(`${name} ${date}: FX warning: ${reason}`),
       );
       const input = {
         date,
@@ -1138,7 +1148,11 @@ const asDay = (e: ForwardEntry): StrategyDay => ({
  * the run reports it (exported for those tests). `base`: the base currency, FX and deposit rate
  * (`baseCurrencyInputs`), passed to the backtest only for a version that may hold CASH_BASE, so
  * the FX never touches a USD-only version's equity (requirements 04: FX health affects only
- * base-currency valuation); an unknown one while CASH_BASE is held makes the equity unknown.
+ * base-currency valuation). Today's point without a value (its FX unknown or refused by the
+ * guard, or an earlier conversion that could not be priced) is null, with the backtest's reason
+ * and the guard's (docs/indicators.md "Base-currency cash"); a day with a usable FX after it is
+ * valued. When today's value read an FX the guard graded yellow (stale by 2 to 5 sessions, or
+ * single source), it is recorded and `onWarning` gets the reason.
  */
 export function forwardEquity(
   strategy: Strategy,
@@ -1149,24 +1163,35 @@ export function forwardEquity(
   omittedCostsAsZero: boolean,
   onUnknown?: (reason: string) => void,
   base?: BaseCurrencyInputs,
+  onWarning?: (reason: string) => void,
 ): number | null {
   const days = [...prior, today];
+  const inputs = cashBaseInputs(strategy, base);
+  let points: EquityPoint[];
   try {
-    return backtest({
-      strategy,
-      days,
-      bars,
-      cashRate,
-      omittedCostsAsZero,
-      ...cashBaseInputs(strategy, base),
-    }).points.at(-1)!.equity;
+    points = backtest({ strategy, days, bars, cashRate, omittedCostsAsZero, ...inputs }).points;
   } catch (e) {
-    // A session's FX the guard refused: the reason it gave (stale, disputed) goes with it.
-    const why = e instanceof FxUnknownError ? base?.fxProblem?.(e.date) : undefined;
-    const reason = e instanceof Error ? e.message : String(e);
-    onUnknown?.(why === undefined ? reason : `${reason} (${why})`);
+    onUnknown?.(e instanceof Error ? e.message : String(e));
     return null;
   }
+  const point = points.at(-1)!;
+  if (point.equity === null) {
+    // The guard's reason for the session whose FX was missing (stale, disputed), when it gave one.
+    const why = inputs.fxProblem?.(point.unknown!.date);
+    const reason = point.unknown?.reason ?? 'unknown';
+    onUnknown?.(why === undefined ? reason : `${reason}: ${why.reason}`);
+    return null;
+  }
+  // Today's value read today's FX when CASH_BASE was held at today's close or before today's
+  // trade (or the earlier point had no value, so what it held is not known): a warning grade on
+  // that FX is reported.
+  const readsFx = (p: EquityPoint | undefined) =>
+    p !== undefined && (CASH_BASE in p.weights || p.equity === null);
+  if (readsFx(point) || readsFx(points.at(-2))) {
+    const problem = inputs.fxProblem?.(point.date);
+    if (problem?.level === 'yellow') onWarning?.(problem.reason);
+  }
+  return point.equity;
 }
 
 /**

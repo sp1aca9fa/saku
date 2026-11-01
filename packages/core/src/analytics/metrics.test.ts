@@ -1,7 +1,7 @@
 // Hand-computed values per metric (docs/analytics.md "Metrics"); each expected value is worked
 // out in the comment next to it, not taken from the code.
 import { describe, expect, it } from 'vitest';
-import type { EquityPoint } from '../strategy/backtest';
+import { type EquityPoint, pricedPoints } from '../strategy/backtest';
 import {
   type EquitySample,
   METRIC_IDS,
@@ -39,7 +39,7 @@ const alternate = (count: number, a: number, b: number) =>
 const S252 = Math.sqrt(252);
 
 describe('metrics: input', () => {
-  it('a backtest point is a metrics point', () => {
+  it('a priced backtest point is a metrics point', () => {
     const p: EquityPoint = {
       date: '2024-01-02',
       decided: true,
@@ -47,8 +47,12 @@ describe('metrics: input', () => {
       weights: {},
       traded: false,
     };
-    const q: MetricsPoint = p;
+    const q: MetricsPoint = pricedPoints([p])[0]!;
     expect(q.equity).toBe(1);
+    // A point without a value is refused, never read as 0.
+    expect(() =>
+      pricedPoints([{ ...p, equity: null, unknown: { date: p.date, reason: 'no FX' } }]),
+    ).toThrow(/equity of 2024-01-02 is unknown \(no FX\)/);
   });
 
   it('refuses malformed input', () => {

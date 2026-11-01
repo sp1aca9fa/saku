@@ -12,7 +12,8 @@
 //   cash") needs what its forward equity reads: `base_currency` set, a deposit rate in force on
 //   `through` (`depositRateAsOf`; unknown or invalid refuses, never 0), and, unless the base
 //   currency is USD, a primary FX source with a valuation rate USD<base> known before `through`'s
-//   open (finite, above 0). Each missing one refuses. Such a strategy also gets a note (content
+//   open, finite, above 0 and not refused by the forward record's guard (`baseCurrencyInputs`:
+//   stale by more than MAX_STALE_DAYS sessions, or disputed by a current secondary). Each missing one refuses. Such a strategy also gets a note (content
 //   `registration.cashBaseNote`): tax on currency conversion is not applied yet, and the FX
 //   spread applies to conversions only.
 // - `same_close` execution is refused: it trades at a close not yet known when the signal is
@@ -71,13 +72,12 @@ import {
   activeSymbols,
   closedEventResolutionsOf,
   depositRateAsOf,
-  fxPointInTime,
   getSetting,
   resolutionOf,
   schema,
 } from '@saku/db';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
-import { cashReadAt } from './cash';
+import { baseCurrencyInputs } from './base-currency';
 import { type EffectiveCosts, effectiveCosts } from './costs';
 import { roles } from './verify';
 
@@ -158,7 +158,7 @@ export async function registrationReport(
   const costs = await effectiveCosts(db, strategy);
   if ('problem' in costs) problems.push(costs.problem);
   if (mayHoldCashBase(strategy)) {
-    problems.push(...(await cashBaseProblems(db, o.through)));
+    problems.push(...(await cashBaseProblems(db, o.through, o.sessions)));
     // Said in the install's primary language (content), refused or not.
     const t = translator((await getSetting(db, 'primary_language')) ?? 'en');
     notes.push(t('registration.cashBaseNote'));
@@ -203,7 +203,11 @@ export async function registrationReport(
 }
 
 /** What a strategy that may hold CASH_BASE needs before its forward record starts (see above). */
-async function cashBaseProblems(db: Db, through: TradingDate): Promise<string[]> {
+async function cashBaseProblems(
+  db: Db,
+  through: TradingDate,
+  sessions: Sessions,
+): Promise<string[]> {
   const base = await getSetting(db, 'base_currency');
   if (!base) {
     return [
@@ -233,15 +237,21 @@ async function cashBaseProblems(db: Db, through: TradingDate): Promise<string[]>
           `needs the valuation rate USD${base}.`,
       );
     } else {
-      // A rate known before through's open, as the backtest reads it (`cashReadAt`), finite and
-      // above 0: the forward record's first steps need one.
-      const pit = await fxPointInTime(db, `USD${base}`, primary);
-      const fx = pit.asOf(through, cashReadAt(through))?.value;
-      if (fx === undefined || !Number.isFinite(fx) || !(fx > 0)) {
+      // A rate known before through's open, read as the forward record reads it (the guard:
+      // never stale by more than MAX_STALE_DAYS sessions, nor disputed by a cross-check), finite
+      // and above 0: the forward record's first steps need one.
+      const fx = await baseCurrencyInputs(db, { guard: { sessions } });
+      const value = fx.fxRate!(through);
+      const problem = fx.fxProblem!(through);
+      if (value === undefined || !Number.isFinite(value) || !(value > 0)) {
+        const why =
+          problem?.level === 'red'
+            ? problem.reason
+            : value === undefined
+              ? `no valuation rate USD${base} from ${primary} is known before the open of ${through}`
+              : `the valuation rate USD${base} known before the open of ${through} is ${value}`;
         problems.push(
-          `The strategy may hold ${CASH_BASE} and no valuation rate USD${base} from ${primary} ` +
-            `is known before the open of ${through}` +
-            `${fx === undefined ? '' : ` (read ${fx})`}: run pnpm jobs daily (or check the FX source) first.`,
+          `The strategy may hold ${CASH_BASE} and ${why}: run pnpm jobs daily (or check the FX source) first.`,
         );
       }
     }

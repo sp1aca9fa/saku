@@ -195,7 +195,11 @@ const close = (a: number, b: number, what: string) =>
 
 function compare(core: ReturnType<typeof backtest>, ref: ReturnType<typeof refBacktest>) {
   expect(core.points.map((p) => p.date)).toEqual(ref.dates);
-  core.points.forEach((p, i) => close(p.equity, ref.equity[i]!, `equity ${p.date}`));
+  core.points.forEach((p, i) => {
+    // Both ran: every session had what it needs, so core priced every point.
+    expect(p.equity, `equity ${p.date}`).not.toBeNull();
+    close(p.equity!, ref.equity[i]!, `equity ${p.date}`);
+  });
   expect(core.switches).toBe(ref.switches);
   expect(core.conversions?.count).toBe(ref.conversions?.count);
   if (core.conversions) {
@@ -239,6 +243,8 @@ const seen = {
   nullPoints: 0,
   invalidPoints: 0,
   refusedBoth: 0,
+  referencePending: 0,
+  lostAfterConversion: 0,
 };
 
 function countCoverage(
@@ -309,21 +315,46 @@ describe('core vs reference: base currency (seeded)', () => {
         }
       });
 
-      it(`seed ${seed}, ${execution}: CASH_BASE with FX or deposit holes: both refuse or both agree`, () => {
+      it(`seed ${seed}, ${execution}: CASH_BASE with deposit holes: both refuse or both agree`, () => {
         const strategy = strategyFor(execution);
-        for (const o of [
-          {
-            fxRate: reader(holed(fx, seed + 2, [0, -1, Number.NaN])),
-            depositRate: reader(deposit),
-          },
-          {
-            fxRate: reader(fx),
-            depositRate: reader(holed(deposit, seed + 3, [Number.NaN, Number.POSITIVE_INFINITY])),
-          },
-        ]) {
-          // Refused by both when a hole falls on a step CASH_BASE is held over; otherwise both
-          // run and are compared like any case.
-          if (!both(strategy, bars, { baseCurrency: 'JPY', ...o }).ok) seen.refusedBoth++;
+        const o = {
+          baseCurrency: 'JPY',
+          fxRate: reader(fx),
+          depositRate: reader(holed(deposit, seed + 3, [Number.NaN, Number.POSITIVE_INFINITY])),
+        };
+        // Refused by both when a hole falls on a covered day CASH_BASE is held; otherwise both
+        // run and are compared like any case.
+        if (!both(strategy, bars, o).ok) seen.refusedBoth++;
+      });
+
+      it(`seed ${seed}, ${execution}: CASH_BASE with FX holes: core values the other sessions`, () => {
+        // Contract round 2 (docs/indicators.md "Base-currency cash"): a session without a usable
+        // FX has no value; later sessions with one are valued; a trade with CASH_BASE on such a
+        // session leaves every later point unknown. Until the reference implements this it
+        // refuses the run: then core is checked against the contract alone (each null point
+        // names its FX), and the full comparison runs once the reference agrees.
+        const strategy = strategyFor(execution);
+        const o = {
+          baseCurrency: 'JPY',
+          fxRate: reader(holed(fx, seed + 2, [0, -1, Number.NaN])),
+          depositRate: reader(deposit),
+        };
+        const cashRate = (date: string) => 1 + (Date.parse(date) % 7) / 10;
+        const days = evaluate(strategy, bars);
+        const core = backtest({ strategy, days, bars, cashRate, ...o });
+        let ref: ReturnType<typeof refBacktest> | undefined;
+        try {
+          ref = refBacktest(strategy, refEvaluate(strategy, bars), bars, cashRate, o);
+        } catch {
+          seen.referencePending++;
+        }
+        if (ref) compare(core, ref);
+        for (const p of core.points) {
+          if (p.equity === null) {
+            expect(p.unknown!.reason).toMatch(/FX rate \(USDJPY\)/);
+            seen.nullPoints++;
+            if (p.unknown!.date !== p.date) seen.lostAfterConversion++;
+          }
         }
       });
     }
@@ -391,6 +422,7 @@ describe('core vs reference: base currency (seeded)', () => {
     expect(seen.safeStateWithBase).toBeGreaterThan(0);
     expect(seen.nullPoints).toBeGreaterThan(0);
     expect(seen.invalidPoints).toBeGreaterThan(0);
-    expect(seen.refusedBoth).toBeGreaterThan(12);
+    expect(seen.refusedBoth).toBeGreaterThan(4);
+    expect(seen.lostAfterConversion).toBeGreaterThan(0);
   });
 });
