@@ -92,6 +92,18 @@ export interface PluginInfo {
    */
   adjCloseRounding?: number;
   /**
+   * Bar sources that list a cash dividend only some time after its ex-date (e.g. once processed,
+   * about its payable date): the most calendar days after the ex-date it may still report none,
+   * a whole number from 1 to 366 (`MAX_DIVIDEND_LISTING_LAG_DAYS`). Layer B then reads a
+   * dividend of the primary that this source reports as 0, dated within that many days before
+   * the checking run's target date, as `dividend_pending` (not listed yet, never a
+   * disagreement): green when another secondary confirmed the dividend, else yellow. Older, a
+   * missing dividend is a red `dividend_match` as for any source (decisions log 2026-11-01,
+   * C20). Not declared: the source lists dividends on their ex-date. State the provider's
+   * behavior it rests on next to the value.
+   */
+  dividendListingLagDays?: number;
+  /**
    * Issuer sources: what their records hold (`IssuerPublishes` in `@saku/data`). Layer D compares
    * only the declared kinds; an undeclared one is not checked (no result, never green). Not
    * declared: inferred from the records (NAV when any has one; distributions and splits always).
@@ -195,7 +207,8 @@ export interface IssuerSource {
   supports(ticker: string): boolean;
   /**
    * One record per date as published that day; `currency` is the currency of the record's NAV
-   * and distribution (required with a NAV; see `IssuerRecord`).
+   * and distribution (required with a NAV and with a nonzero distribution: a response with a
+   * record lacking it is refused whole; see `IssuerRecord`).
    */
   fetchRecords(
     ticker: string,

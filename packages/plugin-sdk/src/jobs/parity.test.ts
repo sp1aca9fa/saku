@@ -79,8 +79,10 @@ const alwaysIn = (o: { execution?: string; holding?: string; length?: number } =
   ],
 });
 
-/** In AAA while its SMA is above a level, else in cash: switches at each crossing. */
-const LEVEL = 108;
+/**
+ * In AAA while its close is above its own SMA, else in cash: switches at each crossing. (Not a
+ * plain price against a fixed level, which the schema refuses: decisions log 2026-11-01, C18.)
+ */
 const switcher = {
   name: 'Switcher',
   account: 'taxable',
@@ -91,9 +93,9 @@ const switcher = {
     {
       id: 'A',
       type: 'compare',
-      left: { indicator: 'sma', ticker: 'AAA', length: WARM_UP },
+      left: { indicator: 'price', ticker: 'AAA' },
       op: '>',
-      right: { threshold: LEVEL },
+      right: { indicator: 'sma', ticker: 'AAA', length: WARM_UP },
     },
   ],
   allocations: [
@@ -102,13 +104,13 @@ const switcher = {
   ],
 };
 
-/** The switcher's switches from the closes: changes of (SMA > LEVEL) after the first day. */
+/** The switcher's switches from the closes: changes of (close > SMA) after the first day. */
 function expectedSwitches(): number {
   let prev: boolean | undefined;
   let switches = 0;
   for (let i = DATES.indexOf(FROM); i <= DATES.indexOf(TARGET); i++) {
     const window = closes.slice(i - WARM_UP + 1, i + 1);
-    const inAaa = window.reduce((a, b) => a + b, 0) / WARM_UP > LEVEL;
+    const inAaa = closes[i]! > window.reduce((a, b) => a + b, 0) / WARM_UP;
     if (prev !== undefined && inAaa !== prev) switches++;
     prev = inAaa;
   }

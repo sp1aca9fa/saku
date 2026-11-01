@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { RawBar } from '../domain';
 import { SAFE_STATE, dependencies, forwardDecision } from './forward';
 import { Strategy } from './schema';
+import { parsePlainAgainstLevel } from './testkit';
 
 const day = (i: number) =>
   new Date(Date.UTC(2026, 0, 5) + i * 86_400_000).toISOString().slice(0, 10);
@@ -287,8 +288,10 @@ describe('forwardDecision', () => {
   });
 
   // In these the state changes on day 4, so an older stand-in is not carried by a state either.
+  // A plain price against a level is refused by the schema (C18 (a)); here it tests the engine's
+  // lookback and band reading on exact closes.
   const one = (signal: object) =>
-    Strategy.parse({ ...strategy, signals: [{ id: 'A', ...signal }] });
+    parsePlainAgainstLevel({ ...strategy, signals: [{ id: 'A', ...signal }] });
   const standInOn = (s: Strategy, input: Record<string, RawBar[]>, i: number) =>
     forwardDecision(s, day(4), input, {
       X: { ...green, standIns: [{ date: day(i), band: 1e-6 }] },

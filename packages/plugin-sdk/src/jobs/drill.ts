@@ -45,7 +45,12 @@ import { and, eq } from 'drizzle-orm';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { type LoadedPlugins, allInfos, issuerPublishesOf } from '../registry';
+import {
+  type LoadedPlugins,
+  allInfos,
+  dividendListingLagsOf,
+  issuerPublishesOf,
+} from '../registry';
 import { DATA_KIND, assignedOnly } from '../roles';
 import { assertServerOnly } from '../server-only';
 import type { Logger, Notifier, PluginContext } from '../types';
@@ -306,6 +311,7 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
     })),
     sourceCalendars: declaredCalendars(o.plugins, infos, o.log),
     issuerPublishes: issuerPublishesOf(used.issuers),
+    dividendListingLags: dividendListingLagsOf(o.plugins.bars),
     mode: 'daily',
     from: o.sessions.before(o.target, DAILY_OVERLAP),
   });

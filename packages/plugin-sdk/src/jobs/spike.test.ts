@@ -259,6 +259,26 @@ describe('spikeReport', () => {
     expect(report.availability.s).toBe(1);
   });
 
+  it('a dividend a late-listing secondary has not listed yet: green passes layer B, yellow fails (C20)', async () => {
+    const { db } = await setup();
+    const pending = (status: 'green' | 'yellow') => ({
+      ...ok('B', 'dividend_pending', 's'),
+      status,
+      message: 'not listed by s yet',
+    });
+    const base = [ok('A', 'bar_valid', 'p'), ok('B', 'close_match', 's')];
+    await day(db, '2026-01-05', [...base, pending('green')]);
+    await day(db, '2026-01-06', [...base, pending('yellow')]);
+    const report = await spikeReport(db, { sessions });
+    expect(report.days.map((d) => [d.date, d.available.s, d.layerBPass])).toEqual([
+      ['2026-01-05', true, true],
+      ['2026-01-06', true, false],
+    ]);
+    expect(report.days[1]!.nonGreen).toMatchObject([
+      { layer: 'B', check: 'dividend_pending', source: 's', status: 'yellow' },
+    ]);
+  });
+
   it('the open session is pending, not failed, until its run finishes', async () => {
     const { db } = await setup();
     const good = [

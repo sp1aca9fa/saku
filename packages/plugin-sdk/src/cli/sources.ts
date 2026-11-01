@@ -29,6 +29,17 @@
 //                                                         any more; its price stays. `--user`
 //                                                         names the acting admin (shell access
 //                                                         to the server is the authentication)
+//   pnpm sources closed-event list [--open]               dividends and splits the bars
+//                                                         primary dated on a closed market day
+//                                                         (or the open ones: not resolved), with
+//                                                         the session the fund is red from
+//   pnpm sources closed-event resolve <TICKER> <YYYY-MM-DD> --reason "<text>" --user <admin>
+//                                                         an admin resolves one that is not real
+//                                                         (decisions log 2026-11-01, C19): the
+//                                                         fund is no longer red for it; the event
+//                                                         stays out of the series. A real event
+//                                                         the source misdated waits for the
+//                                                         source. `--user` as for stand-in close
 //   pnpm csv import <file> --ticker <TICKER> --prices raw|split-adjusted [--source csv-<name>]
 //                                                         validated daily bars, stored as their
 //                                                         own source (default `csv`); give it a
@@ -53,6 +64,7 @@ import { basename, resolve } from 'node:path';
 import { describeCounts, issuerStats } from '../jobs/issuer';
 import { lock } from '../jobs/lock';
 import { ageInSessions, closeStandIn, latestDailyTarget, standInListText } from '../jobs/stand-ins';
+import { closedDayEventText, closedDayEvents, resolveClosedEvent } from '../jobs/closed-events';
 import {
   defaultReadjustmentRun,
   parseReadjustmentArgs,
@@ -255,6 +267,36 @@ if (tool === 'sources' && command === 'list') {
       'its price stays and nothing waits on it any more. The next run annotates the recorded ' +
       'days that used it and tells their owners once.',
   );
+} else if (tool === 'sources' && command === 'closed-event' && rest[0] === 'list') {
+  const open = rest.includes('--open');
+  for (const line of closedDayEventText(await closedDayEvents(db, xnys()), { open })) {
+    console.log(line);
+  }
+} else if (tool === 'sources' && command === 'closed-event' && rest[0] === 'resolve') {
+  // Decisions log 2026-11-01, C19: an admin resolves an event that is not real, with a written
+  // reason; resolveClosedEvent checks the admin first, then takes the jobs lock itself.
+  const [, ticker, date] = rest;
+  if (!ticker || ticker.startsWith('--') || !date || date.startsWith('--')) {
+    fail(
+      'Usage: pnpm sources closed-event resolve <TICKER> <YYYY-MM-DD> --reason "<text>" --user <admin>',
+    );
+  }
+  const username = flag('user');
+  if (!username || username.startsWith('--')) fail('Name the admin: --user <username>.');
+  const reasonArg = flag('reason');
+  const reason = reasonArg && !reasonArg.startsWith('--') ? reasonArg : '';
+  const r = await resolveClosedEvent(db, {
+    ticker: ticker!,
+    date: date!,
+    username: username!,
+    reason,
+    sessions: xnys(),
+  });
+  if (!r.ok) fail(r.error);
+  console.log(
+    `Resolved the ${ticker} event dated ${date}: from the next run on, the fund is no longer red ` +
+      'for it. The event stays out of the series (never moved to a session).',
+  );
 } else if (tool === 'csv' && command === 'import') {
   const file = rest[0] && !rest[0].startsWith('--') ? rest[0] : fail('Name the CSV file.');
   const ticker = flag('ticker') ?? fail('Name the ticker: --ticker <TICKER>.');
@@ -323,6 +365,8 @@ if (tool === 'sources' && command === 'list') {
       'issuer-stats [--years N] | readjustments [--source <key>] [--run <id>] | ' +
       'stand-in list [--open] | ' +
       'stand-in close <TICKER> <YYYY-MM-DD> --reason "<text>" --user <admin> | ' +
+      'closed-event list [--open] | ' +
+      'closed-event resolve <TICKER> <YYYY-MM-DD> --reason "<text>" --user <admin> | ' +
       'pnpm csv import <file> --ticker <TICKER> --prices raw|split-adjusted [--source csv-<name>]',
   );
 }

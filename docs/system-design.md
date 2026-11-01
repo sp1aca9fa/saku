@@ -165,6 +165,7 @@ interface PluginInfo {
   provider?: string; // default: the key; plug-ins of one provider share one count of requests (same limits)
   keyEnv?: string; termsUrl: string; noAi?: boolean; unofficial?: boolean;
   calendar?: string; // series and FX: the calendar it publishes on (a missing value on a closed day is an expected gap)
+  dividendListingLagDays?: number; // bars: lists a cash dividend up to this many days after its ex-date (layer B dividend_pending)
 }
 interface PluginContext { http: PoliteHttp; now: Date; log: Logger; }
 interface BarSource { info: PluginInfo; fetchBars(ticker: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<RawBar[]>; } // RawBar flags split-adjusted closes

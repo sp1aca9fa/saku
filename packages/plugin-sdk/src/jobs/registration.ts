@@ -33,7 +33,9 @@
 //       A red day the calendar says was closed does not refuse when every red finding on it is a
 //       closed-day bar and nothing else (`closedDayOnly`): layer A `bar_valid` with the single
 //       problem "not a trading day", and no other red reason. Anything else red on it refuses
-//       (a closed-day bar with a dividend or split among them: its event is in no bar read).
+//       (a closed-day bar with a dividend or split among them: its event is in no bar read),
+//       unless an admin resolved that event of the primary as not real (C19; its sessions after
+//       are then no longer red either).
 // Unknown stays unknown: no pass, a stale pass or a pass that cannot be read refuses.
 //
 // Not checked here: the cash rate. Series (the cash rate, index series, FX) are graded for
@@ -47,8 +49,15 @@ import {
   isTradingDate,
   parseTicker,
 } from '@saku/core';
-import { NOT_A_SESSION, type Sessions } from '@saku/data';
-import { type Db, activeSymbols, getSetting, schema } from '@saku/db';
+import { CLOSED_DAY_EVENT, NOT_A_SESSION, type Sessions } from '@saku/data';
+import {
+  type Db,
+  activeSymbols,
+  closedEventResolutionsOf,
+  getSetting,
+  resolutionOf,
+  schema,
+} from '@saku/db';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { roles } from './verify';
 
@@ -312,8 +321,22 @@ async function symbolProblems(
     )
     .orderBy(schema.dataHealth.date);
   const red: typeof redRows = [];
+  const resolved = primarySource
+    ? await resolvedClosedDays(db, symbolId, primarySource)
+    : new Set<TradingDate>();
   for (const d of redRows) {
-    if (sessions.closedOn(d.date) && (await closedDayOnly(db, pass.id, symbolId, d))) continue;
+    if (
+      sessions.closedOn(d.date) &&
+      (await closedDayOnly(
+        db,
+        pass.id,
+        symbolId,
+        d,
+        (source) => source === primarySource && resolved.has(d.date),
+      ))
+    ) {
+      continue;
+    }
     red.push(d);
   }
   if (red.length > 0) {
@@ -332,29 +355,67 @@ const CHECK_REASON = /^[A-F]\.[a-z_]+(@\S+)?$/;
 const YELLOW_ONLY = /^(single_source|stand_in@\S+|stand_in_closed_changed@\S+)$/;
 
 /**
+ * The closed days whose dividend or split, in the primary's raw bar as stored now, an admin
+ * resolution covers (decisions log 2026-11-01, C19: the event is not real; `resolutionOf`).
+ */
+async function resolvedClosedDays(
+  db: Db,
+  symbolId: number,
+  primary: string,
+): Promise<Set<TradingDate>> {
+  const resolutions = await closedEventResolutionsOf(db, { symbolId });
+  if (resolutions.length === 0) return new Set();
+  const out = new Set<TradingDate>();
+  for (const x of await db
+    .select({
+      date: schema.barsRaw.date,
+      divCash: schema.barsRaw.divCash,
+      splitFactor: schema.barsRaw.splitFactor,
+    })
+    .from(schema.barsRaw)
+    .where(and(eq(schema.barsRaw.symbolId, symbolId), eq(schema.barsRaw.source, primary)))) {
+    if (resolutionOf(resolutions, { symbolId, source: primary, ...x })) out.add(x.date);
+  }
+  return out;
+}
+
+/** A closed-day bar's `bar_valid` problems when it carries a dividend or split. */
+const NOT_A_SESSION_WITH_EVENT = `${NOT_A_SESSION}; ${CLOSED_DAY_EVENT}`;
+
+/**
  * Whether a red day of a symbol, on a day the market was closed, is red only because a source
  * dated a bar on it (requirements 04 "Closed-day bars": the bar is in no series the signals
  * read, so it does not refuse). True only when every red result the pass stored for the symbol
  * on that date is layer A `bar_valid` with the single problem `NOT_A_SESSION` (a closed-day bar
  * with a dividend or split, or any other problem with it, is not), and every reason of the day is
- * either a check result's or one that is never red on its own. Anything not known: false.
+ * either a check result's or one that is never red on its own. One exception (decisions log
+ * 2026-11-01, C19): the primary's closed-day bar whose dividend or split an admin resolved as
+ * not real (`resolvedEvent(source)` true) counts as a closed-day bar only, its problems being
+ * exactly `NOT_A_SESSION` and `CLOSED_DAY_EVENT`. Anything not known: false.
  */
 async function closedDayOnly(
   db: Db,
   runId: string,
   symbolId: number,
   day: { date: TradingDate; reasons: string[] },
+  resolvedEvent: (source: string | null) => boolean,
 ): Promise<boolean> {
   if (!day.reasons.every((r) => CHECK_REASON.test(r) || YELLOW_ONLY.test(r))) return false;
   const r = schema.checkResults;
   const results = await db
-    .select({ layer: r.layer, check: r.checkName, message: r.message })
+    .select({ layer: r.layer, check: r.checkName, source: r.source, message: r.message })
     .from(r)
     .where(
       and(eq(r.runId, runId), eq(r.symbolId, symbolId), eq(r.date, day.date), eq(r.status, 'red')),
     );
   return (
     results.length > 0 &&
-    results.every((x) => x.layer === 'A' && x.check === 'bar_valid' && x.message === NOT_A_SESSION)
+    results.every(
+      (x) =>
+        x.layer === 'A' &&
+        x.check === 'bar_valid' &&
+        (x.message === NOT_A_SESSION ||
+          (x.message === NOT_A_SESSION_WITH_EVENT && resolvedEvent(x.source))),
+    )
   );
 }

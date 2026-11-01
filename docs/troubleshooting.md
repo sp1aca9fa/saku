@@ -128,6 +128,31 @@ delivers the day. If the primary never will, it stays an open item: find a sourc
 secondary, or `pnpm csv import` given a role; if the checks accept it, it becomes a stand-in that
 can be closed) and note it in the operations notes meanwhile.
 
+## A dividend or split dated on a closed day (`closed_day_event`)
+
+The bars primary dated a dividend or split on a day the market was closed (a weekend or a
+holiday). Saku never moves the event to a session (which one would be a guess), so it is in no
+price the signals read, and the fund stays red on every session from the next one on (reason
+`closed_day_event@<closed date>`; strategies that read the fund apply their safe state) until one
+of two things happens. List them on the server with `pnpm sources closed-event list --open`.
+
+- The event is real but misdated (the fund did pay that dividend or split, on a nearby session):
+  do not resolve it. Report it to the provider and wait for the source to correct the date. When
+  a refetch stores the bar on the closed day without the event (logged in the revision log), the
+  next run clears the red by itself. If the source corrects it by no longer sending the
+  closed-day bar at all, the stored bar is kept as it was (raw bars are never removed) and the
+  red stays: once the source dates the event on a session (its dividend or split checked there,
+  `pnpm health --date <session>`), the event on the closed day no longer exists at the source;
+  resolve it as below, with that as the reason.
+- The event is not real (no such dividend or split exists; check the issuer's site): resolve it,
+  on the server:
+  `pnpm sources closed-event resolve <TICKER> <YYYY-MM-DD> --reason "<why it is not real>" --user <admin>`.
+  `--user` names you, the acting admin (as for `stand-in close`); it is refused for an account
+  that is not an enabled admin, without a reason, while a job runs, and for a date that is not a
+  closed day or whose bar carries no event. The resolution lifts the red from the next run on; the
+  event stays out of the series. It is recorded (who, when, why, the event's values) and cannot be
+  undone; if the source later changes the event, it is red again until corrected or resolved anew.
+
 ## A failed run and catch-up
 
 The run did not complete (a source down, an alert not delivered, a backup failed). No stamp is

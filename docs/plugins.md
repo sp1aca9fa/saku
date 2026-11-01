@@ -25,7 +25,7 @@ Types are in `packages/plugin-sdk/src/types.ts`. A package exports `bars`, `seri
 | `bars` | `BarSource` | `fetchBars(ticker, from, to, ctx)` returns raw daily bars (`RawBar[]`); optional `fetchMeta(ticker, ctx)` returns `TickerMeta` |
 | `series` | `SeriesSource` | `fetchSeries(id, from, to, ctx)` returns dated points (`SeriesPoint[]`, or `SeriesFetch` `{ points, completeSpan }`): cash rates, index levels |
 | `fx` | `FxSource` | `supports(pair)`; `fetchRates(pair, from, to, ctx)` returns `FxRate[]` |
-| `issuers` | `IssuerSource` | `supports(ticker)`; `fetchRecords(ticker, from, to, ctx)` returns NAV, distributions and splits, each record with the currency (ISO 4217) of its NAV and distribution (required with a NAV) (checks only, never a value used) |
+| `issuers` | `IssuerSource` | `supports(ticker)`; `fetchRecords(ticker, from, to, ctx)` returns NAV, distributions and splits, each record with the currency (ISO 4217) of its NAV and distribution (required with a NAV and with a nonzero distribution; a response with a record lacking it is refused whole) (checks only, never a value used) |
 | `calendars` | `CalendarSource` | a `calendars` array of exchange or series holiday tables |
 | `notifiers` | `Notifier` | `validTarget(target)`; `send(target, text, ctx)`. Errors must not contain the target or the key |
 
@@ -97,6 +97,14 @@ the descriptions to the database. The fields:
   fetches' ratios of one real re-adjustment can differ. A change within it is stored without a
   re-adjustment event. Default 1e-9 (double precision), at most 1e-5. State the provider's
   precision it rests on next to the value, and check it with `pnpm sources readjustments`.
+- `dividendListingLagDays` (bar sources that list a cash dividend only some time after its
+  ex-date, e.g. once processed): the most calendar days after the ex-date it may still report
+  none, a whole number from 1 to 366. Within that many days of the checking run's date, a
+  dividend of the primary it reports as 0 is `dividend_pending` in layer B (green when another
+  secondary confirmed it, else yellow), not a disagreement; older, it is compared as usual (red
+  when missing). Leave it out for a source that lists dividends on their ex-date. State the
+  provider's behavior it rests on next to the value (Alpaca: 120, its corporate actions
+  look-ahead).
 - `publishes` (issuer sources): what their records hold, `{ nav?: true, distributions?: true,
   splits?: true }`, at least one. Layer D compares only the declared kinds: a NAV-only file
   declares `{ nav: true }` and its missing distributions are never read as mismatches; values of

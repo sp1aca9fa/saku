@@ -1116,7 +1116,7 @@ describe('issuer records', () => {
     expect((await issuerRecordsOf(db, id, ['other'])).size).toBe(0);
   });
 
-  it('refuses a date twice, a bad date, a value not a number or a NAV without its currency', async () => {
+  it('refuses a date twice, a bad date, a value not a number, or a NAV or distribution without its currency', async () => {
     const { db, id } = await setup();
     const store = (records: Parameters<typeof storeIssuerRecords>[1]['records']) =>
       storeIssuerRecords(db, { symbolId: id, source: 'iss', records, fetchedAt: 't' });
@@ -1132,9 +1132,20 @@ describe('issuer records', () => {
     await expect(store([{ date: '2026-01-02', nav: 1, currency: 'usd' }])).rejects.toThrow(
       /ISO 4217/,
     );
+    // A distribution is money: without its currency it is refused (C17), the whole response
+    // with it (the good record beside it is not stored either).
+    await expect(store([{ date: '2026-01-02', distribution: 0.2 }])).rejects.toThrow(
+      /distribution without its currency/,
+    );
+    await expect(
+      store([usd('2026-01-02', 1), { date: '2026-01-05', distribution: 0.2 }]),
+    ).rejects.toThrow(/distribution without its currency/);
     expect(await db.select().from(issuerRecords)).toHaveLength(0);
     expect(await store([])).toBe(0);
-    // Events without a NAV need no currency.
-    expect(await store([{ date: '2026-01-02', distribution: 0.2 }])).toBe(1);
+    // A split ratio, or a zero distribution (no event), needs no currency; a distribution with
+    // its currency is stored.
+    expect(await store([{ date: '2026-01-02', split: 2 }])).toBe(1);
+    expect(await store([{ date: '2026-01-05', distribution: 0 }])).toBe(1);
+    expect(await store([{ date: '2026-01-06', distribution: 0.2, currency: 'USD' }])).toBe(1);
   });
 });

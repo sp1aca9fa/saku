@@ -7,6 +7,7 @@ import {
   type HealthStatus,
   type RawBar,
   type TradingDate,
+  isTradingDate,
   totalReturn,
   totalReturnIndex,
 } from '@saku/core';
@@ -196,13 +197,65 @@ export function checkAsRead(r: {
     : r.checkName;
 }
 
+/** The most calendar days a source may declare it lists a cash dividend after its ex-date. */
+export const MAX_DIVIDEND_LISTING_LAG_DAYS = 366;
+
+/** The message of a `dividend_pending` result. */
+export const pendingMessage = (source: string) => `not listed by ${source} yet`;
+
+/**
+ * Calendar days from `from` to `to` (both `YYYY-MM-DD`); negative when `to` is earlier. A date
+ * that does not read throws (never a guess).
+ */
+export function calendarDaysBetween(from: TradingDate, to: TradingDate): number {
+  const ms = (d: TradingDate) => {
+    if (!isTradingDate(d)) throw new Error(`Not a date: "${d}"`);
+    return Date.parse(`${d}T00:00:00Z`);
+  };
+  return Math.round((ms(to) - ms(from)) / 86_400_000);
+}
+
+/**
+ * A secondary that lists a cash dividend only some days after its ex-date (decisions log
+ * 2026-11-01, C20; `PluginInfo.dividendListingLagDays`), with the checking run's reference date
+ * (its target date, passed in: never the wall clock, so a run is reproducible).
+ */
+export interface DividendListing {
+  /** Calendar days after the ex-date within which the source may not list a dividend yet. */
+  lagDays: number;
+  /** The run's target date: the lag is counted from the ex-date to it. */
+  asOf: TradingDate;
+}
+
 /**
  * Layer B: the primary against one secondary (already un-split), on the primary's dates. A date
  * the secondary lacks is a yellow `secondary_missing` (04 severity rules: a secondary unavailable
  * is yellow), kept apart from `close_match` so a source without a bar never reads as a
  * disagreement. Events must fall on the same dates.
+ *
+ * `listing` (a secondary that lists dividends late, decisions log 2026-11-01, C20): on a date
+ * where the primary has a dividend and the secondary's bar reports none (0), and the date is at
+ * most `lagDays` calendar days before `asOf`, the result is `dividend_pending` (yellow; never a
+ * `dividend_match`, so never counted as a disagreement), message "not listed by <source> yet";
+ * `settlePendingDividends` turns it green only when another secondary confirmed the primary's
+ * dividend that day. Everything else is compared as without it: a different nonzero amount, a
+ * dividend only in the secondary, a date the secondary has no bar for, a split, and a dividend
+ * older than the lag (then the missing dividend is a red `dividend_match` as before).
  */
-export function layerB(primary: RawBar[], secondary: RawBar[], source: string): CheckResult[] {
+export function layerB(
+  primary: RawBar[],
+  secondary: RawBar[],
+  source: string,
+  o: { listing?: DividendListing } = {},
+): CheckResult[] {
+  if (o.listing) {
+    const lag = o.listing.lagDays;
+    if (!Number.isInteger(lag) || lag < 1 || lag > MAX_DIVIDEND_LISTING_LAG_DAYS) {
+      throw new Error(
+        `${source}: dividend listing lag ${lag} is not a whole number of days from 1 to ${MAX_DIVIDEND_LISTING_LAG_DAYS}.`,
+      );
+    }
+  }
   const out: CheckResult[] = [];
   const base = { layer: 'B' as const, source };
   const other = new Map(secondary.map((b) => [b.date, b]));
@@ -248,6 +301,25 @@ export function layerB(primary: RawBar[], secondary: RawBar[], source: string): 
       const a = ev.get(p);
       const b = ev.get(s);
       if (a === ev.none && b === ev.none) continue;
+      if (
+        ev.check === 'dividend_match' &&
+        o.listing &&
+        s !== undefined &&
+        a !== ev.none &&
+        b === ev.none &&
+        notListedYet(date, o.listing)
+      ) {
+        out.push({
+          ...base,
+          check: 'dividend_pending',
+          date,
+          status: 'yellow',
+          observed: b,
+          expected: a,
+          message: pendingMessage(source),
+        });
+        continue;
+      }
       // An event on one side only is a mismatch in the event's date.
       const dev = a === ev.none || b === ev.none ? Infinity : Math.abs(b / a - 1);
       out.push({
@@ -266,6 +338,41 @@ export function layerB(primary: RawBar[], secondary: RawBar[], source: string): 
     }
   }
   return out;
+}
+
+/** Whether a dividend dated `date` may still be unlisted: within the lag of the run's date. */
+function notListedYet(date: TradingDate, listing: DividendListing): boolean {
+  const days = calendarDaysBetween(date, listing.asOf);
+  return days >= 0 && days <= listing.lagDays;
+}
+
+/**
+ * Grades layer B's `dividend_pending` results of one symbol (decisions log 2026-11-01, C20): green
+ * when another secondary (`secondaries`, the sources with the secondary role, not the pending
+ * one) has a green `dividend_match` on the same date, i.e. confirmed the primary's dividend;
+ * otherwise yellow (no secondary confirmed it: never green on the primary alone). Other results
+ * are returned as they are.
+ */
+export function settlePendingDividends(
+  results: CheckResult[],
+  secondaries: readonly string[],
+): CheckResult[] {
+  const confirmed = new Map<TradingDate, string[]>();
+  for (const r of results) {
+    if (r.layer !== 'B' || r.check !== 'dividend_match' || r.status !== 'green') continue;
+    if (r.source === undefined || !secondaries.includes(r.source)) continue;
+    confirmed.set(r.date, [...(confirmed.get(r.date) ?? []), r.source]);
+  }
+  return results.map((r) => {
+    if (r.layer !== 'B' || r.check !== 'dividend_pending') return r;
+    const by = (confirmed.get(r.date) ?? []).filter((x) => x !== r.source);
+    if (by.length === 0) return { ...r, status: 'yellow' as const };
+    return {
+      ...r,
+      status: 'green' as const,
+      message: `${pendingMessage(r.source ?? '?')}; confirmed by ${[...by].sort().join(', ')}`,
+    };
+  });
 }
 
 /**

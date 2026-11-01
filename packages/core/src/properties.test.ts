@@ -21,6 +21,7 @@ import type { RawBar } from './domain';
 import { PointInTime, type Vintage } from './pointintime';
 import { NEAR_TIE, evaluate } from './strategy/engine';
 import { Strategy } from './strategy/schema';
+import { parsePlainAgainstLevel } from './strategy/testkit';
 
 const RUNS = { seed: 20261101, numRuns: 300 };
 const relClose = (a: number, b: number) => Math.abs(a - b) <= 1e-9 * Math.abs(b);
@@ -198,7 +199,8 @@ describe('evaluate: incremental equals full', () => {
   // false) against a fixed level is left out: this property found that a later split does change
   // its earlier days (a close of 15 above a level of 10 becomes 7.5 after a 2-for-1 split), which
   // contradicts docs/indicators.md "Price"; reported to the owner (spec 2026-11-01
-  // yaml-strategies, review fix 8), not fixed here.
+  // yaml-strategies, review fix 8). The schema now refuses that pairing (decisions log
+  // 2026-11-01, C18 (a)).
   it('the days up to a cut match the full history', () => {
     fc.assert(
       fc.property(walk, params, (list, p) => {
@@ -251,7 +253,9 @@ describe('near-tie rule', () => {
           splitFactor: 1,
           closeIsSplitAdjusted: false,
         }));
-        const strategy = Strategy.parse({
+        // A plain price against a level (refused by the schema, C18 (a)): the near-tie rule on
+        // exact closes.
+        const strategy = parsePlainAgainstLevel({
           name: 'Near-tie example',
           account: 'taxable',
           safeState: { holdings: [{ ticker: 'AAA', weight: 100 }] },

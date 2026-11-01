@@ -18,7 +18,13 @@ import {
   startRun,
 } from '@saku/db';
 import { diskWarns, measureDisk, type Statfs } from './disk';
-import { type LoadedPlugins, allInfos, issuerPublishesOf, savePluginInfos } from '../registry';
+import {
+  type LoadedPlugins,
+  allInfos,
+  dividendListingLagsOf,
+  issuerPublishesOf,
+  savePluginInfos,
+} from '../registry';
 import { DATA_KIND, assignedOnly, dataKindOf, unassigned } from '../roles';
 import type { Logger, PluginContext, PluginInfo } from '../types';
 import {
@@ -329,6 +335,8 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
       sourceCalendars,
       // What each loaded issuer source declares it publishes (layer D compares only those).
       issuerPublishes: issuerPublishesOf(used.issuers),
+      // Bar sources that list dividends late (C20), whatever their role.
+      dividendListingLags: dividendListingLagsOf(plugins.bars),
       ...(job === 'daily'
         ? { mode: 'daily' as const, from: sessions.before(target, DAILY_OVERLAP) }
         : { mode: 'full' as const }),

@@ -182,6 +182,11 @@ describe('Alpaca', () => {
     });
   });
 
+  it('declares that it lists a dividend up to its corporate actions look-ahead after the ex-date', () => {
+    // Decisions log 2026-11-01, C20: listed once processed (about the payable date).
+    expect(alpaca.info.dividendListingLagDays).toBe(ALPACA_ACTIONS_LOOKAHEAD_DAYS);
+  });
+
   describe('the free plan refuses SIP data of the last 15 minutes', () => {
     // 2026-10-29 20:35 New York (EDT), as on the second bootstrap.
     const now = new Date('2026-10-30T00:35:00Z');

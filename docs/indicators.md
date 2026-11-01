@@ -4,7 +4,7 @@ Formulas, parameters and warm-up of every indicator (requirements 06), and how s
 
 ## Series
 
-- **Price** (`totalReturn: false`): closes split-adjusted to the latest share basis (a later split rescales all past values by the same factor, so comparisons and volatility do not change).
+- **Price** (`totalReturn: false`): closes split-adjusted to the latest share basis (a later split rescales all past values by the same factor, so comparisons with the fund's own average and volatility do not change). A comparison with a fixed level does change (a close of 15 above a level of 10 reads 7.5 after a 2-for-1 split), so a plain `price` or `sma` against a `threshold` is refused at parse, by `pnpm strategy check` and registration (decisions log 2026-11-01, C18 (a)): compare the total return (`totalReturn: true`) or the fund with its own average instead. `volatility` against a threshold is allowed (a percentage, not rescaled).
 - **Total return** (`totalReturn: true`): our total-return index (`docs/data-pipeline.md`), dividends reinvested on the ex-date.
 
 ## Indicators (A2)

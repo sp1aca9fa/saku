@@ -711,9 +711,18 @@ describe('reason codes in words', () => {
       'SPY: the data of 2026-11-03, which the signals still read, has not been checked',
     );
     // A dividend or split on a closed-day bar (requirements 04 "Closed-day bars").
+    // It stays red from the next session on until corrected or resolved (C19).
     expect(describeReason(t, 'SPY:closed_day_event@2026-11-01')).toBe(
       'SPY: a dividend or split is dated 2026-11-01, a day the market was closed; it is in no ' +
-        "price the signals read, so this day's change cannot be trusted",
+        "price the signals read, so the fund's returns from then on cannot be trusted until the " +
+        'source corrects it or an admin resolves it',
+    );
+    // A dividend a late-listing source has not listed yet, unconfirmed (C20).
+    expect(describeReason(t, 'SPY:B.dividend_pending@alpaca')).toBe(
+      'SPY: a dividend is not listed by alpaca yet and no other secondary source confirmed it',
+    );
+    expect(describeReason(translator('ja'), 'SPY:B.dividend_pending@alpaca')).toBe(
+      'SPY: alpaca はこの分配金をまだ掲載しておらず、ほかの副ソースでも確認できていません',
     );
     expect(describeReason(translator('ja'), 'SPY:closed_day_event@2026-11-01')).toMatch(
       /^SPY: 市場の休場日である 2026-11-01 に配当または株式分割/,

@@ -11,9 +11,11 @@ import {
   indexCheck,
   indexUnavailable,
   layerA,
+  calendarDaysBetween,
   layerB,
   leverageCheck,
   moveThreshold,
+  settlePendingDividends,
   unsplit,
 } from './checks';
 
@@ -182,6 +184,124 @@ describe('layer B', () => {
       bar('2026-01-07', 102),
     ];
     expect(statuses(layerB(p, close, 's'), 'dividend_match')).toEqual(['2026-01-06 green']);
+  });
+
+  // Decisions log 2026-11-01, C20: a source that lists a dividend only once processed.
+  describe('a dividend a late-listing secondary has not listed yet', () => {
+    /** The secondary `s` with the same closes and no dividend (not listed yet). */
+    const unlisted = [bar('2026-01-05', 100), bar('2026-01-06', 101), bar('2026-01-07', 102)];
+    const listing = (asOf: string, lagDays = 120) => ({ listing: { lagDays, asOf } });
+    const pending = (rs: ReturnType<typeof layerB>) =>
+      rs.filter((r) => r.check.startsWith('dividend_'));
+
+    it('within the lag of the run date: dividend_pending, yellow, never a dividend_match', () => {
+      for (const asOf of ['2026-01-06', '2026-01-07', '2026-05-06']) {
+        expect(pending(layerB(p, unlisted, 's', listing(asOf)))).toEqual([
+          {
+            layer: 'B',
+            source: 's',
+            check: 'dividend_pending',
+            date: '2026-01-06',
+            status: 'yellow',
+            observed: 0,
+            expected: 0.5,
+            message: 'not listed by s yet',
+          },
+        ]);
+      }
+    });
+
+    it('older than the lag: the missing dividend is a red dividend_match, as before', () => {
+      // 2026-01-06 + 120 days = 2026-05-06; one day later it is past the lag.
+      const rs = pending(layerB(p, unlisted, 's', listing('2026-05-07')));
+      expect(statuses(rs, 'dividend_match')).toEqual(['2026-01-06 red']);
+      expect(rs[0]!.message).toBe('event missing in secondary');
+      expect(statuses(rs, 'dividend_pending')).toEqual([]);
+      // A shorter lag, the same.
+      expect(
+        statuses(layerB(p, unlisted, 's', listing('2026-01-08', 1)), 'dividend_match'),
+      ).toEqual(['2026-01-06 red']);
+    });
+
+    it('a source without the declaration: unchanged (red on any date)', () => {
+      expect(statuses(layerB(p, unlisted, 's'), 'dividend_match')).toEqual(['2026-01-06 red']);
+    });
+
+    it('a different nonzero amount, a dividend only in the secondary, or no bar: compared as before', () => {
+      const off = [
+        bar('2026-01-05', 100),
+        bar('2026-01-06', 101, { divCash: 0.6 }),
+        bar('2026-01-07', 102),
+      ];
+      expect(statuses(layerB(p, off, 's', listing('2026-01-07')), 'dividend_match')).toEqual([
+        '2026-01-06 red',
+      ]);
+      const extra = [bar('2026-01-05', 100, { divCash: 0.2 }), ...off.slice(1)];
+      expect(statuses(layerB(p, extra, 's', listing('2026-01-07')), 'dividend_match')).toEqual([
+        '2026-01-05 red',
+        '2026-01-06 red',
+      ]);
+      // The secondary has no bar on the ex-date: no listing to read, a mismatch as before.
+      const gap = [bar('2026-01-05', 100), bar('2026-01-07', 102)];
+      const rs = layerB(p, gap, 's', listing('2026-01-07'));
+      expect(statuses(rs, 'dividend_match')).toEqual(['2026-01-06 red']);
+      expect(statuses(rs, 'dividend_pending')).toEqual([]);
+    });
+
+    it('a missed split is never pending', () => {
+      const split = [bar('2026-01-05', 100), bar('2026-01-06', 50.5, { splitFactor: 2 })];
+      const s = [bar('2026-01-05', 100), bar('2026-01-06', 50.5)];
+      expect(statuses(layerB(split, s, 's', listing('2026-01-06')), 'split_match')).toEqual([
+        '2026-01-06 red',
+      ]);
+    });
+
+    it('refuses a lag that is not a whole number of days from 1 to 366', () => {
+      for (const lag of [0, -1, 1.5, 367, Number.NaN]) {
+        expect(() => layerB(p, unlisted, 's', listing('2026-01-07', lag))).toThrow(/listing lag/);
+      }
+      expect(() => layerB(p, unlisted, 's', listing('2026-02-30'))).toThrow(/Not a date/);
+    });
+
+    it('settles: green only when another secondary confirmed the dividend, else yellow', () => {
+      const late = layerB(p, unlisted, 'late', listing('2026-01-07'));
+      const good = layerB(p, p, 'other');
+      const confirmed = settlePendingDividends([...late, ...good], ['late', 'other']);
+      expect(confirmed.find((r) => r.check === 'dividend_pending')).toMatchObject({
+        source: 'late',
+        status: 'green',
+        message: 'not listed by late yet; confirmed by other',
+      });
+      // No other secondary: yellow (never green on the primary alone).
+      expect(
+        settlePendingDividends(late, ['late']).find((r) => r.check === 'dividend_pending')!.status,
+      ).toBe('yellow');
+      // The other source disagrees on the amount: not a confirmation (its red stands).
+      const wrong = layerB(p, [bar('2026-01-06', 101, { divCash: 0.6 })], 'other');
+      const both = settlePendingDividends([...late, ...wrong], ['late', 'other']);
+      expect(statuses(both, 'dividend_pending')).toEqual(['2026-01-06 yellow']);
+      expect(statuses(both, 'dividend_match')).toEqual(['2026-01-06 red']);
+      // A check-role source (not a secondary) does not confirm; nor does a match on another date.
+      expect(
+        statuses(settlePendingDividends([...late, ...good], ['late']), 'dividend_pending'),
+      ).toEqual(['2026-01-06 yellow']);
+      // Two late sources, neither listing it: they do not confirm each other.
+      const late2 = layerB(p, unlisted, 'late2', listing('2026-01-07'));
+      expect(
+        statuses(
+          settlePendingDividends([...late, ...late2], ['late', 'late2']),
+          'dividend_pending',
+        ),
+      ).toEqual(['2026-01-06 yellow', '2026-01-06 yellow']);
+      // Other results pass through unchanged.
+      expect(settlePendingDividends(good, ['other'])).toEqual(good);
+    });
+
+    it('counts calendar days between dates', () => {
+      expect(calendarDaysBetween('2026-01-06', '2026-05-06')).toBe(120);
+      expect(calendarDaysBetween('2028-02-28', '2028-03-01')).toBe(2);
+      expect(calendarDaysBetween('2026-01-07', '2026-01-06')).toBe(-1);
+    });
   });
 
   it('compares daily returns of our adjusted series with a provider’s adjusted closes', () => {

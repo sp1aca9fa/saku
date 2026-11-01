@@ -742,8 +742,8 @@ const ISSUER_VALUES = [...ISSUER_FIELDS, 'currency'] as const;
  * Stores one issuer source's records for one symbol (layer D): a row is added only when the
  * values for (symbol, source, date) differ from the latest stored, so a changed value is a new
  * row and nothing stored is overwritten. A response with the same date twice, a value that is
- * not a finite number, or a NAV without its currency (ISO 4217) is refused whole (nothing stored;
- * the caller reports it).
+ * not a finite number, or a NAV or a nonzero distribution without its currency (ISO 4217) is
+ * refused whole (nothing stored; the caller reports it).
  */
 export async function storeIssuerRecords(
   db: Db,
@@ -770,6 +770,11 @@ export async function storeIssuerRecords(
     }
     if (r.nav !== undefined && r.currency === undefined) {
       throw new Error(`${input.source} sent a NAV without its currency on ${r.date}`);
+    }
+    // A distribution is an amount of money: one without its currency could not be compared
+    // either (decisions log 2026-11-01, C17). A zero distribution (no event) needs none.
+    if (r.distribution !== undefined && r.distribution !== 0 && r.currency === undefined) {
+      throw new Error(`${input.source} sent a distribution without its currency on ${r.date}`);
     }
   }
   const key = and(

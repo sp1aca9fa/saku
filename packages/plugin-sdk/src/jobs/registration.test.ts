@@ -2,6 +2,7 @@ import { type HealthStatus, type JobType, type RawBar, Strategy } from '@saku/co
 import { Sessions } from '@saku/data';
 import {
   type Db,
+  createUser,
   finishRun,
   schema,
   seedSourceRoles,
@@ -484,17 +485,68 @@ describe('registrationProblems on what verify stores', () => {
 
   it('a closed-day bar with a dividend, or another red on that day, still refuses', async () => {
     const { db } = await verified(closes, { p: [{ ...bar('2026-01-03', 99), divCash: 0.5 }] });
-    // The dividend is in no series bar: the next session is red too (`closed_day_event`).
+    // The dividend is in no series bar: every session after it is red too (`closed_day_event`,
+    // C19), until the source corrects it or an admin resolves it.
     expect(await check(db)).toEqual([
-      'AAA: 1 stored bar is graded red: 2026-01-05. Its data has not passed the checks (pnpm health --date <date> explains a day).',
+      'AAA: 4 stored bars are graded red: 2026-01-05, 2026-01-06, 2026-01-07, 2026-01-08. Its data has not passed the checks (pnpm health --date <date> explains a day).',
       expect.stringMatching(
-        /^AAA: 2 red days in its history .*: 2026-01-03 \(A\.bar_valid@p, single_source\), 2026-01-05 \(closed_day_event@2026-01-03\)/,
+        /^AAA: 5 red days in its history .*: 2026-01-03 \(A\.bar_valid@p, single_source\), 2026-01-05 \(closed_day_event@2026-01-03\), 2026-01-06 \(closed_day_event@2026-01-03\), 2026-01-07 .*2026-01-08 \(closed_day_event@2026-01-03\)/,
       ),
     ]);
     // A bar on a closed day that is also broken (a price not positive): refused.
     const broken = await verified(closes, { p: [{ ...bar('2026-01-03', 99), low: -1 }] });
     expect(await check(broken.db)).toEqual([
       expect.stringMatching(/^AAA: 1 red day in its history .*: 2026-01-03/),
+    ]);
+  });
+
+  it('a closed-day event an admin resolved as not real: registers after the next full pass', async () => {
+    const event = { ...bar('2026-01-03', 99), divCash: 0.5 };
+    const { db } = await verified(closes, { p: [event] });
+    const aaa = (await symbolId(db, 'AAA'))!;
+    const admin = await createUser(db, {
+      username: 'ada',
+      passwordHash: 'x',
+      totpSecretEnc: 'x',
+      totpLastStep: 1,
+      backupCodeHashes: ['ada'],
+      isAdmin: true,
+    });
+    await db.insert(schema.closedEventResolutions).values({
+      symbolId: aaa,
+      date: '2026-01-03',
+      source: 'p',
+      divCash: 0.5,
+      splitFactor: 1,
+      resolvedBy: admin,
+      reason: 'no such dividend (issuer site)',
+      resolvedAt: '2026-02-01T00:00:00.000Z',
+    });
+    // Until a full pass grades it again, the stored grades still refuse.
+    expect(await check(db)).toHaveLength(2);
+    const id = await run(db, 'checks', LAST, { finished: false });
+    await verify(db, { runId: id, sessions, mode: 'full', to: LAST });
+    await finishRun(db, id, { ok: true, datesProcessed: [LAST] });
+    expect(await registrationReport(db, strategy(), { through: LAST, sessions })).toEqual({
+      problems: [],
+      notes: [
+        'AAA: 1 bar on days the market was closed, excluded (no signal reads them): 2026-01-03.',
+      ],
+    });
+    // A resolution covers the event it was made for: another amount stored later is red again.
+    await storeRawBars(db, {
+      symbolId: aaa,
+      source: 'p',
+      bars: [{ ...event, divCash: 0.6 }],
+      runId: null,
+      fetchedAt: 't2',
+    });
+    const again = await run(db, 'checks', LAST, { finished: false });
+    await verify(db, { runId: again, sessions, mode: 'full', to: LAST });
+    await finishRun(db, again, { ok: true, datesProcessed: [LAST] });
+    expect(await check(db)).toEqual([
+      expect.stringMatching(/^AAA: 4 stored bars are graded red/),
+      expect.stringMatching(/^AAA: 5 red days in its history/),
     ]);
   });
 

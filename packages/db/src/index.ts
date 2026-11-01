@@ -1,5 +1,6 @@
 export * from './alerts';
 export * from './client';
+export * from './closed-events';
 export * from './env';
 export * from './market';
 export * from './runs';

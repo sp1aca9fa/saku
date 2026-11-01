@@ -1,4 +1,8 @@
-import { ISSUER_PUBLISHED_KINDS, type IssuerPublishes } from '@saku/data';
+import {
+  ISSUER_PUBLISHED_KINDS,
+  type IssuerPublishes,
+  MAX_DIVIDEND_LISTING_LAG_DAYS,
+} from '@saku/data';
 import {
   type Db,
   USAGE_SYMBOL_WINDOW_MS,
@@ -21,6 +25,7 @@ import {
   sameLimits,
 } from './http';
 import type {
+  BarSource,
   IssuerSource,
   Logger,
   Notifier,
@@ -77,6 +82,20 @@ export function allInfos(plugins: PluginModule): PluginInfo[] {
   ].map((p) => p.info);
 }
 
+/**
+ * The dividend listing lag each bar source declares (`PluginInfo.dividendListingLagDays`), by
+ * key (sources without a declaration left out: they list dividends on their ex-date).
+ */
+export function dividendListingLagsOf(bars: BarSource[] = []): Record<string, number> {
+  return Object.fromEntries(
+    bars.flatMap((s) =>
+      s.info.dividendListingLagDays !== undefined
+        ? [[s.info.key, s.info.dividendListingLagDays]]
+        : [],
+    ),
+  );
+}
+
 /** What each issuer source declares it publishes, by key (sources without a declaration left out). */
 export function issuerPublishesOf(issuers: IssuerSource[] = []): Record<string, IssuerPublishes> {
   return Object.fromEntries(
@@ -86,7 +105,9 @@ export function issuerPublishesOf(issuers: IssuerSource[] = []): Record<string, 
 
 /**
  * Keys are lowercase identifiers, unique per kind, each source names its terms, a declared
- * adjusted-close rounding is a small positive number, and a `publishes` declaration is an issuer
+ * adjusted-close rounding is a small positive number, a declared dividend listing lag is a bar
+ * source's whole number of days from 1 to 366 (a longer one would excuse a missing dividend for
+ * more than a year), and a `publishes` declaration is an issuer
  * source's, naming at least one known kind, each `true` (a declaration of nothing, or with a
  * misspelt kind, would silently leave its checks out of layer D).
  *
@@ -98,7 +119,10 @@ export function issuerPublishesOf(issuers: IssuerSource[] = []): Record<string, 
  */
 export function validateInfos(
   infos: (Pick<PluginInfo | NotifierInfo, 'key' | 'kind' | 'termsUrl' | 'limits'> &
-    Pick<Partial<PluginInfo>, 'adjCloseRounding' | 'publishes' | 'provider'>)[],
+    Pick<
+      Partial<PluginInfo>,
+      'adjCloseRounding' | 'dividendListingLagDays' | 'publishes' | 'provider'
+    >)[],
 ): void {
   const seen = new Set<string>();
   const byProvider = new Map<string, (typeof infos)[number]>();
@@ -130,6 +154,20 @@ export function validateInfos(
     if (!info.termsUrl) throw new Error(`Plug-in "${info.key}" has no termsUrl.`);
     if (info.adjCloseRounding !== undefined) {
       checkAdjCloseRounding(info.adjCloseRounding, `Plug-in "${info.key}"`);
+    }
+    if (info.dividendListingLagDays !== undefined) {
+      const lag: unknown = info.dividendListingLagDays;
+      if (
+        info.kind !== 'bar' ||
+        typeof lag !== 'number' ||
+        !Number.isInteger(lag) ||
+        lag < 1 ||
+        lag > MAX_DIVIDEND_LISTING_LAG_DAYS
+      ) {
+        throw new Error(
+          `Plug-in "${info.key}": dividendListingLagDays is for bar sources, a whole number of days from 1 to ${MAX_DIVIDEND_LISTING_LAG_DAYS} (got ${String(lag)}).`,
+        );
+      }
     }
     if (info.publishes !== undefined) {
       const p: unknown = info.publishes;

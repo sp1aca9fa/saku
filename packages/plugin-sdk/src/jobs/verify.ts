@@ -28,6 +28,7 @@ import {
   leverageCheck,
   notComparedOf,
   seriesHealth,
+  settlePendingDividends,
   standIns,
   symbolHealth,
   unsplit,
@@ -36,12 +37,14 @@ import {
 import {
   type Db,
   activeSymbols,
+  closedEventResolutionsOf,
   fxPointInTime,
   getSetting,
   issuerRecordsOf,
   navTolerances,
   schema,
   latestCloseOf,
+  resolutionOf,
   standInMatchesBar,
   unmatchedTolerances,
   seriesPointInTime,
@@ -81,6 +84,13 @@ export interface VerifyOptions {
    * D compares only those kinds. A source not named: inferred from its records.
    */
   issuerPublishes?: Record<string, IssuerPublishes>;
+  /**
+   * The dividend listing lag each bar source declares (`PluginInfo.dividendListingLagDays`), by
+   * source key: layer B reads a dividend it does not list yet, within that many calendar days
+   * before `to` (this run's own target date, whatever the mode), as `dividend_pending`
+   * (decisions log 2026-11-01, C20). A source not named lists dividends on their ex-date.
+   */
+  dividendListingLags?: Record<string, number>;
 }
 
 export interface IssuerAvailability {
@@ -176,21 +186,28 @@ function isClosed(calendar: Sessions, date: TradingDate): boolean {
 }
 
 /**
- * Each primary bar on a closed day that carries a dividend or split, with the first session after
- * it (on or before `to`; none yet, or past the calendar's end: left out until a run reaches it).
- * Such a bar is kept out of the canonical series (requirements 04 "Closed-day bars"), so its event
- * is in no bar the signals read and the return into that session would be read without it (a
- * split as a fall): that session is graded red, `closed_day_event@<closed date>`, while the bar
- * is stored. The event is never moved to a session (which one is a guess).
+ * Each primary bar on a closed day that carries a dividend or split and that no admin resolution
+ * covers, with the first session after it (on or before `to`; none yet, or past the calendar's
+ * end: left out until a run reaches it). Such a bar is kept out of the canonical series
+ * (requirements 04 "Closed-day bars"), so its event is in no bar the signals read and every
+ * return across it is read without it (a split as a fall, a dividend lost from the total
+ * return): the fund is graded red on every session from that next one on,
+ * `closed_day_event@<closed date>` (decisions log 2026-11-01, C19), while the bar is stored. It
+ * clears when the source's stored raw bar on that day no longer carries the event (`closedDays`
+ * are the bars as stored now: a corrected refetch is a logged revision) or an admin resolves it
+ * (`resolved`: the event as stored, `raw`, matched by `resolutionOf`). The event is never moved to
+ * a session (which one is a guess).
  */
 function closedDayEvents(
   closedDays: RawBar[],
   sessions: Sessions,
   to: TradingDate,
+  resolved: (raw: RawBar) => boolean,
 ): { date: TradingDate; next: TradingDate; reason: string }[] {
   const out: { date: TradingDate; next: TradingDate; reason: string }[] = [];
   for (const b of closedDays) {
     if (b.divCash === 0 && b.splitFactor === 1) continue;
+    if (resolved(b)) continue;
     let next: TradingDate;
     try {
       next = sessions.after(b.date);
@@ -201,6 +218,10 @@ function closedDayEvents(
   }
   return out;
 }
+
+/** Whether `date` is a session on or after `next` (an unresolved closed-day event's red span). */
+const fromNext = (sessions: Sessions, next: TradingDate, date: TradingDate) =>
+  date >= next && !sessions.closedOn(date);
 
 /** The first canonical bar of each symbol (where its graded history starts). */
 async function firstCanonical(db: Db): Promise<Map<number, TradingDate>> {
@@ -496,6 +517,8 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     ...issuer.checks,
   ];
   const nav = await navTolerances(db);
+  /** Admin resolutions of closed-day events (C19). */
+  const resolutions = await closedEventResolutionsOf(db);
   const availability = new Map((o.issuers ?? []).map((a) => [a.source, a]));
   const notLoaded = (source: string) => o.issuers !== undefined && !availability.has(source);
   const navNotCompared: NotCompared[] = [];
@@ -511,6 +534,22 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
     // does not cover is unknown, never closed: kept (and refused by layer A as before).
     const closedDays = primaryAll.filter((b) => o.sessions.closedOn(b.date));
     const primary = primaryAll.filter((b) => !o.sessions.closedOn(b.date));
+    // C19: an admin's resolution covers the event as stored in the raw bar (before un-splitting).
+    const storedOn = new Map((bySource.get(bars.primary) ?? []).map((b) => [b.date, b]));
+    const isResolved = (b: RawBar) => {
+      const r = storedOn.get(b.date);
+      return (
+        r !== undefined &&
+        resolutionOf(resolutions, {
+          symbolId: s.id,
+          date: b.date,
+          source: bars.primary!,
+          divCash: r.divCash,
+          splitFactor: r.splitFactor,
+        }) !== undefined
+      );
+    };
+    const events = closedDayEvents(closedDays, o.sessions, o.to, isResolved);
     const own: CheckResult[] = [];
     const add = (rs: CheckResult[]) => own.push(...rs);
     // The fund's index (layer C), from the series primary, as known at the run (point in time:
@@ -538,6 +577,7 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       }
     }
     const secondaries: [string, RawBar[]][] = [];
+    const compared: CheckResult[] = [];
     for (const source of [...bars.secondaries, ...bars.checks]) {
       const other = bySource.get(source);
       if (!other) continue;
@@ -545,15 +585,22 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       if (bars.secondaries.includes(source)) secondaries.push([source, secondary]);
       // Compare only where the secondary has history (a plan's limit is not a missing bar).
       const start = secondary[0]?.date;
+      // A source that lists dividends late (C20): the lag counts to this run's target date, so
+      // every run that checks a date again (the daily window, the weekly full pass, pnpm verify)
+      // judges it by its own date, never the wall clock.
+      const lag = o.dividendListingLags?.[source];
       if (start)
-        add(
-          layerB(
+        compared.push(
+          ...layerB(
             primary.filter((b) => b.date >= start),
             secondary,
             source,
+            lag === undefined ? {} : { listing: { lagDays: lag, asOf: o.to } },
           ),
         );
     }
+    // A dividend not listed yet is green only when another secondary confirmed it (C20).
+    add(settlePendingDividends(compared, bars.secondaries));
     if (s.underlyingSymbolId !== null) {
       const u = unsplit(
         (raw.get(s.underlyingSymbolId)?.get(bars.primary) ?? []).filter((b) => b.date <= o.to),
@@ -613,11 +660,10 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
         firstBars.get(s.id) ?? s.inceptionDate ?? undefined,
         o,
       );
-      const events = closedDayEvents(closedDays, o.sessions, o.to);
       for (const date of missing) {
         const reasons = [
           'primary_missing',
-          ...events.filter((e) => e.next === date).map((e) => e.reason),
+          ...events.filter((e) => fromNext(o.sessions, e.next, date)).map((e) => e.reason),
         ];
         healthRows.push({ symbolId: s.id, date, health: { status: 'red', reasons } });
         grade(date, 'red', s.ticker);
@@ -681,11 +727,12 @@ export async function verify(db: Db, o: VerifyOptions): Promise<VerifySummary> {
       standIns: si.standIns,
       refused: si.refused,
     });
-    for (const e of closedDayEvents(closedDays, o.sessions, o.to)) {
-      const h = health.get(e.next);
-      if (!h) continue;
-      h.status = 'red';
-      if (!h.reasons.includes(e.reason)) h.reasons.push(e.reason);
+    for (const e of events) {
+      for (const [date, h] of health) {
+        if (!fromNext(o.sessions, e.next, date)) continue;
+        h.status = 'red';
+        if (!h.reasons.includes(e.reason)) h.reasons.push(e.reason);
+      }
     }
     // Closed stand-ins (rule 5) are settled only while the canonical bar is that stand-in: a day
     // built from another price is graded as a stand-in again (at least yellow, named), and the

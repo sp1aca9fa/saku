@@ -103,7 +103,7 @@ export type Family = 'bars' | 'adj_return' | 'leverage' | 'index' | 'fx' | 'othe
 
 const BAR_CHECKS: Partial<Record<CheckLayer, string[]>> = {
   A: ['bar_valid', 'large_move', 'unchanged_close', 'missing_day'],
-  B: ['close_match', 'dividend_match', 'split_match', 'secondary_missing'],
+  B: ['close_match', 'dividend_match', 'dividend_pending', 'split_match', 'secondary_missing'],
 };
 
 export function family(r: { layer: CheckLayer; check: string; symbolId: number | null }): Family {

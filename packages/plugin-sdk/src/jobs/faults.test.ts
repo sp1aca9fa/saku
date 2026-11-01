@@ -592,6 +592,47 @@ describe('fault injection (layer F)', () => {
     });
   }
 
+  // Decisions log 2026-11-01, C20: secondaries that declare they list dividends late. A dividend
+  // missing from the primary is still caught (the late sources list it or the others do), and a
+  // dividend the primary has but no secondary confirms is never green.
+  describe('secondaries that list dividends late (dividendListingLagDays)', () => {
+    const late = { info: { dividendListingLagDays: 120 } };
+    const lateSources = (fault?: Fault, on: Source = 'p') => [
+      source('p', on === 'p' && fault ? { fault } : {}),
+      source('s1', { adjusted: true, ...late, ...(on === 's1' && fault && { fault }) }),
+      source('s2', { ...late, ...(on === 's2' && fault && { fault }) }),
+    ];
+
+    it('missed dividend in the primary (both late-listing secondaries list it): red, safe state', async () => {
+      const { today, reasons, alert } = await run(lateSources(missedDividend));
+      expect(today).toMatchObject({
+        dataStatus: 'red',
+        safeStateApplied: true,
+        allocation: 'Safe state',
+      });
+      expect(reasons).toContain('SPY:B.dividend_match@s1');
+      expect(alert).toMatch(new RegExp(`^Trend 2x: safe state for ${TARGET}`));
+    });
+
+    it('a dividend one late source does not list yet, the other confirming: not a fault, green', async () => {
+      const { today } = await run(lateSources(missedDividend, 's2'));
+      expect(today).toMatchObject({ dataStatus: 'green', safeStateApplied: false });
+    });
+
+    it('a dividend neither late source lists yet: never green (yellow, named)', async () => {
+      const both: Fault = missedDividend;
+      const { today, reasons } = await run([
+        source('p'),
+        source('s1', { adjusted: true, ...late, fault: both }),
+        source('s2', { ...late, fault: both }),
+      ]);
+      expect(today.dataStatus).not.toBe('green');
+      expect(reasons).toEqual(
+        expect.arrayContaining(['SPY:B.dividend_pending@s1', 'SPY:B.dividend_pending@s2']),
+      );
+    });
+  });
+
   // The target is SPY's ex-dividend day (spec 2026-11-01 layer-c-dividends). With the index
   // published the same day, SPY's index check runs on it in its own run. A fault every bar source
   // shares (an upstream error) leaves layer B nothing to compare, and these sources send no

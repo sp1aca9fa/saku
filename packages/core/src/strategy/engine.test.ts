@@ -3,6 +3,7 @@ import type { RawBar } from '../domain';
 import { evaluate, splitAdjusted } from './engine';
 import { sma, volatility } from './indicators';
 import { Strategy } from './schema';
+import { parsePlainAgainstLevel } from './testkit';
 
 const day = (i: number) => {
   const d = new Date(Date.UTC(2026, 0, 5) + i * 86_400_000);
@@ -39,8 +40,9 @@ describe('indicators', () => {
 });
 
 const strategy = (s: unknown) => Strategy.parse(s);
+/** A plain price against a level (refused by the schema, C18 (a)): the band math on exact closes. */
 const thresholdStrategy = (tolerancePct: number) =>
-  strategy({
+  parsePlainAgainstLevel({
     name: 't',
     account: 'taxable',
     safeState: { holdings: [{ ticker: 'X', weight: 100 }] },

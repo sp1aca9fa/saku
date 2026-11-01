@@ -529,6 +529,37 @@ export const standInCloses = sqliteTable(
   (t) => [index('stand_in_closes_key_idx').on(t.symbolId, t.date)],
 );
 
+/**
+ * An admin's resolution of a dividend or split the primary dated on a closed market day
+ * (requirements 04 "Closed-day bars", decisions log 2026-11-01, C19; 0013), append-only
+ * (triggers). Such an event keeps the fund red from the next session on until the source's stored
+ * raw bar on that day no longer carries it, or an admin resolves it here because the event is not
+ * real: the row names the source and the event's values as stored then (`div_cash`,
+ * `split_factor`, the raw bar's), so a later change of the event is not covered by it. Only the
+ * red is lifted: the event stays out of the canonical series (never moved to a session).
+ */
+export const closedEventResolutions = sqliteTable(
+  'closed_event_resolutions',
+  {
+    id: serial(),
+    symbolId: integer('symbol_id')
+      .notNull()
+      .references(() => symbols.id),
+    /** The closed day the event is dated on. */
+    date: text('date').notNull(),
+    /** The primary source whose raw bar carries it. */
+    source: text('source').notNull(),
+    divCash: real('div_cash').notNull(),
+    splitFactor: real('split_factor').notNull(),
+    resolvedBy: text('resolved_by')
+      .notNull()
+      .references(() => users.id),
+    reason: text('reason').notNull(),
+    resolvedAt: text('resolved_at').notNull(),
+  },
+  (t) => [index('closed_event_resolutions_key_idx').on(t.symbolId, t.date)],
+);
+
 export const dataHealth = sqliteTable(
   'data_health',
   {

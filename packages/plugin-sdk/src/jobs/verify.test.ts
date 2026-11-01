@@ -383,7 +383,7 @@ describe('verify', () => {
       expect(raw).toHaveLength(1);
     });
 
-    describe('with a dividend or split on it: the next session red (its event is in no series bar)', () => {
+    describe('with a dividend or split on it: every session from the next red (its event is in no series bar)', () => {
       // AAA: Friday 100, a 2:1 split dated Saturday, Monday 50.5 (+1% on the new basis). Left
       // out, the split would read as a -49.5% Friday-to-Monday return.
       const fri = bar('2026-01-09', 100);
@@ -425,8 +425,13 @@ describe('verify', () => {
           expect(g.canonical.find((b) => b.id === 1 && b.date === '2026-01-12')).toMatchObject({
             status: 'red',
           });
-          // Only the session after it: Tuesday keeps its own grade.
-          expect(aaaRow(g, '2026-01-13').join()).not.toMatch(/closed_day_event/);
+          // Every session after it too, until corrected or resolved (C19).
+          expect(aaaRow(g, '2026-01-13')).toEqual([
+            expect.stringMatching(/^1 2026-01-13 red .*closed_day_event@2026-01-10/),
+          ]);
+          // The closed day itself keeps its own layer A grade; AAA2 is not touched.
+          expect(aaaRow(g, '2026-01-10').join()).not.toMatch(/closed_day_event/);
+          expect(g.health.filter((h) => h.startsWith('2 ')).join()).not.toMatch(/closed_day_event/);
           expect(g.canonical.some((b) => b.date === '2026-01-10')).toBe(false);
         });
       }
@@ -1233,5 +1238,101 @@ describe('verify', () => {
     expect(d.filter((r) => r.checkName === 'nav_tolerance_invalid')).toEqual([
       expect.objectContaining({ date: '2026-01-08', status: 'yellow' }),
     ]);
+  });
+});
+
+// Decisions log 2026-11-01, C20: a secondary that lists a cash dividend only once processed.
+describe('verify: a dividend a late-listing secondary has not listed yet', () => {
+  const days = sessions.between('2026-01-05', '2026-01-16');
+  const EX = '2026-01-07';
+  const mk = (date: string, i: number, divCash = 0): RawBar => ({
+    date,
+    open: 100 + i,
+    high: 100 + i,
+    low: 100 + i,
+    close: 100 + i,
+    closeIsSplitAdjusted: false,
+    volume: 1000,
+    divCash,
+    splitFactor: 1,
+  });
+  const withDividend = days.map((d, i) => mk(d, i, d === EX ? 0.5 : 0));
+  const without = days.map((d, i) => mk(d, i));
+
+  /** `other`: a second secondary's bars (it lists the dividend), or none. */
+  async function graded(o: {
+    other?: RawBar[];
+    lags?: Record<string, number>;
+    to?: string;
+    mode?: 'daily' | 'full';
+  }) {
+    const db = await testDb();
+    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await seedSourceRoles(db, [
+      { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },
+      { key: 'late', dataKind: 'bars', suggestedRole: 'secondary' },
+      ...(o.other ? [{ key: 'other', dataKind: 'bars', suggestedRole: 'secondary' as const }] : []),
+    ]);
+    const aaa = (await symbolId(db, 'AAA'))!;
+    const store = (source: string, bars: RawBar[]) =>
+      storeRawBars(db, { symbolId: aaa, source, bars, runId: null, fetchedAt: 't' });
+    await store('p', withDividend);
+    await store('late', without);
+    if (o.other) await store('other', o.other);
+    const to = o.to ?? days.at(-1)!;
+    const runId = await startRun(db, o.mode === 'full' ? 'weekly' : 'daily');
+    await verify(db, {
+      runId,
+      sessions,
+      to,
+      mode: o.mode ?? 'daily',
+      ...(o.mode !== 'full' && { from: EX }),
+      dividendListingLags: o.lags ?? { late: 120 },
+    });
+    const results = (await db.select().from(schema.checkResults))
+      .filter((r) => r.checkName.startsWith('dividend_'))
+      .map((r) => `${r.checkName} ${r.source} ${r.date} ${r.status} ${r.message ?? ''}`.trim());
+    const [health] = await db
+      .select()
+      .from(schema.dataHealth)
+      .where(and(eq(schema.dataHealth.symbolId, aaa), eq(schema.dataHealth.date, EX)));
+    return { results, health: health && `${health.status} ${health.reasons.join(',')}` };
+  }
+
+  it('another secondary confirming the dividend: pending green, the day green', async () => {
+    const g = await graded({ other: withDividend });
+    expect(g.results).toEqual([
+      'dividend_pending late 2026-01-07 green not listed by late yet; confirmed by other',
+      'dividend_match other 2026-01-07 green',
+    ]);
+    expect(g.health).toBe('green ');
+  });
+
+  it('no secondary confirming it: pending yellow, named (never green on the primary alone)', async () => {
+    const g = await graded({});
+    expect(g.results).toEqual(['dividend_pending late 2026-01-07 yellow not listed by late yet']);
+    expect(g.health).toBe('yellow B.dividend_pending@late');
+    // The other secondary lacking it too (not late-listing): red, as before.
+    const both = await graded({ other: without });
+    expect(both.health).toMatch(/^red .*B\.dividend_match@other/);
+  });
+
+  it('older than the lag at the run date: a red dividend_match, as before', async () => {
+    // A full pass on 2026-05-08: the ex-date is 121 calendar days before it.
+    const g = await graded({ mode: 'full', to: '2026-05-08', other: withDividend });
+    expect(g.results).toContain('dividend_match late 2026-01-07 red event missing in secondary');
+    expect(g.results.some((r) => r.startsWith('dividend_pending'))).toBe(false);
+    expect(g.health).toMatch(/^red .*B\.dividend_match@late/);
+    // Within the lag on the run's own date (120 days): still pending, green (a full pass
+    // stores only what is not green: no dividend result and no symbol row for the day).
+    const within = await graded({ mode: 'full', to: '2026-05-07', other: withDividend });
+    expect(within.results).toEqual([]);
+    expect(within.health).toBeUndefined();
+  });
+
+  it('a source without the declaration: unchanged (red)', async () => {
+    const g = await graded({ lags: {}, other: withDividend });
+    expect(g.results).toContain('dividend_match late 2026-01-07 red event missing in secondary');
+    expect(g.health).toMatch(/^red /);
   });
 });

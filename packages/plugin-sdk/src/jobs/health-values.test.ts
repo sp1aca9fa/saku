@@ -325,6 +325,7 @@ describe('family', () => {
     expect(f('A', 'large_move')).toBe('bars');
     expect(f('B', 'secondary_missing')).toBe('bars');
     expect(f('B', 'dividend_match')).toBe('bars');
+    expect(f('B', 'dividend_pending')).toBe('bars');
     expect(f('B', 'adj_return_match')).toBe('adj_return');
     expect(f('C', 'leverage_track')).toBe('leverage');
     expect(f('C', 'index_unavailable')).toBe('index');

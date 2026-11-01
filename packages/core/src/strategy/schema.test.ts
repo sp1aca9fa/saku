@@ -101,3 +101,50 @@ describe('Strategy schema: unknown keys', () => {
     expect(Strategy.parse(JSON.parse(JSON.stringify(once)))).toEqual(once);
   });
 });
+
+// Decisions log 2026-11-01, C18 (a): a split rescales earlier plain prices, so a plain price or
+// its average against a fixed level is refused; total return, the fund's own average and
+// volatility are not rescaled.
+describe('Strategy schema: a plain price against a fixed level', () => {
+  const withComparison = (
+    left: Record<string, unknown>,
+    right: Record<string, unknown>,
+    member = false,
+  ) => {
+    const s = full() as unknown as { signals: Record<string, unknown>[] };
+    const c = { left, op: '>', right };
+    if (member) (s.signals[1]!.members as unknown[]).push(c);
+    else Object.assign(s.signals[0]!, c);
+    return s;
+  };
+  const level = { threshold: 400 };
+  const plainPrice = { indicator: 'price', ticker: 'AAA' };
+  const plainSma = { indicator: 'sma', ticker: 'AAA', length: 200, totalReturn: false };
+
+  it.each([
+    ['a plain price (default) > a level', plainPrice, level, false, ['signals', 0]],
+    ['a level > a plain SMA', level, plainSma, false, ['signals', 0]],
+    ['an ensemble member', plainPrice, level, true, ['signals', 1, 'members', 1]],
+  ])('%s is refused, with the reason and where', (_, left, right, member, path) => {
+    const r = Strategy.safeParse(withComparison(left, right, member));
+    expect(r.success).toBe(false);
+    const issue = r.error!.issues.find((i) => i.message.includes('fixed level'));
+    expect(issue?.path).toEqual(path);
+    expect(issue?.message).toMatch(/split rescales earlier plain prices/);
+    expect(issue?.message).toMatch(/totalReturn: true/);
+  });
+
+  it.each([
+    ['a total-return price against a level', { ...plainPrice, totalReturn: true }, level],
+    ['a total-return SMA against a level', level, { ...plainSma, totalReturn: true }],
+    ['a plain price against its own plain average', plainPrice, plainSma],
+    [
+      'a plain volatility against a level',
+      { indicator: 'volatility', ticker: 'AAA', length: 20 },
+      level,
+    ],
+  ])('%s is allowed', (_, left, right) => {
+    expect(Strategy.safeParse(withComparison(left, right)).success).toBe(true);
+    expect(Strategy.safeParse(withComparison(left, right, true)).success).toBe(true);
+  });
+});

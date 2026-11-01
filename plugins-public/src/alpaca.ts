@@ -142,6 +142,11 @@ export const alpaca: BarSource = {
     termsUrl: 'https://alpaca.markets/disclosures',
     // Exchange subscriber agreements not yet read for AI use (docs/data-spike.md).
     noAi: true,
+    // Alpaca lists a cash dividend only once processed (about its payable date; SPY's 2026-09-18
+    // ex-date about 6 weeks later): within this many days of the ex-date a dividend it does not
+    // list yet is pending in layer B, not a disagreement (decisions log 2026-11-01, C20). The
+    // same reach as the corporate actions request (ALPACA_ACTIONS_LOOKAHEAD_DAYS).
+    dividendListingLagDays: ALPACA_ACTIONS_LOOKAHEAD_DAYS,
   },
 
   async fetchBars(ticker, from, to, ctx) {

@@ -69,6 +69,20 @@ describe('plug-in registry', () => {
     }
   });
 
+  it('refuses a dividend listing lag that is not a whole number of days from 1 to 366 on a bar source', () => {
+    for (const ok of [1, 120, 366]) {
+      expect(() => validateInfos([{ ...info, dividendListingLagDays: ok }])).not.toThrow();
+    }
+    for (const bad of [0, -1, 1.5, 367, Number.NaN, Infinity, '120' as unknown as number]) {
+      expect(() => validateInfos([{ ...info, dividendListingLagDays: bad }])).toThrow(
+        /dividendListingLagDays/,
+      );
+    }
+    expect(() => validateInfos([{ ...info, kind: 'series', dividendListingLagDays: 30 }])).toThrow(
+      /dividendListingLagDays is for bar sources/,
+    );
+  });
+
   it('refuses a publishes declaration that is not an issuer source naming known kinds', () => {
     const issuer = { ...info, kind: 'issuer' as const };
     expect(() => validateInfos([{ ...issuer, publishes: { nav: true } }])).not.toThrow();
