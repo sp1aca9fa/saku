@@ -1,3 +1,4 @@
+import { Strategy } from '@saku/core';
 import { Sessions } from '@saku/data';
 import {
   addChannel,
@@ -44,6 +45,8 @@ import {
   standInClosedDetail,
   standInClosedText,
   standInDetail,
+  cashBaseOf,
+  recheckAlert,
   strategyAlert,
 } from './alerts';
 import { parseVersion } from './forward';
@@ -1978,5 +1981,113 @@ describe('stand-in close alerts (requirements 04, the stand-in rule 5)', () => {
       ],
     ]);
     expect((await sendStandInClosures(db, options(notifier, DAY))).sent).toBe(0);
+  });
+});
+
+describe('alerts for a version that may hold CASH_BASE', () => {
+  const strategy = Strategy.parse({
+    name: 'Deposit',
+    account: 'taxable',
+    safeState: { holdings: [{ ticker: 'CASH_BASE', weight: 100 }] },
+    evaluation: { frequency: 'daily' },
+    signals: [
+      {
+        id: 'up',
+        type: 'compare',
+        left: { indicator: 'price', ticker: 'AAA', totalReturn: true },
+        op: '>',
+        right: { indicator: 'sma', ticker: 'AAA', length: 5, totalReturn: true },
+      },
+    ],
+    allocations: [
+      { name: 'In', when: { all: ['up'] }, holdings: [{ ticker: 'AAA', weight: 100 }] },
+      {
+        name: 'Mix',
+        when: { none: ['up'] },
+        holdings: [
+          { ticker: 'AAA', weight: 60 },
+          { ticker: 'CASH_BASE', weight: 40 },
+        ],
+      },
+      {
+        name: 'Mix USD',
+        holdings: [
+          { ticker: 'BBB', weight: 60 },
+          { ticker: 'CASH_BASE', weight: 40 },
+        ],
+      },
+    ],
+  });
+  const day = (allocation: string, o: Partial<DayEntry> = {}): DayEntry => ({
+    date: '2026-01-05',
+    allocation,
+    holdings: [...strategy.allocations.find((a) => a.name === allocation)!.holdings],
+    dataStatus: 'green',
+    safeStateApplied: false,
+    reasons: [],
+    ...o,
+  });
+  const text = (lang: string, entry: DayEntry, lastTold?: string) =>
+    strategyAlert(translator(lang), lang, {
+      versionId: 'v',
+      name: 'Deposit',
+      execution: 'next_open',
+      entry,
+      nextSession: '2026-01-06',
+      cashBase: cashBaseOf(strategy, 'XXX'),
+      ...(lastTold !== undefined && { lastTold }),
+    })!.text;
+
+  it.each(['en', 'ja'])(
+    '%s: names CASH_BASE as cash in the base currency and says to convert',
+    (lang) => {
+      const t = translator(lang);
+      const into = text(lang, day('Mix'), 'In');
+      expect(into).toContain(t('alerts.cash', { currency: 'XXX' }));
+      expect(into).not.toContain('CASH_BASE');
+      expect(into).toContain(t('alerts.cashBase.convert', { currency: 'XXX' }));
+      expect(into).toContain(t('alerts.cashBase.note'));
+      // Out of it, and the first alert (from nothing) into it: the same lines.
+      expect(text(lang, day('In'), 'Mix')).toContain(t('alerts.cashBase.note'));
+      expect(text(lang, day('Mix'))).toContain(t('alerts.cashBase.note'));
+    },
+  );
+
+  it('no conversion lines when the CASH_BASE weight does not change, or for a USD-only switch', () => {
+    const t = translator('en');
+    expect(text('en', day('Mix USD'), 'Mix')).not.toContain(t('alerts.cashBase.note'));
+    expect(text('en', day('In'))).not.toContain(t('alerts.cashBase.note'));
+    // The safe state (all CASH_BASE) after Mix: a change, said with the red day's instructions.
+    const red = text(
+      'en',
+      {
+        ...day('Mix'),
+        ...{
+          allocation: 'Mix',
+          safeStateApplied: true,
+          dataStatus: 'red',
+          holdings: strategy.safeState.holdings,
+        },
+      },
+      'Mix',
+    );
+    expect(red).toContain(t('alerts.cashBase.convert', { currency: 'XXX' }));
+    // A version that cannot hold CASH_BASE, or no base currency set: nothing.
+    expect(cashBaseOf(strategy, undefined)).toBeUndefined();
+  });
+
+  it('the re-check messages carry the same lines', () => {
+    const t = translator('en');
+    const a = recheckAlert(t, 'en', {
+      versionId: 'v',
+      name: 'Deposit',
+      execution: 'next_open',
+      message: { kind: 'final', outcome: 'cleared', day: day('Mix') },
+      deadline: '09:00',
+      nextSession: '2026-01-06',
+      lastTold: 'In',
+      cashBase: cashBaseOf(strategy, 'XXX'),
+    });
+    expect(a.text).toContain(t('alerts.cashBase.convert', { currency: 'XXX' }));
   });
 });

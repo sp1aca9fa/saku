@@ -593,6 +593,20 @@ export function mayHoldCashBase(
   return allHoldings({ strategy, days: [] }).some((h) => h.ticker === CASH_BASE);
 }
 
+/**
+ * The run failed because CASH_BASE is held over a session without a known FX rate (the caller
+ * can add why it is unknown, e.g. the forward record's refusal of a stale or disputed rate).
+ */
+export class FxUnknownError extends Error {
+  constructor(
+    readonly pair: string,
+    readonly date: TradingDate,
+  ) {
+    super(`No FX rate (${pair}) known for ${date}: ${CASH_BASE} is held.`);
+    this.name = 'FxUnknownError';
+  }
+}
+
 /** An ISO 4217 code as the base currency is given: three capital letters. */
 const CURRENCY_CODE = /^[A-Z]{3}$/;
 
@@ -699,9 +713,7 @@ export function backtest(input: BacktestInput): BacktestResult {
   /** The session's FX as CASH_BASE's valuation needs it: known, finite and above 0, or a failure. */
   const fxHeld = (date: TradingDate): number => {
     const fx = input.fxRate?.(date);
-    if (fx === undefined) {
-      throw new Error(`No FX rate (USD${baseCurrency}) known for ${date}: ${CASH_BASE} is held.`);
-    }
+    if (fx === undefined) throw new FxUnknownError(`USD${baseCurrency}`, date);
     if (!Number.isFinite(fx) || fx <= 0) {
       throw new Error(`The FX rate (USD${baseCurrency}) for ${date} is ${fx}: not above 0.`);
     }

@@ -11,7 +11,10 @@
 // - A strategy that may hold CASH_BASE (base-currency cash; docs/indicators.md "Base-currency
 //   cash") needs what its forward equity reads: `base_currency` set, a deposit rate in force on
 //   `through` (`depositRateAsOf`; unknown or invalid refuses, never 0), and, unless the base
-//   currency is USD, a primary FX source (the valuation rate USD<base>). Each missing one refuses.
+//   currency is USD, a primary FX source with a valuation rate USD<base> known before `through`'s
+//   open (finite, above 0). Each missing one refuses. Such a strategy also gets a note (content
+//   `registration.cashBaseNote`): tax on currency conversion is not applied yet, and the FX
+//   spread applies to conversions only.
 // - `same_close` execution is refused: it trades at a close not yet known when the signal is
 //   computed; it exists only for testfol parity tests (05 "Execution model").
 // - A range volatility (parkinson, garman_klass, yang_zhang) is refused: it reads opens, highs
@@ -61,17 +64,20 @@ import {
   mayHoldCashBase,
   parseTicker,
 } from '@saku/core';
+import { translator } from '@saku/content';
 import { CLOSED_DAY_EVENT, NOT_A_SESSION, type Sessions } from '@saku/data';
 import {
   type Db,
   activeSymbols,
   closedEventResolutionsOf,
   depositRateAsOf,
+  fxPointInTime,
   getSetting,
   resolutionOf,
   schema,
 } from '@saku/db';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { cashReadAt } from './cash';
 import { type EffectiveCosts, effectiveCosts } from './costs';
 import { roles } from './verify';
 
@@ -151,7 +157,12 @@ export async function registrationReport(
   }
   const costs = await effectiveCosts(db, strategy);
   if ('problem' in costs) problems.push(costs.problem);
-  if (mayHoldCashBase(strategy)) problems.push(...(await cashBaseProblems(db, o.through)));
+  if (mayHoldCashBase(strategy)) {
+    problems.push(...(await cashBaseProblems(db, o.through)));
+    // Said in the install's primary language (content), refused or not.
+    const t = translator((await getSetting(db, 'primary_language')) ?? 'en');
+    notes.push(t('registration.cashBaseNote'));
+  }
   if (strategy.execution === 'same_close') problems.push(SAME_CLOSE_REFUSAL);
   if (readsRangeVolatility(strategy)) problems.push(RANGE_VOLATILITY_REFUSAL);
 
@@ -214,11 +225,26 @@ async function cashBaseProblems(db: Db, through: TradingDate): Promise<string[]>
         `invalid (${rate.invalid.join('; ')}): correct it with pnpm settings deposit-rate correct.`,
     );
   }
-  if (base !== 'USD' && !(await roles(db, 'fx')).primary) {
-    problems.push(
-      `The strategy may hold ${CASH_BASE} and no primary FX source is set: its value in USD ` +
-        `needs the valuation rate USD${base}.`,
-    );
+  if (base !== 'USD') {
+    const primary = (await roles(db, 'fx')).primary;
+    if (!primary) {
+      problems.push(
+        `The strategy may hold ${CASH_BASE} and no primary FX source is set: its value in USD ` +
+          `needs the valuation rate USD${base}.`,
+      );
+    } else {
+      // A rate known before through's open, as the backtest reads it (`cashReadAt`), finite and
+      // above 0: the forward record's first steps need one.
+      const pit = await fxPointInTime(db, `USD${base}`, primary);
+      const fx = pit.asOf(through, cashReadAt(through))?.value;
+      if (fx === undefined || !Number.isFinite(fx) || !(fx > 0)) {
+        problems.push(
+          `The strategy may hold ${CASH_BASE} and no valuation rate USD${base} from ${primary} ` +
+            `is known before the open of ${through}` +
+            `${fx === undefined ? '' : ` (read ${fx})`}: run pnpm jobs daily (or check the FX source) first.`,
+        );
+      }
+    }
   }
   return problems;
 }

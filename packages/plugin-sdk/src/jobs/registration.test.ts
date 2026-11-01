@@ -1,4 +1,5 @@
 import { type HealthStatus, type JobType, type RawBar, Strategy } from '@saku/core';
+import { translator } from '@saku/content';
 import { Sessions } from '@saku/data';
 import {
   type Db,
@@ -9,6 +10,7 @@ import {
   seedSourceRoles,
   setSetting,
   startRun,
+  storeFx,
   storeRawBars,
   symbolId,
   upsertSymbols,
@@ -181,7 +183,36 @@ describe('registrationProblems', () => {
     await db
       .insert(schema.sourceRoles)
       .values({ dataKind: 'fx', pluginKey: 'fp', role: 'primary', position: 0 });
+    // The role is there but no rate is known before through's open (09:30 New York).
+    const noRate = [
+      `The strategy may hold CASH_BASE and no valuation rate USDXXX from fp is known before the open of ${LAST}: run pnpm jobs daily (or check the FX source) first.`,
+    ];
+    expect(await check(db, s)).toEqual(noRate);
+    // Published after that open: still not known then.
+    await storeFx(db, {
+      source: 'fp',
+      kind: 'valuation',
+      rates: [{ pair: 'USDXXX', date: LAST, rate: 150, publishedAt: `${LAST}T15:00:00Z` }],
+      fetchedAt: `${LAST}T16:00:00Z`,
+    });
+    expect(await check(db, s)).toEqual(noRate);
+    await storeFx(db, {
+      source: 'fp',
+      kind: 'valuation',
+      rates: [{ pair: 'USDXXX', date: D[2], rate: 149, publishedAt: `${D[2]}T15:00:00Z` }],
+      fetchedAt: `${D[2]}T16:00:00Z`,
+    });
     expect(await check(db, s)).toEqual([]);
+    // Said in the install's language whether refused or not: tax on conversion, FX spread scope.
+    const report = await registrationReport(db, s, { through: LAST, sessions });
+    expect(report.notes).toEqual([translator('en')('registration.cashBaseNote')]);
+    await setSetting(db, 'primary_language', 'ja');
+    expect((await registrationReport(db, s, { through: LAST, sessions })).notes).toEqual([
+      translator('ja')('registration.cashBaseNote'),
+    ]);
+    expect((await registrationReport(db, strategy(), { through: LAST, sessions })).notes).toEqual(
+      [],
+    );
   });
 
   it('refuses same_close, and lists every reason at once', async () => {

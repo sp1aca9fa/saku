@@ -267,33 +267,33 @@ export async function depositRateAsOf(
 export type DepositRateRead = Awaited<ReturnType<typeof depositRateAsOf>>;
 
 /**
- * `depositRateAsOf` (without `knownBy`: the latest entries and corrections) for many dates, read
- * once and answered in memory, for a backtest that reads a date at a time (docs/indicators.md
- * "Base-currency cash"). Each date's answer equals `depositRateAsOf`'s: the entry with the latest
- * `from` on or before it, with its latest correction; unknown before the first entry; invalid when
- * the value read does not pass the rules. Throws on a `date` that is not a date (a caller error).
+ * `depositRateAsOf` for many dates, read once and answered in memory, for a backtest that reads a
+ * date at a time (docs/indicators.md "Base-currency cash"). Each answer equals `depositRateAsOf`'s
+ * with the same `knownBy` (an ISO 8601 instant; without it the latest entries and corrections):
+ * the entry with the latest `from` on or before the date among those added by then, with its
+ * latest correction made by then; unknown before the first such entry; invalid when the value read
+ * does not pass the rules. Throws on a `date` that is not a date (a caller error).
  */
-export async function depositRateReader(db: Db): Promise<(date: TradingDate) => DepositRateRead> {
+export async function depositRateReader(
+  db: Db,
+): Promise<(date: TradingDate, o?: { knownBy?: string }) => DepositRateRead> {
   const rows = await db.select().from(depositRates).orderBy(asc(depositRates.fromDate));
   const revisions = await db
     .select()
     .from(depositRateRevisions)
     .orderBy(asc(depositRateRevisions.id));
-  const latest = new Map<number, string>();
-  for (const v of revisions) latest.set(v.entryId, v.newRatePct);
+  /** Each entry's corrections in id order (the last one made by an instant is in force then). */
+  const byEntry = new Map<number, { rate: string; at: string }[]>();
+  for (const v of revisions) {
+    byEntry.set(v.entryId, [
+      ...(byEntry.get(v.entryId) ?? []),
+      { rate: v.newRatePct, at: v.createdAt },
+    ]);
+  }
   const base = await getSetting(db, 'base_currency');
-  const reads: DepositRateRead[] = rows.map((row) => {
-    const entry = {
-      ratePct: latest.get(row.id) ?? row.ratePct,
-      from: row.fromDate,
-      currency: row.currency,
-    };
-    const problems = valueProblems(entry, base);
-    return problems.length > 0 ? { invalid: problems } : { entry };
-  });
-  return (date) => {
+  return (date, o = {}) => {
     if (!isTradingDate(date)) throw new Error(`Not a date: ${JSON.stringify(date)}.`);
-    // The last entry starting on or before the date (from dates are unique and sorted).
+    // The last entry starting on or before the date (from dates are unique and sorted)...
     let lo = 0;
     let hi = rows.length;
     while (lo < hi) {
@@ -301,6 +301,20 @@ export async function depositRateReader(db: Db): Promise<(date: TradingDate) => 
       if (rows[mid]!.fromDate <= date) lo = mid + 1;
       else hi = mid;
     }
-    return lo === 0 ? { unknown: true } : reads[lo - 1]!;
+    // ...among those added by `knownBy`.
+    let k = lo - 1;
+    while (k >= 0 && o.knownBy !== undefined && rows[k]!.createdAt > o.knownBy) k--;
+    if (k < 0) return { unknown: true };
+    const row = rows[k]!;
+    const made = (byEntry.get(row.id) ?? []).filter(
+      (v) => o.knownBy === undefined || v.at <= o.knownBy,
+    );
+    const entry = {
+      ratePct: made.at(-1)?.rate ?? row.ratePct,
+      from: row.fromDate,
+      currency: row.currency,
+    };
+    const problems = valueProblems(entry, base);
+    return problems.length > 0 ? { invalid: problems } : { entry };
   };
 }

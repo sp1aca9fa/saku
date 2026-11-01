@@ -43,7 +43,8 @@ export async function integrity(
   const out: IntegrityResult[] = [];
   const { loadRows, barsOf } = await reader(db, o.sessions);
   const cashRate = await cashRateReader(db);
-  const baseInputs = await baseCurrencyInputs(db);
+  // The deposit rate point in time, as the forward record reads it.
+  const baseInputs = await baseCurrencyInputs(db, { pointInTime: true });
 
   for (const version of await allVersions(db)) {
     const result = (check: string, problems: string[], deviation = 0): IntegrityResult => ({
@@ -85,7 +86,9 @@ export async function integrity(
       }
       continue;
     }
-    out.push(compareReference(strategy, core, equity, bars, cashRate, omittedCostsAsZero, result));
+    out.push(
+      compareReference(strategy, core, equity, bars, cashRate, omittedCostsAsZero, result, base),
+    );
     out.push(
       compareIncremental(strategy, core, equity, bars, cashRate, omittedCostsAsZero, result, base),
     );
@@ -104,6 +107,7 @@ function compareReference(
   cashRate: (date: TradingDate) => number | undefined,
   omittedCostsAsZero: boolean,
   result: Result,
+  base: BaseCurrencyInputs,
 ): IntegrityResult {
   const problems: string[] = [];
   let worst = 0;
@@ -121,13 +125,12 @@ function compareReference(
         const signals = signalsDiffer(d.signals, r.signals);
         if (signals.length) problems.push(`${d.date}: signals ${signals.join(', ')}`);
       });
-      // A version that may hold CASH_BASE: the reference gets no base-currency inputs until it
-      // implements them from the contract (spec 2026-11-02 base-currency), so it fails here and
-      // the check is red, never skipped.
+      // The same base currency, FX and deposit rate as core (a version that may hold CASH_BASE;
+      // none otherwise), read only where CASH_BASE is held.
       // Core succeeded, so no day it valued needed an unknown rate; the reference reads the rate
       // on every day (times a zero weight where unused), so an unknown one is passed as 0 there.
       // Matched by date: both value every session, those without a decision included.
-      const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? 0, { omittedCostsAsZero });
+      const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? 0, { omittedCostsAsZero, ...base });
       const theirs = new Map(b.dates.map((d, i) => [d, b.equity[i]!]));
       const ours = [...equity.keys()];
       if (ours.length !== b.dates.length || ours.some((d) => !theirs.has(d))) {

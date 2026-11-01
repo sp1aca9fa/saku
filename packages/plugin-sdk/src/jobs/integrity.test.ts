@@ -1,7 +1,7 @@
 // Layer E on stored data: core vs reference and incremental vs full over the canonical bars.
 import type { RawBar } from '@saku/core';
 import { Sessions } from '@saku/data';
-import { createUser, registerVersion, setSetting, upsertSymbols } from '@saku/db';
+import { createUser, registerVersion, schema, setSetting, storeFx, upsertSymbols } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { emptyPlugins } from '../registry';
@@ -221,6 +221,79 @@ describe('integrity (layer E)', () => {
 
   // docs/indicators.md "Days without a decision": a session without a decision holds the safe
   // state, here a ticker no allocation holds; its bars are loaded (no "No bars for BBB").
+  it('a version holding CASH_BASE: core and reference get the same base inputs and agree', async () => {
+    const { db, owner } = await setup();
+    await setSetting(db, 'base_currency', 'XXX');
+    await db
+      .insert(schema.sourceRoles)
+      .values({ dataKind: 'fx', pluginKey: 'fp', role: 'primary', position: 0 });
+    // A rate for each session, published the evening before (known before its open).
+    await storeFx(db, {
+      source: 'fp',
+      kind: 'valuation',
+      rates: DATES.map((date, i) => ({
+        pair: 'USDXXX',
+        date,
+        rate: 150 * (1 + 0.05 * Math.sin(i / 7)),
+        publishedAt: `${sessions.between('2024-01-01', date).at(-2) ?? '2024-01-01'}T22:00:00Z`,
+      })),
+      fetchedAt: '2026-01-17T00:00:00Z',
+    });
+    await registerVersion(db, {
+      ownerId: owner,
+      name: 'Deposit',
+      costsResolved: true,
+      strategy: {
+        name: 'Deposit',
+        account: 'taxable',
+        costs: { slippageBps: 5, feePct: 0.1, fxSpreadPct: 0.3 },
+        safeState: { holdings: [{ ticker: 'CASH_BASE', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [
+          {
+            id: 'A',
+            type: 'compare',
+            left: { indicator: 'price', ticker: 'AAA', totalReturn: true },
+            op: '>',
+            right: { indicator: 'sma', ticker: 'AAA', length: 20, totalReturn: true },
+          },
+        ],
+        allocations: [
+          { name: 'In', when: { all: ['A'] }, holdings: [{ ticker: 'AAA', weight: 100 }] },
+          {
+            name: 'Out',
+            holdings: [
+              { ticker: 'CASH_BASE', weight: 70 },
+              { ticker: 'CASH_USD', weight: 30 },
+            ],
+          },
+        ],
+      },
+    });
+    const statuses = async () =>
+      (await integrity(db, { to: TARGET, sessions }))
+        .filter((r) => r.message!.startsWith('Deposit'))
+        .map((r) => [r.check, r.status, r.message]);
+    // No deposit rate yet: core cannot value CASH_BASE (never 0), so both checks are red.
+    expect(await statuses()).toEqual([
+      ['core_vs_reference', 'red', expect.stringMatching(/No deposit rate known/)],
+      ['incremental_vs_full', 'red', expect.stringMatching(/No deposit rate known/)],
+    ]);
+    // Entered before the history it covers (point in time: a rate added later is not known on
+    // earlier dates, so this test writes it as if entered then).
+    await db.insert(schema.depositRates).values({
+      ratePct: '0.4',
+      fromDate: DATES[0]!,
+      currency: 'XXX',
+      actor: 't',
+      createdAt: '2024-01-01T00:00:00.000Z',
+    });
+    expect(await statuses()).toEqual([
+      ['core_vs_reference', 'green', expect.any(String)],
+      ['incremental_vs_full', 'green', expect.any(String)],
+    ]);
+  }, 30_000);
+
   it('a safe state no allocation holds, over a session without a decision', async () => {
     const { db, owner } = await setup();
     await registerVersion(db, {

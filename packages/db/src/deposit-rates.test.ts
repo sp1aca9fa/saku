@@ -202,10 +202,29 @@ describe('deposit rates', () => {
     expect((await depositRateReader(db))('2026-01-05')).toEqual({ unknown: true });
     await addDepositRate(db, entry('0.1', '2026-01-05'), { now });
     await addDepositRate(db, entry('0.25', '2026-07-01'), { now });
+    const beforeBackfill = new Date();
+    await new Promise((r) => setTimeout(r, 5));
     await addDepositRate(db, entry('0.05', '2025-06-02'), { now });
     await correctDepositRate(db, { from: '2026-01-05', ratePct: '0.15', reason: 'typo' });
+    await new Promise((r) => setTimeout(r, 5));
+    const between = new Date();
+    await new Promise((r) => setTimeout(r, 5));
     await correctDepositRate(db, { from: '2026-01-05', ratePct: '0.12', reason: 'bank letter' });
     const read = await depositRateReader(db);
+    // Point in time: the same answer as depositRateAsOf with the same knownBy.
+    for (const knownBy of [new Date('2000-01-01T00:00:00Z'), beforeBackfill, between, new Date()]) {
+      for (const d of ['2025-06-02', '2026-01-05', '2026-07-01']) {
+        expect(read(d, { knownBy: knownBy.toISOString() })).toEqual(
+          await depositRateAsOf(db, d, { knownBy }),
+        );
+      }
+    }
+    expect(read('2025-06-02', { knownBy: beforeBackfill.toISOString() })).toEqual({
+      unknown: true,
+    });
+    expect(read('2026-03-02', { knownBy: between.toISOString() })).toEqual({
+      entry: entry('0.15', '2026-01-05'),
+    });
     for (const d of [
       '2025-06-01',
       '2025-06-02',

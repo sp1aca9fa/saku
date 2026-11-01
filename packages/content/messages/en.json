@@ -200,7 +200,11 @@
       "red": "Data health: red.",
       "unknown": "Data health: unknown (the run did not finish)."
     },
-    "more": "...and {count} more"
+    "more": "...and {count} more",
+    "cashBase": {
+      "convert": "This switch moves money into or out of cash in {currency}: convert that part between USD and {currency}.",
+      "note": "Tax on currency conversion is not applied yet in Saku's figures, and the FX spread applies only to the converted part."
+    }
   },
   "indicators": {
     "price": {
@@ -499,5 +503,8 @@
   },
   "benchmarkLabel": "{name} ({holdings})",
   "benchmarkHolding": "{ticker} {weight}%",
-  "benchmarkDeposit": "deposit rate"
+  "benchmarkDeposit": "deposit rate",
+  "registration": {
+    "cashBaseNote": "This strategy may hold cash in the base currency (CASH_BASE): tax on currency conversion is not applied yet, and the FX spread is charged only on conversions between USD holdings and CASH_BASE."
+  }
 }

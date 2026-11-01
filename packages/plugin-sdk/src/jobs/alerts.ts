@@ -10,7 +10,16 @@
 // Their health line then states the data-health grade alone, with nothing about signals or
 // strategies, since none are live. Every other alert (strategies, data health, revisions,
 // integrity, parity, recompute, stand-in corrections) waits for the gate.
-import { CASH_USD, SAFE_STATE, type Strategy, type TradingDate, zonedInstant } from '@saku/core';
+import {
+  CASH_BASE,
+  CASH_USD,
+  type Holding,
+  SAFE_STATE,
+  type Strategy,
+  type TradingDate,
+  mayHoldCashBase,
+  zonedInstant,
+} from '@saku/core';
 import { type Translate, hasText, translator } from '@saku/content';
 import type { Sessions } from '@saku/data';
 import {
@@ -102,6 +111,60 @@ export interface DayEntry {
   reasons: string[];
 }
 
+/** What an alert needs for a version that may hold CASH_BASE (base-currency cash). */
+export interface CashBaseAlert {
+  /** The install's base currency. */
+  currency: string;
+  /** An allocation's holdings by name (`SAFE_STATE`: the safe state's); undefined when unknown. */
+  holdingsOf: (allocation: string) => readonly Holding[] | undefined;
+}
+
+/** A version's CASH_BASE alert inputs, or none when it cannot hold CASH_BASE or no base is set. */
+export function cashBaseOf(
+  strategy: Strategy,
+  currency: string | undefined,
+): CashBaseAlert | undefined {
+  if (!currency || !mayHoldCashBase(strategy)) return undefined;
+  return {
+    currency,
+    holdingsOf: (allocation) =>
+      allocation === SAFE_STATE
+        ? strategy.safeState.holdings
+        : strategy.allocations.find((a) => a.name === allocation)?.holdings,
+  };
+}
+
+/** A holding as an alert names it: cash in its currency, any other ticker as written. */
+function holdingName(t: Translate, ticker: string, cashBase: CashBaseAlert | undefined): string {
+  if (ticker === CASH_USD) return t('alerts.cash', { currency: 'USD' });
+  if (ticker === CASH_BASE && cashBase) return t('alerts.cash', { currency: cashBase.currency });
+  return ticker;
+}
+
+/**
+ * When the instruction changes the CASH_BASE weight from what the channel was last told (nothing
+ * told: from none; an allocation whose holdings are unknown counts as a change), the lines that
+ * say to convert that part and that tax on conversion is not applied (docs/indicators.md "FX
+ * spread"). None for a version that cannot hold CASH_BASE.
+ */
+function cashBaseLines(
+  t: Translate,
+  cashBase: CashBaseAlert | undefined,
+  holdings: readonly Holding[],
+  lastTold: string | undefined,
+): { keep: string }[] {
+  if (!cashBase) return [];
+  const weight = (hs: readonly Holding[] | undefined) =>
+    hs?.find((h) => h.ticker === CASH_BASE)?.weight ?? 0;
+  const before = lastTold === undefined ? [] : cashBase.holdingsOf(lastTold);
+  if (before !== undefined && weight(before) === weight(holdings)) return [];
+  if (before === undefined && weight(holdings) === 0) return [];
+  return [
+    { keep: t('alerts.cashBase.convert', { currency: cashBase.currency }) },
+    { keep: t('alerts.cashBase.note') },
+  ];
+}
+
 /**
  * The day's alert for one strategy and one recipient, or null when there is nothing to say,
  * within `max` characters (`fitMessage`): the title, body, holdings, timing and health line
@@ -120,6 +183,8 @@ export function strategyAlert(
     lastTold?: string;
     /** The execution point (`executionPassed`) was already past when the alert was made. */
     passed?: boolean;
+    /** For a version that may hold CASH_BASE (`cashBaseOf`). */
+    cashBase?: CashBaseAlert;
     /**
      * The red day was graded with no hourly check left before its re-check deadline (requirements
      * 04 "Red re-check before execution"): the deadline as shown, said in the safe-state alert.
@@ -133,11 +198,9 @@ export function strategyAlert(
     allocation === SAFE_STATE ? t('alerts.safeStateName') : allocation;
   const percent = new Intl.NumberFormat(language, { style: 'percent', maximumFractionDigits: 2 });
   const holdings = e.holdings
-    .map(
-      (h) =>
-        `${h.ticker === CASH_USD ? t('alerts.cash', { currency: 'USD' }) : h.ticker} ${percent.format(h.weight / 100)}`,
-    )
+    .map((h) => `${holdingName(t, h.ticker, o.cashBase)} ${percent.format(h.weight / 100)}`)
     .join(', ');
+  const converts = cashBaseLines(t, o.cashBase, e.holdings, o.lastTold);
   const timing = timingLine(t, o.execution, e.date, o.nextSession, o.passed === true);
   const health = { keep: t(`alerts.health.${e.dataStatus}`) };
   const reasons: Part[] = e.reasons.length
@@ -165,6 +228,7 @@ export function strategyAlert(
         ? [keep(t('alerts.recheck.notRechecked', { deadline: o.notRechecked }))]
         : []),
       keep(t('alerts.holdings', { holdings })),
+      ...converts,
       keep(timing),
       health,
       ...reasons,
@@ -183,6 +247,7 @@ export function strategyAlert(
             }),
       ),
       keep(t('alerts.holdings', { holdings })),
+      ...converts,
       keep(timing),
       health,
       ...reasons,
@@ -296,6 +361,7 @@ export async function sendDayAlert(
   const { version, strategy, day } = d;
   if (!version.ownerId) return summary;
   const owner = await ownerOf(db, o, d.owners ?? new Map(), version.ownerId);
+  const cashBase = cashBaseOf(strategy, await getSetting(db, 'base_currency'));
   const { language, t } = owner;
   for (const channel of owner.targets) {
     const alert = strategyAlert(
@@ -313,6 +379,7 @@ export async function sendDayAlert(
         // A drill reads nothing told before (the safe-state alert does not depend on it).
         lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
         ...(d.notRechecked !== undefined && { notRechecked: d.notRechecked }),
+        ...(cashBase && { cashBase }),
       },
       roomOn(o, channel, t),
     );
@@ -397,6 +464,8 @@ export function recheckAlert(
     lastTold?: string;
     /** The execution point (`executionPassed`) was already past when the alert was made. */
     passed?: boolean;
+    /** For a version that may hold CASH_BASE (`cashBaseOf`). */
+    cashBase?: CashBaseAlert;
   },
   max = Infinity,
 ): Alert {
@@ -406,11 +475,9 @@ export function recheckAlert(
     allocation === SAFE_STATE ? t('alerts.safeStateName') : allocation;
   const percent = new Intl.NumberFormat(language, { style: 'percent', maximumFractionDigits: 2 });
   const holdings = e.holdings
-    .map(
-      (h) =>
-        `${h.ticker === CASH_USD ? t('alerts.cash', { currency: 'USD' }) : h.ticker} ${percent.format(h.weight / 100)}`,
-    )
+    .map((h) => `${holdingName(t, h.ticker, o.cashBase)} ${percent.format(h.weight / 100)}`)
     .join(', ');
+  const converts = cashBaseLines(t, o.cashBase, e.holdings, o.lastTold);
   const timing = timingLine(t, o.execution, e.date, o.nextSession, o.passed === true);
   const keep = (line: string) => ({ keep: line });
   const values = { strategy: o.name, date: e.date, deadline: o.deadline };
@@ -432,6 +499,7 @@ export function recheckAlert(
       keep(t('alerts.recheck.provisional.title', values)),
       keep(t('alerts.recheck.provisional.body', values)),
       keep(t('alerts.recheck.provisional.fallback', { holdings })),
+      ...converts,
       keep(timing),
       keep(t('alerts.recheck.provisional.wait', values)),
     ];
@@ -449,6 +517,7 @@ export function recheckAlert(
             : t('alerts.stateChange.body', { from: name(o.lastTold), to, date: e.date }),
       ),
       keep(t('alerts.holdings', { holdings })),
+      ...converts,
       keep(timing),
     ];
   } else {
@@ -457,6 +526,7 @@ export function recheckAlert(
       keep(t('alerts.dataRed.title', values)),
       keep(t(`alerts.recheck.${m.outcome === 'late' ? 'late' : 'stands'}`, values)),
       keep(t('alerts.holdings', { holdings })),
+      ...converts,
       keep(timing),
     ];
   }
@@ -491,6 +561,7 @@ export async function sendRecheckMessage(
   const { version, strategy } = d;
   if (!version.ownerId) return summary;
   const owner = await ownerOf(db, o, d.owners ?? new Map(), version.ownerId);
+  const cashBase = cashBaseOf(strategy, await getSetting(db, 'base_currency'));
   const { language, t } = owner;
   for (const channel of owner.targets) {
     const alert = recheckAlert(
@@ -508,6 +579,7 @@ export async function sendRecheckMessage(
         passed:
           d.message.kind === 'final' && executionPassed(o, strategy.execution, d.message.day.date),
         lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
+        ...(cashBase && { cashBase }),
       },
       roomOn(o, channel, t),
     );

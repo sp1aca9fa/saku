@@ -200,7 +200,11 @@
       "red": "データ状態: 赤。",
       "unknown": "データ状態: 不明(処理が完了していません)。"
     },
-    "more": "ほか {count} 件"
+    "more": "ほか {count} 件",
+    "cashBase": {
+      "convert": "この切り替えでは{currency}建ての現金への移動、または現金からの移動があります。その部分はUSDと{currency}の間で両替してください。",
+      "note": "Sakuの数値には両替時の税金はまだ反映されていません。為替スプレッドは両替する部分にのみかかります。"
+    }
   },
   "indicators": {
     "price": {
@@ -499,5 +503,8 @@
   },
   "benchmarkLabel": "{name}({holdings})",
   "benchmarkHolding": "{ticker} {weight}%",
-  "benchmarkDeposit": "預金金利"
+  "benchmarkDeposit": "預金金利",
+  "registration": {
+    "cashBaseNote": "この戦略は基準通貨建ての現金(CASH_BASE)を保有することがあります。両替時の税金はまだ反映されておらず、為替スプレッドはUSD建ての保有とCASH_BASEの間の両替にのみかかります。"
+  }
 }

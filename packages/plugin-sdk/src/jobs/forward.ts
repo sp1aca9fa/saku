@@ -19,6 +19,7 @@ import {
   canonicalJson,
   evaluate,
   forwardDecision,
+  FxUnknownError,
   mayHoldCashBase,
   NEAR_TIE,
   zonedInstant,
@@ -197,8 +198,12 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
 
   const { symbolIds, loadRows, barsOf } = await reader(db, o.sessions);
   const cashRate = await cashRateReader(db);
-  // Read only for a version that may hold CASH_BASE (`forwardEquity`).
-  const base = await baseCurrencyInputs(db);
+  // Read only for a version that may hold CASH_BASE (`forwardEquity`): the deposit rate point in
+  // time, and an FX value refused when stale or disputed (`baseCurrencyInputs`).
+  const base = await baseCurrencyInputs(db, {
+    pointInTime: true,
+    guard: { sessions: o.sessions },
+  });
   const clock = o.now ?? new Date();
   const clockIso = clock.toISOString();
   const startMs = (o.start ?? clock).getTime();
@@ -1156,7 +1161,10 @@ export function forwardEquity(
       ...cashBaseInputs(strategy, base),
     }).points.at(-1)!.equity;
   } catch (e) {
-    onUnknown?.(e instanceof Error ? e.message : String(e));
+    // A session's FX the guard refused: the reason it gave (stale, disputed) goes with it.
+    const why = e instanceof FxUnknownError ? base?.fxProblem?.(e.date) : undefined;
+    const reason = e instanceof Error ? e.message : String(e);
+    onUnknown?.(why === undefined ? reason : `${reason} (${why})`);
     return null;
   }
 }

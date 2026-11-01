@@ -236,6 +236,45 @@ describe('CASH_BASE', () => {
     expect(r.conversions).toEqual({ count: 2, fxSpreadCosts: 0.008, tax: 'not_applied' });
   });
 
+  it('pays the spread on the drifted CASH_BASE weight: X 60 / CASH_BASE 40, FX 150 -> 160, then out', () => {
+    const mix = [
+      { ticker: 'X', weight: 60 },
+      { ticker: 'CASH_BASE', weight: 40 },
+    ];
+    const days: StrategyDay[] = [
+      { date: D[0]!, signals: {}, allocation: 'mix', holdings: mix, ties: [] },
+      { date: D[1]!, signals: {}, allocation: 'mix', holdings: mix, ties: [] },
+      {
+        date: D[2]!,
+        signals: {},
+        allocation: 'x',
+        holdings: [{ ticker: 'X', weight: 100 }],
+        ties: [],
+      },
+    ];
+    const r = backtest({
+      strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0, fxSpreadPct: 1 } },
+      days,
+      bars: { X: [bar(D[0]!, 100), bar(D[1]!, 110), bar(D[2]!, 110)] },
+      cashRate: none,
+      baseCurrency: 'JPY',
+      fxRate: at({ [D[0]!]: 150, [D[1]!]: 160, [D[2]!]: 160 }),
+      depositRate: () => 0,
+    });
+    // D0: the 40% converted pays 1%: 0.996, held 60 / 40.
+    // D1: X 0.6 x 1.1 = 0.66; CASH_BASE 0.4 x 150 / 160 = 0.375; together 1.035 (no trade).
+    // D2: out of CASH_BASE: its drifted weight 0.375 / 1.035 is converted, paying 1% of it.
+    const drifted = 0.375 / 1.035;
+    const e = r.points.map((p) => p.equity);
+    expect(e[0]).toBeCloseTo(0.996, 15);
+    expect(e[1]).toBeCloseTo(0.996 * 1.035, 15);
+    expect(r.points[1]!.weights.CASH_BASE).toBeCloseTo(drifted, 15);
+    expect(e[2]).toBeCloseTo(0.996 * 1.035 * (1 - drifted * 0.01), 15);
+    expect(r.conversions!.count).toBe(2);
+    expect(r.conversions!.fxSpreadCosts).toBeCloseTo(0.004 + drifted * 0.01, 15);
+    expect(r.costs).toBeCloseTo(0.004 + drifted * 0.01, 15);
+  });
+
   it('reads each covered day of a gap at its own deposit rate', () => {
     // Sessions need SPY and QQQ: D1 is no session (QQQ has no bar), but SPY's bar makes it a
     // covered day, so the step D0 -> D2 accrues two days.
