@@ -23,7 +23,7 @@ Read for this stage: 04-data-pipeline.md, 15-plugins.md, 03-assets.md, 05-strate
 - Later engine changes must reproduce this strategy's recorded signals or annotate differences; recorded entries are never edited.
 
 ## A3. Hardened pipeline
-- Full Tier 0; revision log; weekly refetch and diff; quota guard; CSV fallback; layer D best effort (`IssuerSource`); data-health CLI report; monthly audit report (on the 1st: the month's days by grade with reasons, revisions and re-adjustments, quota use per provider, chain verification, failed runs; to admin channels once alerts are live); `pnpm verify` on the server.
+- Full Tier 0; revision log; weekly refetch and diff; quota guard; CSV fallback; layer D best effort (`IssuerSource`); data-health CLI report; red re-check before execution (04: provisional message, hourly re-grading until the deadline, one final instruction; the record stores the final one); monthly audit report (on the 1st: the month's days by grade with reasons, revisions and re-adjustments, quota use per provider, chain verification, failed runs; to admin channels once alerts are live); `pnpm verify` on the server.
 - Fault-injection suite (material faults) in CI.
 - Acceptance: injected faults produce yellow/red as specified and never a normal signal on red; a broken run triggers the heartbeat alert.
 

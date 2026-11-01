@@ -8,6 +8,7 @@ Discord and Telegram, configured per user in Settings (stored encrypted). Admins
 |---|---|---|
 | Strategy state change | Active allocation changes; states the execution timing (e.g. "trade at the next US open") | A2 |
 | Data health | Yellow (warning) or red (safe-state action with exact instructions) | A2 |
+| Red re-check | A red day: a provisional message (with the fallback safe-state instruction and the deadline), then one final instruction when the day clears or at the deadline (04, "Red re-check before execution") | A3 |
 | Job failure | Admins | A2 |
 | Position mismatch | Holdings differ from target; includes rebalance calculator orders (whole shares) | D1 |
 | Strategy health | Live drawdown exceeds the worst 5% predicted by the backtest | D2 |
