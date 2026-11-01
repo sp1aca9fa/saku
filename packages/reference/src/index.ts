@@ -616,22 +616,14 @@ export function refBacktest(
     return s.safeState.holdings;
   };
 
-  // Every target the strategy may trade (for the whole-share refusals and synthetic series).
+  // Every target the strategy may trade (for the whole-share refusals).
   const targets: RefDay['holdings'][] = [
     ...(s.allocations ?? []).map((a) => a.holdings),
     ...(s.safeState ? [s.safeState.holdings] : []),
     ...days.map((d) => d.holdings),
   ];
   const ws = options?.wholeShares
-    ? refWholeShareBook(options.wholeShares, {
-        execution,
-        costRate,
-        bars,
-        cashRate,
-        sessions,
-        targets,
-        mayHold,
-      })
+    ? refWholeShareBook(options.wholeShares, { costRate, bars, cashRate, targets, mayHold })
     : undefined;
   const doMove = (date: string, part: 'night' | 'day' | 'whole') =>
     ws ? ws.move(date, part) : move(date, part);
@@ -708,8 +700,8 @@ export interface RefBacktestResult {
   equity: number[];
   dates: string[];
   switches: number;
-  /** Whole shares only: USD value at each close. */
-  value?: number[];
+  /** Whole shares only: the value at each close, with its currency. */
+  value?: RefMoney[];
   /** Whole shares only: each holding's share of the value at each close. */
   weights?: Record<string, number>[];
   trades?: RefTrade[];
@@ -719,30 +711,33 @@ export interface RefBacktestResult {
 
 const USD = (amount: number): RefMoney => ({ amount, currency: 'USD' });
 
-/** Within 1e-9 (relative) of a whole number: that number; otherwise unchanged. */
-function snapWhole(x: number): number {
+// Whole-number snaps (docs/indicators.md "Whole shares"), relative |x - k| <= tol x |x|. One
+// constant each, so a contract change touches one line.
+const SIZING_SNAP = 1e-12; // share count x before the floor at a trade (float noise only)
+const SPLIT_SNAP = 1e-9; // shares x split factor
+
+/** Within `tol` (relative) of a whole number: that number; otherwise unchanged. */
+function snapWhole(x: number, tol: number): number {
   const r = Math.round(x);
-  return Math.abs(x - r) <= 1e-9 * Math.abs(x) ? r : x;
+  return Math.abs(x - r) <= tol * Math.abs(x) ? r : x;
 }
 
 /**
  * Whole-share bookkeeping (docs/indicators.md "Equity curves", "Whole shares"), written from the
- * contract text. Share counts per non-cash ticker, a residual in USD, a price series per synthetic
- * ticker. The caller drives the same sessions and parts as the fractional backtest.
+ * contract text: share counts per ticker as traded, and a residual in USD. The caller drives the
+ * same sessions, parts and trade decisions as the fractional backtest.
  */
 function refWholeShareBook(
   opt: RefWholeShares,
   ctx: {
-    execution: 'next_open' | 'next_close' | 'same_close';
     costRate: number;
     bars: Record<string, RefBar[]>;
     cashRate: (date: string) => number;
-    sessions: string[];
     targets: RefDay['holdings'][];
     mayHold: Set<string>;
   },
 ) {
-  const { costRate: c, bars, cashRate, sessions } = ctx;
+  const { costRate: c, bars, cashRate } = ctx;
   // Input refusals.
   if (opt.currency !== 'USD') {
     throw new Error(
@@ -760,29 +755,32 @@ function refWholeShareBook(
         `reference: whole shares: a target lists a ticker twice (${names.join(', ')})`,
       );
     }
+    // A synthetic ticker (one with parameters) has no traded price.
+    for (const h of t) {
+      if (h.ticker.includes('?')) {
+        throw new Error(
+          `reference: whole shares: synthetic ticker ${h.ticker} has no traded price`,
+        );
+      }
+    }
   }
-  // Every ticker it may hold (synthetic bases included) must have bars as traded.
+  // Every ticker it may hold must have bars as traded (not split-adjusted).
   for (const base of ctx.mayHold) {
     if (bars[base]!.some((b) => b.closeIsSplitAdjusted)) {
       throw new Error(`reference: whole shares: ${base} has split-adjusted bars`);
     }
   }
-  const parse = (ticker: string) => {
-    const t = refParseTicker(ticker);
-    if (t === undefined) throw new Error(`reference: malformed ticker ${JSON.stringify(ticker)}`);
-    return t;
-  };
   const indexes = new Map<string, Map<string, number>>();
-  const barAt = (base: string, date: string, offset: 0 | -1): RefBar => {
-    let ix = indexes.get(base);
+  const barAt = (ticker: string, date: string): RefBar => {
+    let ix = indexes.get(ticker);
     if (!ix) {
-      ix = new Map(bars[base]!.map((b, i) => [b.date, i]));
-      indexes.set(base, ix);
+      ix = new Map(bars[ticker]!.map((b, i) => [b.date, i]));
+      indexes.set(ticker, ix);
     }
     const i = ix.get(date);
-    const b = i === undefined ? undefined : bars[base]![i + offset];
-    if (!b) throw new Error(`reference: whole shares: no bar for ${base} at ${date} (${offset})`);
-    return b;
+    if (i === undefined)
+      throw new Error(`reference: whole shares: no bar for ${ticker} on ${date}`);
+    return bars[ticker]![i]!;
   };
   const rateOn = (date: string): number => {
     const r = cashRate(date);
@@ -790,35 +788,9 @@ function refWholeShareBook(
       throw new Error(`reference: whole shares: unknown cash rate on ${date}`);
     return r;
   };
-
-  // Synthetic tickers (with parameters): their own price series, from the base's close on the
-  // first session, compounded over every session whether held or not.
-  const synthetic = new Set<string>();
-  for (const t of ctx.targets)
-    for (const h of t) if (h.ticker.includes('?')) synthetic.add(h.ticker);
-  const synth: Record<string, number> = {};
-  if (sessions.length > 0) {
-    for (const t of synthetic) synth[t] = barAt(parse(t).base, sessions[0]!, 0).close;
-  }
-  const synthReturn = (ticker: string, date: string, part: 'night' | 'day' | 'whole') => {
-    const { base, L, E } = parse(ticker);
-    const b = barAt(base, date, 0);
-    const prev = barAt(base, date, -1);
-    const k = b.splitFactor; // bars are as traded (refused otherwise)
-    let r: number;
-    if (part === 'whole') r = ((b.close + b.divCash) * k) / prev.close - 1;
-    else if (part === 'night') r = ((b.open! + b.divCash) * k) / prev.close - 1;
-    else r = b.close / b.open! - 1;
-    if (part === 'day') return L * r;
-    // The cash rate is read only where the series needs financing.
-    const financing = L === 1 ? 0 : ((L - 1) * rateOn(date)) / 100 / 252;
-    return L * r - financing - E / 100 / 252;
-  };
-
-  /** A ticker's price at a time on a date: the bar as traded, or the synthetic series. */
+  /** A ticker's price as traded: the open (next_open trades) or the close. */
   const priceOf = (ticker: string, date: string, time: 'open' | 'close'): number => {
-    if (synthetic.has(ticker)) return synth[ticker]!;
-    const b = barAt(parse(ticker).base, date, 0);
+    const b = barAt(ticker, date);
     const p = time === 'open' ? b.open : b.close;
     if (p === undefined)
       throw new Error(`reference: whole shares: no ${time} for ${ticker} on ${date}`);
@@ -827,36 +799,36 @@ function refWholeShareBook(
 
   let started = false;
   let residual = 0;
-  let shares: Record<string, number> = {}; // non-cash tickers held, n > 0
+  let shares: Record<string, number> = {}; // tickers held, n > 0
   let costSum = 0;
-  const value: number[] = [];
+  const value: RefMoney[] = [];
   const equity: number[] = [];
   const weights: Record<string, number>[] = [];
   const trades: RefTrade[] = [];
 
   return {
     move(date: string, part: 'night' | 'day' | 'whole') {
-      for (const t of synthetic) synth[t] = synth[t]! * (1 + synthReturn(t, date, part));
-      if (!started || part === 'day') return; // events and interest belong to the night / whole day
-      // Residual cash earns the USD rate / 252 per night; the rate is read only while it is > 0.
-      let add = 0;
+      if (!started || part === 'day') return; // interest and events belong to the night / whole day
+      // 1. Interest on the cash at the start of the part; the rate is read only when it is > 0.
       if (residual > 0) residual = residual * (1 + rateOn(date) / 100 / 252);
       for (const t of Object.keys(shares)) {
-        if (synthetic.has(t)) continue; // a synthetic series has no splits or dividends
-        const b = barAt(parse(t).base, date, 0);
-        const afterSplit = snapWhole(shares[t]! * b.splitFactor);
-        const kept = Math.floor(afterSplit);
-        const endPrice = part === 'night' ? b.open : b.close;
-        if (afterSplit !== kept) {
+        const b = barAt(t, date);
+        // 2. Split: the product, snapped to a whole number within 1e-9; else the whole shares
+        //    are kept and the fraction is paid as cash at the part's end price.
+        const product = snapWhole(shares[t]! * b.splitFactor, SPLIT_SNAP);
+        const kept = Math.floor(product);
+        if (product !== kept) {
+          const endPrice = part === 'night' ? b.open : b.close;
           if (endPrice === undefined)
             throw new Error(`reference: whole shares: no open for ${t} on ${date}`);
-          add += (afterSplit - kept) * endPrice; // cash in lieu of the fraction
+          residual += (product - kept) * endPrice;
         }
-        add += afterSplit * b.divCash; // dividend on the shares after the split, to cash
-        shares[t] = kept;
+        // 3. Dividend on the whole shares kept after the split.
+        residual += kept * b.divCash;
+        // A reverse split can leave 0 shares: the holding is then all cash.
         if (kept === 0) delete shares[t];
+        else shares[t] = kept;
       }
-      residual += add; // at the end of the part
     },
 
     /** Executes a trade; returns true when it was not the first one (a switch). */
@@ -881,7 +853,9 @@ function refWholeShareBook(
       const zero: string[] = [];
       for (const h of target) {
         if (h.ticker === 'CASH_USD') continue;
-        const n = Math.floor(((h.weight / 100) * B) / (p[h.ticker]! * (1 + c)));
+        // x = (weight x B) / (100 x p x (1 + c)), in that order; snap (SIZING_SNAP); then floor.
+        const x = (h.weight * B) / (100 * p[h.ticker]! * (1 + c));
+        const n = Math.floor(snapWhole(x, SIZING_SNAP));
         if (!(n >= 0)) throw new Error(`reference: whole shares: share count ${n} for ${h.ticker}`);
         counts[h.ticker] = n;
         if (n === 0) zero.push(h.ticker);
@@ -917,7 +891,7 @@ function refWholeShareBook(
     /** The point at the session's close. */
     point(date: string) {
       if (!started) {
-        value.push(initial);
+        value.push(USD(initial));
         equity.push(1);
         weights.push({});
         return;
@@ -931,7 +905,7 @@ function refWholeShareBook(
       const w: Record<string, number> = {};
       for (const [t, x] of Object.entries(at)) w[t] = x / v;
       if (residual > 0) w.CASH_USD = residual / v;
-      value.push(v);
+      value.push(USD(v));
       equity.push(v / initial);
       weights.push(w);
     },
