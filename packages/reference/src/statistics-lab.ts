@@ -368,13 +368,38 @@ export function refCrisisReplays(input: {
 
 // ---- Monte Carlo goal projection ----
 
+/** One date of the run's output. */
+export interface RefProjectionSample {
+  date: string;
+  equity: number;
+  /** Weights held at the date's close (as in "Metrics"). */
+  weights?: Record<string, number>;
+  /** The decision made at the date's close: target shares by ticker. */
+  decision?: Record<string, number>;
+}
+
+/** The same tickers with the same shares (`===`), or absent on both. */
+function sameShares(
+  a: Record<string, number> | undefined,
+  b: Record<string, number> | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.prototype.hasOwnProperty.call(b, k) || a[k] !== b[k]) return false;
+  }
+  return true;
+}
+
 export interface RefProjectionInput {
   /** Raw bars of every series, all ending on the same date h. */
   history: Record<string, readonly RefBar[]>;
   /** The simulated sessions after h, strictly ascending; the last is the goal date. */
   future: readonly string[];
-  /** The caller's run: equity on h and every future session. */
-  run: (bars: Record<string, RefBar[]>) => readonly RefEquitySample[];
+  /** The caller's run: equity on h and every future session, optionally weights and decisions. */
+  run: (bars: Record<string, RefBar[]>) => readonly RefProjectionSample[];
   initial: number;
   monthly: number;
   goal: number;
@@ -534,7 +559,7 @@ export function refGoalProjection(input: RefProjectionInput): RefStatistic<RefPr
   const L = input.future.length;
   const ends: number[] = [];
   let reached = 0;
-  let pastOfPath0: (readonly [string, number])[] = [];
+  let pastOfPath0: RefProjectionSample[] = [];
   for (let path = 0; path < paths; path++) {
     const rng = new RefRandom(input.seed, path);
     const draws = refStationaryBootstrap(rng, sampleDates.length, L, meanBlock);
@@ -563,13 +588,22 @@ export function refGoalProjection(input: RefProjectionInput): RefStatistic<RefPr
     }
 
     const out = input.run(bars);
-    // Look-ahead guard: the output up to h (the real history) is path 0's on every path.
-    const past = out.filter((x) => x.date <= h).map((x) => [x.date, x.equity] as const);
+    // Look-ahead guard: the output up to h (the real history), its dates, equities, weights and
+    // decisions, is path 0's on every path.
+    const past = out.filter((x) => x.date <= h);
     if (path === 0) pastOfPath0 = past;
     else {
       const same =
         past.length === pastOfPath0.length &&
-        past.every((x, i) => x[0] === pastOfPath0[i]![0] && x[1] === pastOfPath0[i]![1]);
+        past.every((x, i) => {
+          const y = pastOfPath0[i]!;
+          return (
+            x.date === y.date &&
+            x.equity === y.equity &&
+            sameShares(x.weights, y.weights) &&
+            sameShares(x.decision, y.decision)
+          );
+        });
       if (!same) {
         throw new Error(
           `reference projection: the run's output up to ${h} differs on path ${path} (look-ahead)`,

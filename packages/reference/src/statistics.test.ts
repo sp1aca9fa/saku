@@ -464,11 +464,23 @@ describe('reference PBO (CSCV)', () => {
       reason(refPbo({ trials: [make(up), flatLater], cashReturn: zeroCash, partitions: 2 })),
     ).toBe('noDispersion');
     // A constant non-zero return in block 1: (S2 - S1^2/m)/(m - 1) leaves only rounding, below
-    // the scale-aware floor 1e-14 x S2 / m (a fixed 1e-24 would read it as a spread).
+    // the floor 1e-9 x S2 / m.
     const constLater = make((i) => (i < 20 ? up(i) : 0.0037));
     expect(
       reason(refPbo({ trials: [make(up), constLater], cashReturn: zeroCash, partitions: 2 })),
     ).toBe('noDispersion');
+  });
+  it('the floor at m = 4000: constants 0.00015 and 0.001 are noDispersion; 0.001 +- 1e-5 measured', () => {
+    // T = 8000, S = 2: each set is one block of 4000 rows. Block 0 swings, block 1 is the case.
+    const caseLater = (f: (i: number) => number) =>
+      equity(series(8000, (i) => (i < 4000 ? up(i) : f(i))));
+    const pbo = (t: RefEquitySample[]) =>
+      refPbo({ trials: [equity(series(8000, up)), t], cashReturn: zeroCash, partitions: 2 });
+    expect(reason(pbo(caseLater(() => 0.00015)))).toBe('noDispersion');
+    expect(reason(pbo(caseLater(() => 0.001)))).toBe('noDispersion');
+    // var = 1e-10 (x 4000/3999) against the floor 1e-9 x 1e-6: measured.
+    const p = pbo(caseLater((i) => 0.001 + (i % 2 === 0 ? 1e-5 : -1e-5)));
+    expect(value(p)).toMatchObject({ combinations: 2, rowsUsed: 8000 });
     expect(() =>
       refPbo({ trials: [make(up), make(down)], cashReturn: zeroCash, partitions: 3 }),
     ).toThrow();
@@ -889,6 +901,30 @@ describe('reference goal projection', () => {
     // The same past on every path passes.
     const steady = (b: Record<string, RefBar[]>) => [{ date: dates[398]!, equity: 1 }, ...runB(b)];
     expect(refGoalProjection({ ...base, run: steady }).ok).toBe(true);
+
+    // One-day look-ahead: the decision at h reads the bar of h + 1. With next-day execution the
+    // equity at h is unchanged, so only the returned decision (or weights) shows it.
+    const many = { ...base, paths: 20 };
+    const upNext = (b: Record<string, RefBar[]>) => (b.B![400]!.close > b.B![399]!.close ? 1 : 0);
+    const withDecision = (b: Record<string, RefBar[]>) =>
+      runB(b).map((x) =>
+        x.date === h2 ? { ...x, decision: { B: upNext(b), CASH_USD: 1 - upNext(b) } } : x,
+      );
+    expect(refGoalProjection({ ...many, run: runB }).ok).toBe(true); // equity alone misses it
+    expect(() => refGoalProjection({ ...many, run: withDecision })).toThrow(/look-ahead/);
+    const withWeights = (b: Record<string, RefBar[]>) =>
+      runB(b).map((x) => (x.date === h2 ? { ...x, weights: { B: upNext(b) } } : x));
+    expect(() => refGoalProjection({ ...many, run: withWeights })).toThrow(/look-ahead/);
+    // A decision that reads only the past passes; absent on one path and present on another fails.
+    const fixed = (b: Record<string, RefBar[]>) =>
+      runB(b).map((x) => (x.date === h2 ? { ...x, decision: { B: 1 }, weights: { B: 1 } } : x));
+    expect(refGoalProjection({ ...many, run: fixed }).ok).toBe(true);
+    let calls = 0;
+    const sometimes = (b: Record<string, RefBar[]>) => {
+      calls++;
+      return calls === 1 ? fixed(b) : runB(b);
+    };
+    expect(() => refGoalProjection({ ...many, run: sometimes })).toThrow(/look-ahead/);
   });
   it('sample days need the previous common date as every series previous bar', () => {
     const b = growing(300).filter((x) => x.date !== '2024-03-01');

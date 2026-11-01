@@ -582,8 +582,8 @@ export function refPbo(input: RefTrialsInput & { partitions?: number }): RefStat
     const m = blocks.length * b;
     const variance = (Q - (A * A) / m) / (m - 1);
     // Floor scaled with the returns' size: for a constant return the subtraction leaves only
-    // rounding of about 1e-16 x S2.
-    const floor = Math.max(REF_DISPERSION_FLOOR * REF_DISPERSION_FLOOR, (1e-14 * Q) / m);
+    // rounding, growing with the rows (about m x 1e-16 of S2 / m); 1e-9 leaves a wide margin.
+    const floor = Math.max(REF_DISPERSION_FLOOR * REF_DISPERSION_FLOOR, (1e-9 * Q) / m);
     if (!(variance > floor)) return undefined;
     return A / m / Math.sqrt(variance);
   };
