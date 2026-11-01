@@ -371,6 +371,26 @@ function compareD(
           skipped.push({ date, currency: s.currency!, kind: 'distribution' });
           continue;
         }
+        // Both sides report a distribution and the issuer's record has no currency (stored before
+        // the store refused them, C17): unknown, not the fund's currency. Not compared (yellow,
+        // the layer's cap: a distribution never goes beyond it), as a NAV without a currency.
+        if (
+          ev.check === 'distribution_match' &&
+          s &&
+          s.currency === undefined &&
+          ev.a !== ev.none &&
+          ev.b !== ev.none
+        ) {
+          out.push({
+            ...base,
+            check: ev.check,
+            date,
+            status: cap('yellow'),
+            expected: ev.a,
+            message: 'not compared: distribution currency missing',
+          });
+          continue;
+        }
         if (!s && publishesNav) {
           // A NAV source without a record that day: the event cannot be compared (unknown).
           out.push({

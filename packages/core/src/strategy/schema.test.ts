@@ -131,7 +131,7 @@ describe('Strategy schema: a plain price against a fixed level', () => {
     const issue = r.error!.issues.find((i) => i.message.includes('fixed level'));
     expect(issue?.path).toEqual(path);
     expect(issue?.message).toMatch(/split rescales earlier plain prices/);
-    expect(issue?.message).toMatch(/totalReturn: true/);
+    expect(issue?.message).toMatch(/its own average/);
   });
 
   it.each([

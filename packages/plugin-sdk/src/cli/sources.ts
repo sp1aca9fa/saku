@@ -295,7 +295,9 @@ if (tool === 'sources' && command === 'list') {
   if (!r.ok) fail(r.error);
   console.log(
     `Resolved the ${ticker} event dated ${date}: from the next run on, the fund is no longer red ` +
-      'for it. The event stays out of the series (never moved to a session).',
+      'for it (the daily run re-grades its last 10 sessions; registration reads the full history, ' +
+      'so run `pnpm verify` before registering a strategy that reads it). The event stays out of ' +
+      'the series (never moved to a session).',
   );
 } else if (tool === 'csv' && command === 'import') {
   const file = rest[0] && !rest[0].startsWith('--') ? rest[0] : fail('Name the CSV file.');

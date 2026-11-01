@@ -146,6 +146,26 @@ describe('layer D (issuer reconciliation)', () => {
     });
   });
 
+  it('a distribution both sides report on a record without a currency is not compared (yellow)', () => {
+    const records = navs().map((r, i) =>
+      i === 2 ? { date: r.date, nav: r.nav!, distribution: 0.5 } : r,
+    );
+    const d = of(layerD(primary, records, opts), 'distribution_match');
+    expect(d).toEqual([
+      expect.objectContaining({
+        date: dates[2],
+        status: 'yellow',
+        message: 'not compared: distribution currency missing',
+      }),
+    ]);
+    expect(d[0]!.deviation).toBeUndefined();
+    // One side only stays compared (a mismatch), currency or not.
+    const none = navs().map((r, i) => (i === 2 ? { date: r.date, nav: r.nav! } : r));
+    expect(of(layerD(primary, none, opts), 'distribution_match')[0]).toMatchObject({
+      message: 'event missing in issuer data',
+    });
+  });
+
   it('a distribution on one side only is a mismatch in any currency (no rate needed)', () => {
     // The issuer (XXX) pays 0.3 on the 6th, where the primary pays nothing.
     const extra = navs().map((r, i) =>

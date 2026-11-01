@@ -44,9 +44,10 @@ export const Comparison = z.strictObject(comparison);
  * A plain price or its average (`totalReturn: false`) compared with a fixed level (decisions log
  * 2026-11-01, C18 (a)): a split rescales every earlier plain price, so the same level means
  * something else before and after one (a 2:1 split halves the price and the comparison flips with
- * nothing having happened). Refused. A total-return series is not rescaled by a split, and a
- * fund compared with its own average is scale-free; volatility is a percentage, so it may be
- * compared with a level.
+ * nothing having happened). Refused. A fund compared with its own average is scale-free; volatility is
+ * a percentage, so it may be compared with a level. A total-return series against a level is not
+ * rescaled by a split but depends on where the stored history starts (open decision C26), so the
+ * message does not suggest it.
  */
 export function plainPriceAgainstLevel(c: { left: Operand; right: Operand }): boolean {
   const plain = (o: Operand) =>
@@ -57,8 +58,8 @@ export function plainPriceAgainstLevel(c: { left: Operand; right: Operand }): bo
 
 export const PLAIN_PRICE_AGAINST_LEVEL =
   'a plain price (totalReturn: false) is compared with a fixed level: a split rescales earlier ' +
-  'plain prices, so the level would mean something else after one. Compare the total return ' +
-  '(totalReturn: true), or the fund with its own average, instead';
+  'plain prices, so the level would mean something else after one. Compare the fund with its own ' +
+  'average, or use a percentage (volatility) against the level, instead';
 
 export const Signal = z.discriminatedUnion('type', [
   z.strictObject({ id: z.string().min(1), type: z.literal('compare'), ...comparison }),

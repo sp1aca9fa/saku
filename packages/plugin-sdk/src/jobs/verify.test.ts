@@ -1323,11 +1323,14 @@ describe('verify: a dividend a late-listing secondary has not listed yet', () =>
     expect(g.results).toContain('dividend_match late 2026-01-07 red event missing in secondary');
     expect(g.results.some((r) => r.startsWith('dividend_pending'))).toBe(false);
     expect(g.health).toMatch(/^red .*B\.dividend_match@late/);
-    // Within the lag on the run's own date (120 days): still pending, green (a full pass
-    // stores only what is not green: no dividend result and no symbol row for the day).
-    const within = await graded({ mode: 'full', to: '2026-05-07', other: withDividend });
-    expect(within.results).toEqual([]);
-    expect(within.health).toBeUndefined();
+    // Within the lag on the run's own date (120 days): still pending, green. A daily run stores
+    // every result, so the green dividend_pending is observed directly (a full pass stores only
+    // what is not green).
+    const within = await graded({ mode: 'daily', to: '2026-05-07', other: withDividend });
+    expect(within.results).toContain(
+      'dividend_pending late 2026-01-07 green not listed by late yet; confirmed by other',
+    );
+    expect(within.results.some((r) => r.startsWith('dividend_match late'))).toBe(false);
   });
 
   it('a source without the declaration: unchanged (red)', async () => {
