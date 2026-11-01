@@ -132,6 +132,8 @@ Notation, `MIN_RETURNS`, `MIN_SPAN_DAYS`, `DISPERSION_FLOOR`, `TIE`, `mean`, `sd
 
 **Near tie** (the near-tie rule, relative): `a` and `b` are tied when `abs(a - b) <= TIE x max(abs(a), abs(b))` (two zeros are tied). A comparison that decides something ("beats", "is the best", a rank) treats tied values as equal, so rounding never flips a result between two implementations.
 
+**Caller errors and the order of reasons** (settled 2026-11-02 from the core vs reference comparison). A caller error throws before any no-value reason is considered: a malformed series, window, grid or bar; `selected` outside 0..M-1 (so the DSR with no trial throws); `partitions` odd or below 2; `folds` below 2; Phi or PhiInv of NaN; a projection bar with a negative `divCash` or a `closeIsSplitAdjusted` that is not a boolean; a session missing from the run's output. Only then the no-value reasons, in the order each section lists them; for PBO, fewer than 2 trials (`tooFewTrials`) comes first, before any per-trial reason (the DSR is defined for one trial). A walk-forward fold with no point of its own has no `end` (undefined) and no value. Each crisis replay result repeats its window's `source`.
+
 ### Random numbers
 
 One generator, fully specified so core and reference draw the same numbers.
