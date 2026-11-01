@@ -434,5 +434,60 @@
       "holdingsMissing": "No value: what the strategy held is missing on at least one day.",
       "grossMissing": "No value: no run without costs to compare with."
     }
+  },
+  "statistics": {
+    "deflatedSharpe": {
+      "name": "Deflated Sharpe ratio",
+      "tooltip": "The confidence (0 to 1) that the strategy's true Sharpe ratio is above the best one luck alone would give among the variants tried. It allows for how many effectively independent variants were tried and for skewed, fat-tailed returns.",
+      "why": "Trying many variants and keeping the best makes any backtest look good. This asks whether the result beats what the best of that many lucky tries would show.",
+      "example": "0.95: 95% confidence the edge is not luck after allowing for 20 independent variants tried. 0.5 or less: luck explains the result as well."
+    },
+    "overfittingProbability": {
+      "name": "Probability of backtest overfitting",
+      "tooltip": "Over many ways of splitting the history in two halves, how often the variant that looked best in one half did no better than the middle of the pack in the other half (combinatorially symmetric cross-validation).",
+      "why": "A high value means picking the best backtest mostly picks luck: what looked best tends not to stay best.",
+      "example": "0.1: the best-looking variant stayed above the middle in 9 of 10 splits. 0.5: picking the best was no better than picking at random."
+    },
+    "effectiveTrials": {
+      "name": "Effective number of trials",
+      "tooltip": "How many truly different variants were tried: variants that move together count as fewer. Computed from the average correlation of their daily returns.",
+      "why": "The more independent tries, the better the best one looks by luck alone; the luck checks use this number, not the raw count.",
+      "example": "50 variants with an average correlation of 0.9 count as about 5.9 independent trials."
+    },
+    "walkForward": {
+      "name": "Time stability",
+      "tooltip": "The history is cut into up to 10 equal calendar periods of at least a year each; in each, the strategy's Sharpe ratio is compared with the benchmark's. The strategy's settings stay the same in every period.",
+      "why": "A strategy that won only in one lucky stretch is fragile; winning in most periods is more convincing.",
+      "example": "Won in 7 of 10 periods: the strategy had the higher Sharpe ratio in 7 periods."
+    },
+    "crisisSurvival": {
+      "name": "Crisis survival",
+      "tooltip": "The deepest fall of the strategy and of the benchmark inside each major market crisis the data covers (from the S&P 500's peak to its trough). Crises before the data starts are shown as not covered, never as passed.",
+      "why": "Protection matters most when markets crash; this shows whether the strategy fell less than the benchmark when it counted.",
+      "example": "2007-2009: strategy -18%, benchmark -55%, so it fell less deep.",
+      "windows": {
+        "dotCom": "Dot-com crash (2000-2002)",
+        "financialCrisis": "Financial crisis (2007-2009)",
+        "covid": "COVID-19 crash (2020)",
+        "rates2022": "Rate-rise decline (2022)"
+      }
+    },
+    "goalProbability": {
+      "name": "Chance of reaching the goal",
+      "tooltip": "The share of simulated futures (10,000 by default) in which the strategy reaches the goal amount by the goal date, contributions included. Futures are built from past daily market moves, resampled in blocks of about a month. The range shows simulation noise only.",
+      "why": "It turns a goal into a chance with a range instead of one projected number. It assumes the future resembles the sampled past; a past without a crisis says nothing about one.",
+      "example": "62% (61% to 63%): in about 62 of 100 simulated futures, 1,000,000 plus 30,000 a month grew to at least 3,000,000 in 5 years."
+    },
+    "noValue": {
+      "tooShort": "No value: the history is too short for this check.",
+      "equityNotPositive": "No value: a strategy or variant lost everything (its value reached zero or below).",
+      "cashRateMissing": "No value: the cash rate is unknown on at least one day.",
+      "noDispersion": "No value: at least one variant had no swings to measure (for example, only cash was held).",
+      "noDrawdown": "No value: there was no fall from a high.",
+      "holdingsMissing": "No value: what the strategy held is missing on at least one day.",
+      "grossMissing": "No value: no run without costs to compare with.",
+      "tooFewTrials": "No value: fewer variants than this check compares.",
+      "notCovered": "Not covered: the data does not span this period."
+    }
   }
 }

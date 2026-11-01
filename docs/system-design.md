@@ -44,7 +44,7 @@ flowchart LR
 | `packages/auth` | Passwords, TOTP, backup codes, secret encryption | A1 (tables, CLI), D1 (UI) |
 | `packages/core` | Engine: adjusted series, indicators, signals, strategies, execution models, backtests, metrics (`docs/analytics.md`), tax engine | A2 (minimal), B, C |
 | `packages/reference` | Independent core math (not tax) | B1 |
-| `packages/analytics` | Robustness, overfitting statistics, Monte Carlo, finder | B3, F3 |
+| `packages/core/src/analytics` | Metrics, overfitting statistics, Monte Carlo (B3); robustness and finder later (B3, F3) | B3, F3 |
 | `apps/web` | UI, server actions (light only), admin pages | D (admin bits earlier as needed) |
 | `packages/mcp` | Read-only MCP server | E |
 
