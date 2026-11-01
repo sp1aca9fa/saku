@@ -48,7 +48,7 @@ const bar = (date: string, close: number, extra: Partial<RawBar> = {}): RawBar =
 async function setup() {
   const db = await testDb();
   await upsertSymbols(db, [
-    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
     {
       ticker: 'AAA2',
       tier: 0,
@@ -90,7 +90,14 @@ describe('symbols', () => {
     });
     await expect(
       upsertSymbols(db, [
-        { ticker: 'X', tier: 0, assetClass: 'equity', currency: 'USD', underlying: 'NOPE' },
+        {
+          ticker: 'X',
+          tier: 0,
+          assetClass: 'equity',
+          currency: 'USD',
+          leverageFactor: 1,
+          underlying: 'NOPE',
+        },
       ]),
     ).rejects.toThrow(/Unknown symbol/);
   });

@@ -49,8 +49,8 @@ async function run(
 async function setup() {
   const db = await testDb();
   await upsertSymbols(db, [
-    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
-    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' },
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
   ]);
   const ids = { AAA: (await symbolId(db, 'AAA'))!, BBB: (await symbolId(db, 'BBB'))! };
   // Canonical bars from the first date (a symbol's history starts at its first one).
@@ -271,7 +271,9 @@ describe('healthReport', () => {
 
   it('an active symbol with no canonical bar is not graded', async () => {
     const { db, full } = await setup();
-    await upsertSymbols(db, [{ ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     await full('weekly', D[3]);
     const [day] = await healthReport(db, { dates: [D[3]], sessions });
     expect(day!.overall.status).toBe('green');
@@ -281,7 +283,9 @@ describe('healthReport', () => {
 
   it('an active symbol with no bar yet is left out before its inception date', async () => {
     const { db, full } = await setup();
-    await upsertSymbols(db, [{ ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     await db
       .update(schema.symbols)
       .set({ inceptionDate: D[3] })
@@ -297,7 +301,9 @@ describe('healthReport', () => {
     const { db, ids, full } = await setup();
     await full('weekly', D[3], D[3], { [ids.BBB]: null });
     // Added with its history after the run: canonical bars, but no range in that run.
-    await upsertSymbols(db, [{ ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     const ccc = (await symbolId(db, 'CCC'))!;
     await db
       .insert(schema.bars)
@@ -443,7 +449,9 @@ describe('healthReport on what verify stores', () => {
 
   it('shows the daily red, then the corrected full pass green', async () => {
     const db = await testDb();
-    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     await seedSourceRoles(db, [
       { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },
       { key: 's', dataKind: 'bars', suggestedRole: 'secondary' },
@@ -501,8 +509,8 @@ describe('healthReport on what verify stores', () => {
   it('a symbol with canonical bars but no primary bar is red primary_missing, not left out', async () => {
     const db = await testDb();
     await upsertSymbols(db, [
-      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
-      { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' },
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+      { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
     ]);
     await seedSourceRoles(db, [
       { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },

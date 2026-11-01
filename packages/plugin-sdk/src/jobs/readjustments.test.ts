@@ -14,7 +14,9 @@ import {
 
 async function setup() {
   const db = await testDb();
-  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  await upsertSymbols(db, [
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+  ]);
   return { db, id: (await symbolId(db, 'AAA'))! };
 }
 

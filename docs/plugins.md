@@ -159,7 +159,7 @@ in core computes with them. It has no methods and makes no requests. Start from
 |---|---|
 | `info` | `key` (the `tax_regime` setting; never changed once users have tax data), `kind: 'tax_regime'`, `version` (raised with every change of a rule, e.g. `2026.1`), `nameKey`, `country` (ISO 3166-1 alpha-2), `currency` (ISO 4217: taxes and limits are computed in it), `sources` (links to the official rules, at least one) |
 | `yearStart` | First day of the regime year as `MM-DD` (`01-01`, `04-06`): annual limits and carryforward count in these years |
-| `yearDate`, `fxDate` | `trade_date` or `settlement_date`: which date of a trade places it in a regime year, and which date's tax rate converts it |
+| `yearDate`, `fxDate` | Which date of a trade places it in a regime year, and which date's tax rate converts it. Only `trade_date` is accepted for now: `settlement_date` is in the type but refused until a settlement lag can be declared (without one the date is unknown, and a rate on a settlement date may be later than what is known at the decision, `asOf`: it would have to show as pending, never fall back to the trade date's rate) |
 | `accountTypes` | Each: `key` (a `taxable` one is required, the default for timing and leveraged strategies), `treatment` (`taxable` or `tax_advantaged`), `nameKey`, `descriptionKey`, then the rows below |
 | `eligibility` | `leveraged` (whether leveraged or inverse products may be held, by `symbols.leverage_factor`; the symbol import requires every symbol to state it), `assetClasses` (`'all'` or a list of `symbols.asset_class` values), `designatedOnly` (only products on a list an authority keeps; where the list comes from is not in the contract yet, so such an account type holds nothing eligible until it is), `purchaseModes` (`lump_sum`, `periodic`) |
 | `quota` | `annual` and `lifetime` limits (at least one; leave `quota` out for none) and `release`: which limits a sale frees (`limits`), at `book_value` or `proceeds`, from the `next_year` or the `trade_date`. No `release`: a sale frees nothing |
@@ -184,10 +184,15 @@ Rules the loader enforces (a regime that breaks one is refused whole, with every
   names something declared.
 - Every text key resolves in the English texts; another language names no key English lacks.
   Write amounts and rates in texts as `{placeholders}` the app fills from the declaration, so a
-  text never disagrees with a rule. Each kind of text receives only its own placeholders
-  (`REGIME_TEXT_PLACEHOLDERS`: an account description `gainsRate`, `dividendsRate`, `annual`,
-  `lifetime`, `carryforwardYears`; a loss condition `carryforwardYears`; names and other
-  conditions none); a text using another one, or braces other than `{name}`, is refused, and the
+  text never disagrees with a rule. A text receives only the placeholders its declaration has a
+  value for (`REGIME_TEXT_PLACEHOLDERS`): an account description `gainsRate` and `dividendsRate`,
+  `annual` and `lifetime` when the account type declares that limit, `groupAnnual` and
+  `groupLifetime` when exactly one of its groups declares one, `carryforwardYears` when the
+  carryforward is a number of years; a loss condition `carryforwardYears` only when it applies to
+  the carryforward and that is a number; names and credit conditions none. A text using another
+  one, or braces other than `{name}`, is refused. `regimeTextValues(regime, accountKey,
+  language)` builds the values from the declaration (rates as percentages, limits in the
+  regime's currency, every digit kept; amounts and rates have at most 20 decimals), and the
   regime's translator throws when a placeholder is left unfilled.
 - An account type's limits are within its groups' limits; a loss condition applies to something
   the account type has (offsets, a carryforward above 0 years).

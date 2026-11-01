@@ -32,7 +32,9 @@ const SECRET = 'test-secret-test-secret-test-secret';
 
 async function setup() {
   const db = await testDb();
-  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  await upsertSymbols(db, [
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+  ]);
   const aaa = (await symbolId(db, 'AAA'))!;
   const admin = await createUser(db, {
     username: 'ada',

@@ -67,8 +67,8 @@ const source = (key: string): BarSource => ({
 async function setup(o: { cash?: boolean } = {}) {
   const db = await testDb();
   await upsertSymbols(db, [
-    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
-    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' },
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
   ]);
   const owner = await createUser(db, {
     username: 'alex',

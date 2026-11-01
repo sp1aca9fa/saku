@@ -458,9 +458,16 @@ export interface TaxRegime {
   info: TaxRegimeInfo;
   /** First day of the regime year (`MM-DD`), for annual limits and carryforward. */
   yearStart: string;
-  /** Which date of a trade places it in a regime year (quotas, gains, carryforward). */
+  /**
+   * Which date of a trade places it in a regime year (quotas, gains, carryforward).
+   * `settlement_date` is refused for now: no settlement lag is declared anywhere yet.
+   */
   yearDate: 'trade_date' | 'settlement_date';
-  /** Which date's tax rate (`fx`) converts a trade. */
+  /**
+   * Which date's tax rate (`fx`) converts a trade. `settlement_date` is refused for now: without
+   * a declared settlement lag the date is unknown, and a rate dated after what is known (`asOf`)
+   * would have to show as pending, never be replaced by the trade date's rate.
+   */
   fxDate: 'trade_date' | 'settlement_date';
   accountTypes: TaxAccountType[];
   quotaGroups?: QuotaGroup[];

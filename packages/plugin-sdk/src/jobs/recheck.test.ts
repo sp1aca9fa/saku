@@ -230,7 +230,7 @@ async function setup(
   const n = o.days ?? 5;
   const db = await testDb();
   await upsertSymbols(db, [
-    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
     {
       ticker: 'AAA2',
       tier: 0,

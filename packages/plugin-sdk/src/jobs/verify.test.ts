@@ -48,7 +48,14 @@ const INDEX = [5000, 5050, 5100.5, 5049.495];
 async function setup(o: { aaaPrimaryDays?: number } = {}) {
   const db = await testDb();
   await upsertSymbols(db, [
-    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', indexSeries: 'IDX' },
+    {
+      ticker: 'AAA',
+      tier: 0,
+      assetClass: 'equity',
+      currency: 'USD',
+      leverageFactor: 1,
+      indexSeries: 'IDX',
+    },
     {
       ticker: 'AAA2',
       tier: 0,
@@ -249,7 +256,7 @@ describe('verify', () => {
     ) {
       const db = await testDb();
       await upsertSymbols(db, [
-        { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
+        { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
         {
           ticker: 'AAA2',
           tier: 0,
@@ -804,7 +811,9 @@ describe('verify', () => {
 
   it('grades a symbol with no primary bar red primary_missing on its dates', async () => {
     const { db } = await setup();
-    await upsertSymbols(db, [{ ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     const ccc = (await symbolId(db, 'CCC'))!;
     const graded = async (mode: 'daily' | 'full', from?: string) => {
       const runId = await startRun(db, mode === 'daily' ? 'daily' : 'checks');
@@ -1267,7 +1276,9 @@ describe('verify: a dividend a late-listing secondary has not listed yet', () =>
     mode?: 'daily' | 'full';
   }) {
     const db = await testDb();
-    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     await seedSourceRoles(db, [
       { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },
       { key: 'late', dataKind: 'bars', suggestedRole: 'secondary' },

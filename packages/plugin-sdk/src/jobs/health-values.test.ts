@@ -29,7 +29,9 @@ const FETCHED = '2026-01-08T00:00:00.000Z';
  */
 async function setup() {
   const db = await testDb();
-  await upsertSymbols(db, [{ ticker: 'UND', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  await upsertSymbols(db, [
+    { ticker: 'UND', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+  ]);
   await upsertSymbols(db, [
     {
       ticker: 'LEV',
@@ -571,7 +573,9 @@ describe('ValuesReader against verify', () => {
 describe('ValuesReader, a leverage streak', () => {
   it('shows the two days before a red streak day as compared now', async () => {
     const db = await testDb();
-    await upsertSymbols(db, [{ ticker: 'UUU', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'UUU', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     await upsertSymbols(db, [
       {
         ticker: 'FFF',

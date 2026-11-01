@@ -8,6 +8,7 @@ import { loadPlugins } from './registry';
 import {
   compareDecimalText,
   installTaxRegime,
+  regimeTextValues,
   regimeTranslator,
   setTaxRegime,
   taxRegimeFingerprint,
@@ -28,7 +29,7 @@ function regime(key = 'testland'): TaxRegime {
       sources: ['https://tax.testland.test/'],
     },
     yearStart: '01-01',
-    yearDate: 'settlement_date',
+    yearDate: 'trade_date',
     fxDate: 'trade_date',
     accountTypes: [
       {
@@ -107,7 +108,7 @@ function regime(key = 'testland'): TaxRegime {
     foreignWithholding: [{ country: 'QA', rate: '0.15' }],
     transfers: [{ from: 'growth', to: 'taxable' }],
     texts: {
-      en: { name: 'Testland', a: 'A', c: 'Only if you file; {carryforwardYears} years.' },
+      en: { name: 'Testland', a: 'A', c: 'Only if you file.' },
       ja: { a: 'エー' },
     },
   };
@@ -227,9 +228,9 @@ describe('tax regime declarations', () => {
     const rule = regime();
     rule.accountTypes[0]!.tax.dividends = '0.99';
     expect(taxRegimeFingerprint(rule)).not.toBe(base);
-    const yearDate = regime();
-    yearDate.yearDate = 'trade_date';
-    expect(taxRegimeFingerprint(yearDate)).not.toBe(base);
+    const year = regime();
+    year.yearStart = '04-01';
+    expect(taxRegimeFingerprint(year)).not.toBe(base);
   });
 
   it('a changed declaration is not used until set again (refused once users have tax data)', async () => {
@@ -247,9 +248,89 @@ describe('tax regime declarations', () => {
   });
 
   it('fills placeholders and throws on one left unfilled', () => {
-    const t = regimeTranslator(regime(), 'ja');
+    const r = regime();
+    r.accountTypes[0]!.losses.carryforwardYears = 3;
+    r.texts.en!.c = 'Only if you file; {carryforwardYears} years.';
+    expect(taxRegimeProblems(r)).toEqual([]);
+    const t = regimeTranslator(r, 'ja');
     expect(t('c', { carryforwardYears: 3 })).toBe('Only if you file; 3 years.');
     expect(() => t('c')).toThrow(/text c needs a value for \{carryforwardYears\}/);
     expect(t('a')).toBe('エー');
+  });
+
+  it('refuses settlement dates until a settlement lag is declared', () => {
+    for (const field of ['yearDate', 'fxDate'] as const) {
+      const r = regime();
+      r[field] = 'settlement_date';
+      expect(taxRegimeProblems(r)).toEqual([
+        `${field}: settlement_date is refused for now: no settlement lag is declared yet; use trade_date`,
+      ]);
+    }
+  });
+
+  it('allows a placeholder only where the declaration has its value', () => {
+    const withText = (key: string, text: string, change?: (r: TaxRegime) => void) => {
+      const r = regime();
+      r.texts.en![key] = text;
+      change?.(r);
+      return taxRegimeProblems(r);
+    };
+    const describe = (n: number, text: string, change?: (r: TaxRegime) => void) =>
+      withText(`d${n}`, text, (r) => {
+        r.accountTypes[n]!.descriptionKey = `d${n}`;
+        change?.(r);
+      });
+    // growth: annual and lifetime of its own; one group with a lifetime; carryforward 0 years.
+    expect(
+      describe(
+        1,
+        '{gainsRate} {dividendsRate} {annual} {lifetime} {groupLifetime} {carryforwardYears}',
+      ),
+    ).toEqual([]);
+    expect(describe(1, '{groupAnnual}')).toEqual([
+      'texts.en.d1: placeholder {groupAnnual} is not one this text receives (gainsRate, dividendsRate, annual, lifetime, groupLifetime, carryforwardYears)',
+    ]);
+    // plan: no lifetime of its own.
+    expect(describe(2, '{lifetime}')[0]).toMatch(/placeholder \{lifetime\} is not one/);
+    // Two groups declaring a lifetime: which one is ambiguous, so neither.
+    expect(
+      describe(2, '{groupLifetime}', (r) => {
+        r.quotaGroups!.push({ ...r.quotaGroups![0]!, key: 'second', accountTypes: ['plan'] });
+      })[0],
+    ).toMatch(/placeholder \{groupLifetime\} is not one/);
+    // taxable: unlimited carryforward, no number of years.
+    expect(describe(0, '{carryforwardYears}')[0]).toMatch(
+      /placeholder \{carryforwardYears\} is not one/,
+    );
+    // A condition on offsets only gets no carryforward years.
+    expect(
+      withText('c', '{carryforwardYears}', (r) => {
+        r.accountTypes[0]!.losses.carryforwardYears = 3;
+        r.accountTypes[0]!.losses.conditions[0]!.appliesTo = ['offsets'];
+      }),
+    ).toEqual(['texts.en.c: placeholder {carryforwardYears} is not one this text receives (none)']);
+  });
+
+  it('builds placeholder values from the declaration, every digit kept, never empty', () => {
+    const r = regime();
+    r.accountTypes[0]!.tax.realizedGains = '0.123456789012345678';
+    const taxable = regimeTextValues(r, 'taxable', 'en');
+    expect(taxable).toEqual({ gainsRate: '12.3456789012345678%', dividendsRate: '100%' });
+    // Intl puts a no-break space after the currency code.
+    expect(regimeTextValues(r, 'growth', 'en')).toEqual({
+      gainsRate: '0%',
+      dividendsRate: '0%',
+      annual: 'XTS\u00a02,400,000',
+      lifetime: 'XTS\u00a012,000,000',
+      groupLifetime: 'XTS\u00a018,000,000',
+      carryforwardYears: '0',
+    });
+    for (const a of r.accountTypes) {
+      expect(Object.values(regimeTextValues(r, a.key, 'ja')).every((v) => v !== '')).toBe(true);
+    }
+    expect(() => regimeTextValues(r, 'nowhere', 'en')).toThrow(/no account type nowhere/);
+    // More than 20 decimals cannot be shown exactly: refused.
+    r.accountTypes[0]!.tax.dividends = '0.000000000000000000001';
+    expect(taxRegimeProblems(r)).toEqual(['accountTypes[0].tax.dividends: at most 20 decimals']);
   });
 });

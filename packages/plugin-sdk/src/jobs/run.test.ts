@@ -78,7 +78,9 @@ const rates = cashRates(sessions, DATES, TARGET);
 
 async function setup(gate = true) {
   const db = await testDb();
-  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  await upsertSymbols(db, [
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+  ]);
   const owner = await createUser(db, {
     username: 'alex',
     passwordHash: 'x',
@@ -804,7 +806,9 @@ describe('a stand-in the primary later corrects', () => {
 
   it("waits while another dependency's stand-in is unresolved: no engine difference meanwhile", async () => {
     const { db, version } = await setup();
-    await upsertSymbols(db, [{ ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     // Reads AAA's last two returns (so D+1 reads D), holds BBB.
     const quiet = await registerVersion(db, {
       ownerId: version.ownerId,
@@ -1031,7 +1035,9 @@ describe('a stand-in the primary later corrects', () => {
 
     it('corrections proceed, the weekly run completes, the owner told once; a later entry and a late primary', async () => {
       const { db, version } = await setup();
-      await upsertSymbols(db, [{ ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+      await upsertSymbols(db, [
+        { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+      ]);
       // Reads AAA's last two returns (so D+1 reads D), holds BBB.
       const quiet = await registerVersion(db, {
         ownerId: version.ownerId,
@@ -1396,7 +1402,14 @@ describe('an index without publication times (known from the fetch)', () => {
   it("the run's own index check reads the values it fetched (no index_unavailable)", async () => {
     const { db } = await setup();
     await upsertSymbols(db, [
-      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', indexSeries: 'IDX' },
+      {
+        ticker: 'AAA',
+        tier: 0,
+        assetClass: 'equity',
+        currency: 'USD',
+        leverageFactor: 1,
+        indexSeries: 'IDX',
+      },
     ]);
     const { notifier } = fakeNotifier();
     const r = await runJob(
@@ -1419,7 +1432,14 @@ describe('an index without publication times (known from the fetch)', () => {
   it('weekly: a refetched index value reported differently is a revision, told with the bars', async () => {
     const { db } = await setup();
     await upsertSymbols(db, [
-      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', indexSeries: 'IDX' },
+      {
+        ticker: 'AAA',
+        tier: 0,
+        assetClass: 'equity',
+        currency: 'USD',
+        leverageFactor: 1,
+        indexSeries: 'IDX',
+      },
     ]);
     const { notifier, sent } = fakeNotifier();
     const clock = ticking();
@@ -1471,7 +1491,14 @@ describe('an index without publication times (known from the fetch)', () => {
   const vanish = async (later: SeriesSource, job: 'weekly' | 'daily') => {
     const { db } = await setup();
     await upsertSymbols(db, [
-      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', indexSeries: 'IDX' },
+      {
+        ticker: 'AAA',
+        tier: 0,
+        assetClass: 'equity',
+        currency: 'USD',
+        leverageFactor: 1,
+        indexSeries: 'IDX',
+      },
     ]);
     const { notifier, sent } = fakeNotifier();
     const clock = ticking();

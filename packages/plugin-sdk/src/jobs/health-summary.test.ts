@@ -37,8 +37,8 @@ async function run(
 async function setup() {
   const db = await testDb();
   await upsertSymbols(db, [
-    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
-    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' },
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
   ]);
   const ids = { AAA: (await symbolId(db, 'AAA'))!, BBB: (await symbolId(db, 'BBB'))! };
   const result = (

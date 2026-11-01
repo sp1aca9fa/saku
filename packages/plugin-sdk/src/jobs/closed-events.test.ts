@@ -58,8 +58,8 @@ const dividend = bar(SATURDAY, 100, { divCash: 0.5 });
 async function setup() {
   const db = await testDb();
   await upsertSymbols(db, [
-    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
-    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' },
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
   ]);
   await seedSourceRoles(db, [
     { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },

@@ -67,18 +67,27 @@ export function checkAdjCloseRounding(rounding: number, owner: string): void {
 const sameFactor = (a: number, b: number, rounding: number) =>
   Math.abs(a - b) <= rounding * Math.abs(b);
 
+/**
+ * A symbol as an admin declares it (a universe file, `pnpm symbols import`). The optional
+ * descriptive fields: left out, a re-import keeps the stored value; `null` clears it.
+ */
 export interface SymbolInput {
   ticker: string;
   tier: number;
   assetClass: string;
   currency: string;
-  leverageFactor?: number;
+  /**
+   * Daily leverage against the underlying: 1 for an unleveraged fund, 2 for 2x, -1 for inverse.
+   * Always stated: a default of 1 would let a leveraged fund pass a tax regime's "no leveraged
+   * products" rule.
+   */
+  leverageFactor: number;
   /** Ticker of the underlying, which must be listed earlier or already stored. */
-  underlying?: string;
-  issuer?: string;
-  indexSeries?: string;
-  /** ISO 3166-1 alpha-2 country the fund is domiciled in. */
-  domicile?: string;
+  underlying?: string | null;
+  issuer?: string | null;
+  indexSeries?: string | null;
+  /** ISO 3166-1 alpha-2 country the fund is domiciled in (withholding at source). */
+  domicile?: string | null;
 }
 
 const SYMBOL_FIELDS = [
@@ -94,11 +103,10 @@ const SYMBOL_FIELDS = [
 ];
 
 /**
- * A universe file's symbols (`pnpm symbols import`), checked whole: every symbol states its
- * leverage factor (1 for an unleveraged fund; a factor left out would read as 1 and let a
- * leveraged fund pass a tax regime's "no leveraged products" rule), a finite number other than
- * 0; a domicile, when given, is an ISO 3166-1 alpha-2 code; no unknown fields. Throws naming
- * every problem.
+ * Symbols checked whole (`upsertSymbols` and `pnpm symbols import`): a ticker, a tier (a whole
+ * number from 0), an asset class, an ISO 4217 currency, a stated leverage factor (a finite
+ * number other than 0); optional fields text or `null`, a domicile an ISO 3166-1 alpha-2 code;
+ * no unknown fields. Throws naming every problem.
  */
 export function parseSymbolList(value: unknown): SymbolInput[] {
   if (!Array.isArray(value)) throw new Error('A universe file is a JSON list of symbols.');
@@ -134,37 +142,47 @@ export function parseSymbolList(value: unknown): SymbolInput[] {
       );
     }
     for (const k of ['underlying', 'issuer', 'indexSeries'] as const) {
-      if (o[k] !== undefined && (typeof o[k] !== 'string' || o[k] === '')) {
-        problems.push(`${name}: ${k} must be text`);
+      if (o[k] !== undefined && o[k] !== null && (typeof o[k] !== 'string' || o[k] === '')) {
+        problems.push(`${name}: ${k} must be text (or null to clear it)`);
       }
     }
     if (
       o.domicile !== undefined &&
+      o.domicile !== null &&
       (typeof o.domicile !== 'string' || !/^[A-Z]{2}$/.test(o.domicile))
     ) {
-      problems.push(`${name}: domicile must be an ISO 3166-1 alpha-2 code`);
+      problems.push(`${name}: domicile must be an ISO 3166-1 alpha-2 code (or null to clear it)`);
     }
   });
-  if (problems.length > 0) throw new Error(`Universe file refused: ${problems.join('; ')}.`);
+  if (problems.length > 0) throw new Error(`Symbols refused: ${problems.join('; ')}.`);
   return value as SymbolInput[];
 }
 
-/** Adds symbols that are missing and updates the descriptive fields of those that exist. */
+/**
+ * Adds symbols that are missing and updates the declared fields of those that exist; the list is
+ * checked whole first (`parseSymbolList`), nothing written when any symbol is refused. An
+ * optional field left out keeps the stored value (a new symbol: none); `null` clears it.
+ */
 export async function upsertSymbols(db: Db, list: SymbolInput[]): Promise<void> {
+  parseSymbolList(list);
   for (const s of list) {
-    const underlyingSymbolId = s.underlying
-      ? ((await symbolId(db, s.underlying)) ??
-        failUnknown(`${s.ticker}'s underlying ${s.underlying}`))
-      : null;
+    const underlyingSymbolId =
+      s.underlying === undefined || s.underlying === null
+        ? s.underlying
+        : ((await symbolId(db, s.underlying)) ??
+          failUnknown(`${s.ticker}'s underlying ${s.underlying}`));
+    const optional = {
+      ...(underlyingSymbolId !== undefined && { underlyingSymbolId }),
+      ...(s.issuer !== undefined && { issuer: s.issuer }),
+      ...(s.indexSeries !== undefined && { indexSeries: s.indexSeries }),
+      ...(s.domicile !== undefined && { domicile: s.domicile }),
+    };
     const values = {
       tier: s.tier,
       assetClass: s.assetClass,
       currency: s.currency,
-      leverageFactor: s.leverageFactor ?? 1,
-      underlyingSymbolId,
-      issuer: s.issuer ?? null,
-      indexSeries: s.indexSeries ?? null,
-      domicile: s.domicile ?? null,
+      leverageFactor: s.leverageFactor,
+      ...optional,
     };
     await db
       .insert(symbols)

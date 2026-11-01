@@ -107,7 +107,9 @@ async function live(
   const url = `file:${join(dir, 'live.db')}`;
   const db: Db = createDb({ url });
   await migrateDb(db);
-  await upsertSymbols(db, [{ ticker: 'SPY', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  await upsertSymbols(db, [
+    { ticker: 'SPY', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+  ]);
   const owner = await createUser(db, {
     username: 'alex',
     passwordHash: 'x',

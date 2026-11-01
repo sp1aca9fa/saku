@@ -48,4 +48,39 @@ describe('Tier 0 universe template', () => {
     expect(() => parseSymbolList([{ ...ok, currency: 'usd' }])).toThrow(/currency/);
     expect(() => parseSymbolList({})).toThrow(/list/);
   });
+
+  it('upsertSymbols checks the list whole and keeps what a re-import leaves out', async () => {
+    const db = await testDb();
+    const spy = {
+      ticker: 'SPY',
+      tier: 0,
+      assetClass: 'equity',
+      currency: 'USD',
+      leverageFactor: 1,
+    };
+    await upsertSymbols(db, [{ ...spy, issuer: 'Fund Co', indexSeries: 'IDX', domicile: 'US' }]);
+    await upsertSymbols(db, [{ ...spy, ticker: 'SSO', leverageFactor: 2, underlying: 'SPY' }]);
+    // Left out: kept; the stated fields are updated.
+    await upsertSymbols(db, [{ ...spy, tier: 1 }]);
+    const row = async (t: string) => (await activeSymbols(db)).find((s) => s.ticker === t)!;
+    expect(await row('SPY')).toMatchObject({
+      tier: 1,
+      issuer: 'Fund Co',
+      indexSeries: 'IDX',
+      domicile: 'US',
+    });
+    await upsertSymbols(db, [{ ...spy, ticker: 'SSO', leverageFactor: 2 }]);
+    expect((await row('SSO')).underlyingSymbolId).toBe((await row('SPY')).id);
+    // null clears.
+    await upsertSymbols(db, [{ ...spy, issuer: null, domicile: null }]);
+    expect(await row('SPY')).toMatchObject({ issuer: null, indexSeries: 'IDX', domicile: null });
+    // A refused symbol stops the whole list before anything is written.
+    await expect(
+      upsertSymbols(db, [
+        { ...spy, ticker: 'NEW' },
+        { ...spy, ticker: 'BAD', leverageFactor: undefined as unknown as number },
+      ]),
+    ).rejects.toThrow(/BAD: leverageFactor must be stated/);
+    expect((await activeSymbols(db)).map((s) => s.ticker)).toEqual(['SPY', 'SSO']);
+  });
 });

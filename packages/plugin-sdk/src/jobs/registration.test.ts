@@ -75,7 +75,13 @@ async function setup(o: { tickers?: string[]; recordsFrom?: boolean } = {}) {
   const tickers = o.tickers ?? ['AAA'];
   await upsertSymbols(
     db,
-    tickers.map((ticker) => ({ ticker, tier: 0, assetClass: 'equity', currency: 'USD' })),
+    tickers.map((ticker) => ({
+      ticker,
+      tier: 0,
+      assetClass: 'equity',
+      currency: 'USD',
+      leverageFactor: 1,
+    })),
   );
   const ids: Record<string, number> = {};
   for (const t of tickers) {
@@ -252,7 +258,9 @@ describe('registrationProblems', () => {
 
     // Twelve red days: ten named, two counted.
     const many = await testDb();
-    await upsertSymbols(many, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(many, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     await setSetting(many, 'forward_records_from', D[0]);
     const id = (await symbolId(many, 'AAA'))!;
     const days = sessions.between('2026-01-02', '2026-01-20');
@@ -392,7 +400,9 @@ describe('registrationProblems', () => {
 
   it('lists the first 10 red bars and a count', async () => {
     const db = await testDb();
-    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     const id = (await symbolId(db, 'AAA'))!;
     const days = sessions.between('2026-01-02', '2026-01-20');
     await db
@@ -426,7 +436,9 @@ describe('registrationProblems', () => {
 
   it('refuses a ticker with no stored bars', async () => {
     const db = await testDb();
-    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     await setSetting(db, 'forward_records_from', D[0]);
     expect(await check(db)).toEqual(['AAA: no stored bars; run pnpm bootstrap, then pnpm verify.']);
   });
@@ -449,7 +461,9 @@ describe('registrationProblems on what verify stores', () => {
   /** `closedDay`: bars each source also has on days the market was closed. */
   async function verified(secondary: number[], closedDay: { p?: RawBar[]; s?: RawBar[] } = {}) {
     const db = await testDb();
-    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     await seedSourceRoles(db, [
       { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },
       { key: 's', dataKind: 'bars', suggestedRole: 'secondary' },

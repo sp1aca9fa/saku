@@ -108,7 +108,9 @@ async function dailyDone(db: Db, target: string) {
 
 async function setup() {
   const db = await testDb();
-  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  await upsertSymbols(db, [
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+  ]);
   const aaa = (await symbolId(db, 'AAA'))!;
   return { db, aaa };
 }

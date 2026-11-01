@@ -417,6 +417,31 @@
         }
       ],
       "message": "accountTypes\\[1\\]\\.quota: annual limit 1000000 is above the lifetime limit 999999.99 of quotaGroups\\[0\\]"
+    },
+    {
+      "path": ["yearDate"],
+      "value": "settlement_date",
+      "message": "yearDate: settlement_date is refused for now: no settlement lag is declared yet; use trade_date"
+    },
+    {
+      "path": ["fxDate"],
+      "value": "settlement_date",
+      "message": "fxDate: settlement_date is refused for now"
+    },
+    {
+      "path": ["texts", "en", "accounts", "saver", "description"],
+      "value": "Up to {lifetime} in all.",
+      "message": "texts\\.en\\.accounts\\.saver\\.description: placeholder \\{lifetime\\} is not one this text receives \\(gainsRate, dividendsRate, annual, carryforwardYears\\)"
+    },
+    {
+      "path": ["texts", "ja", "accounts", "general", "description"],
+      "value": "{annual}まで",
+      "message": "texts\\.ja\\.accounts\\.general\\.description: placeholder \\{annual\\} is not one"
+    },
+    {
+      "path": ["accountTypes", 0, "tax", "realizedGains"],
+      "value": "0.000000000000000000001",
+      "message": "realizedGains: at most 20 decimals"
     }
   ]
 }

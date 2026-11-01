@@ -20,8 +20,8 @@ const CLOSED_AT = '2026-02-01T10:00:00.000Z';
 async function setup() {
   const db = await testDb();
   await upsertSymbols(db, [
-    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
-    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' },
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
   ]);
   const ids = Object.fromEntries(
     (await db.select().from(symbols)).map((s) => [s.ticker, s.id] as const),

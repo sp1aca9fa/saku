@@ -54,6 +54,7 @@ async function setup(o: { indexed?: boolean } = {}) {
       tier: 0,
       assetClass: 'equity',
       currency: 'USD',
+      leverageFactor: 1,
       ...(o.indexed && { indexSeries: 'IDX' }),
     },
   ]);
@@ -78,7 +79,9 @@ const ok = (
 describe('spikeReport', () => {
   it('computes the gate from each day’s latest daily run', async () => {
     const db = await testDb();
-    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     await seedSourceRoles(db, [
       { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },
       { key: 's', dataKind: 'bars', suggestedRole: 'secondary' },
@@ -170,7 +173,9 @@ describe('spikeReport', () => {
   for (const [form, m] of Object.entries(missingBar)) {
     it(`counts a missing secondary bar the same way (${form} form)`, async () => {
       const { db, aaa } = await setup();
-      await upsertSymbols(db, [{ ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+      await upsertSymbols(db, [
+        { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+      ]);
       const bbb = (await symbolId(db, 'BBB'))!;
       const both = (r: Omit<Result, 'runId' | 'date'>) => [
         { ...r, symbolId: aaa },
@@ -212,7 +217,9 @@ describe('spikeReport', () => {
 
   it('counts every session in the range; one without a finished run fails (no run)', async () => {
     const db = await testDb();
-    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     await seedSourceRoles(db, [
       { key: 'p', dataKind: 'bars', suggestedRole: 'primary' },
       { key: 's', dataKind: 'bars', suggestedRole: 'secondary' },

@@ -13,6 +13,7 @@ import {
 } from '@saku/db';
 import type {
   LossOffset,
+  MoneyText,
   LotMethod,
   PurchaseMode,
   RegimeTexts,
@@ -40,17 +41,29 @@ export const FOREIGN_DIVIDEND_BASES = ['gross', 'net_of_withholding'] as const;
 export const LOSS_CONDITION_EFFECTS = ['offsets', 'carryforward'] as const;
 
 /**
- * The placeholders each kind of regime text receives, filled by the app from the declaration
- * (so a text never disagrees with a rule): rates and limits formatted for the reader, years as a
- * number. A text may use only its kind's placeholders (a key used for two kinds: only those both
- * receive); a text no declaration names receives none. Plain `{name}` only, no other braces.
+ * The most placeholders each kind of regime text may receive, filled from the declaration
+ * (`regimeTextValues`, so a text never disagrees with a rule). The declaration narrows them to
+ * what has a value: an account description gets `annual`, `lifetime` only when the account type
+ * declares that limit, `groupAnnual`, `groupLifetime` only when exactly one of its groups declares
+ * one, `carryforwardYears` only when the carryforward is a number of years; a loss condition gets
+ * `carryforwardYears` only when it applies to the carryforward and that is a number. A key used
+ * for two texts may use only what both receive; a text no declaration names receives none.
+ * Plain `{name}` only, no other braces.
  */
 export const REGIME_TEXT_PLACEHOLDERS = {
   regimeName: [],
   accountName: [],
   /** Of the account type described: its rates and limits, and its loss carryforward. */
-  accountDescription: ['gainsRate', 'dividendsRate', 'annual', 'lifetime', 'carryforwardYears'],
-  /** A loss condition: the account type's carryforward. */
+  accountDescription: [
+    'gainsRate',
+    'dividendsRate',
+    'annual',
+    'lifetime',
+    'groupAnnual',
+    'groupLifetime',
+    'carryforwardYears',
+  ],
+  /** A loss condition: the account type's carryforward, when it applies to it. */
   lossCondition: ['carryforwardYears'],
   creditCondition: [],
   groupName: [],
@@ -157,10 +170,17 @@ export function taxRegimeProblems(regime: unknown): string[] {
   } else if (texts !== undefined) bad('texts', 'must be an object of languages');
   /** Per text key, the placeholders it may use (the intersection over the kinds it serves). */
   const allowedPlaceholders = new Map<string, Set<string>>();
-  const textKey = (v: unknown, path: string, kind: RegimeTextKind) => {
+  const textKey = (
+    v: unknown,
+    path: string,
+    kind: RegimeTextKind,
+    /** What this use has a value for (default: all of its kind's). */
+    has: readonly string[] = REGIME_TEXT_PLACEHOLDERS[kind],
+  ) => {
     if (typeof v !== 'string' || v === '') return bad(path, 'must be a text key');
     if (en && lookup(en, v) === undefined) bad(path, `no English text "${v}"`);
-    const own = new Set<string>(REGIME_TEXT_PLACEHOLDERS[kind]);
+    const kindOf: readonly string[] = REGIME_TEXT_PLACEHOLDERS[kind];
+    const own = new Set<string>(has.filter((p) => kindOf.includes(p)));
     const before = allowedPlaceholders.get(v);
     allowedPlaceholders.set(v, before ? new Set([...before].filter((p) => own.has(p))) : own);
   };
@@ -194,6 +214,11 @@ export function taxRegimeProblems(regime: unknown): string[] {
   const decimal = (v: unknown, path: string): v is string => {
     if (typeof v !== 'string' || v.length > 40 || !DECIMAL.test(v)) {
       bad(path, `must be a decimal written as text, e.g. "0.2" (got ${JSON.stringify(v)})`);
+      return false;
+    }
+    // Texts show every digit (`regimeTextValues`); formatting keeps at most 20 decimals.
+    if ((v.split('.')[1] ?? '').length > 20) {
+      bad(path, 'at most 20 decimals');
       return false;
     }
     return true;
@@ -277,8 +302,19 @@ export function taxRegimeProblems(regime: unknown): string[] {
   if (typeof r.yearStart !== 'string' || !validMonthDay(r.yearStart)) {
     bad('yearStart', 'must be a day of the year as MM-DD (not 02-29)');
   }
-  oneOf(r.yearDate, 'yearDate', TRADE_DATES);
-  oneOf(r.fxDate, 'fxDate', TRADE_DATES);
+  // A settlement date needs each trade's settlement lag, which nothing declares yet; and the
+  // rate on a settlement date can be later than the data known at the decision (`asOf`), so it
+  // would have to be shown as pending, never replaced by the trade date's rate. Refused until a
+  // lag source exists.
+  for (const field of ['yearDate', 'fxDate'] as const) {
+    oneOf(r[field], field, TRADE_DATES);
+    if (r[field] === 'settlement_date') {
+      bad(
+        field,
+        'settlement_date is refused for now: no settlement lag is declared yet; use trade_date',
+      );
+    }
+  }
 
   const groups = Array.isArray(r.quotaGroups) ? r.quotaGroups : [];
   if (r.quotaGroups !== undefined && !Array.isArray(r.quotaGroups)) {
@@ -362,7 +398,6 @@ export function taxRegimeProblems(regime: unknown): string[] {
         bad(`${path}.treatment`, 'the "taxable" account type is taxable');
     }
     textKey(t.nameKey, `${path}.nameKey`, 'accountName');
-    textKey(t.descriptionKey, `${path}.descriptionKey`, 'accountDescription');
     const ownGroups = typeof t.key === 'string' ? (groupsOf.get(t.key) ?? []) : [];
 
     const e = t.eligibility;
@@ -485,10 +520,32 @@ export function taxRegimeProblems(regime: unknown): string[] {
               bad(`${cp}.appliesTo`, 'a condition on a carryforward of 0 years');
             }
           }
-          textKey(cond.textKey, `${cp}.textKey`, 'lossCondition');
+          textKey(
+            cond.textKey,
+            `${cp}.textKey`,
+            'lossCondition',
+            effects.includes('carryforward') && typeof years === 'number'
+              ? ['carryforwardYears']
+              : [],
+          );
         });
       }
     }
+
+    // The description receives what this account type has a value for.
+    const quota = isObject(t.quota) ? t.quota : {};
+    const groupDeclaring = (l: 'annual' | 'lifetime') =>
+      ownGroups.filter((g) => g.declares.has(l)).length === 1;
+    const carryforward = isObject(t.losses) ? t.losses.carryforwardYears : undefined;
+    textKey(t.descriptionKey, `${path}.descriptionKey`, 'accountDescription', [
+      'gainsRate',
+      'dividendsRate',
+      ...(quota.annual !== undefined ? ['annual'] : []),
+      ...(quota.lifetime !== undefined ? ['lifetime'] : []),
+      ...(groupDeclaring('annual') ? ['groupAnnual'] : []),
+      ...(groupDeclaring('lifetime') ? ['groupLifetime'] : []),
+      ...(typeof carryforward === 'number' ? ['carryforwardYears'] : []),
+    ]);
 
     const credit = t.foreignTaxCredit;
     if (credit !== false) {
@@ -730,6 +787,52 @@ export function regimeTranslator(
       return String(values[name]);
     });
   };
+}
+
+/**
+ * The placeholder values of an account type's texts (its description and loss conditions), from
+ * the declaration, formatted for `language`: rates as percentages and limits as amounts in the
+ * regime's currency, every digit kept (decimal text is formatted as a string, never through a
+ * float, with no rounding). Only what has a value is present (never an empty text): `annual`,
+ * `lifetime` when the account type declares them, `groupAnnual`, `groupLifetime` when exactly one
+ * of its groups declares one, `carryforwardYears` when a number. Validation allows a text only the
+ * placeholders this returns. Throws for an account type the regime does not declare.
+ */
+export function regimeTextValues(
+  regime: TaxRegime,
+  accountKey: string,
+  language: string,
+): Record<string, string> {
+  const account = regime.accountTypes.find((a) => a.key === accountKey);
+  if (!account) {
+    throw new Error(`Tax regime ${regime.info.key} has no account type ${accountKey}.`);
+  }
+  const percent = new Intl.NumberFormat(language, {
+    style: 'percent',
+    maximumFractionDigits: 20,
+  });
+  const money = (m: MoneyText) =>
+    new Intl.NumberFormat(language, {
+      style: 'currency',
+      currency: m.currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 20,
+    }).format(m.amount as `${number}`);
+  const values: Record<string, string> = {
+    gainsRate: percent.format(account.tax.realizedGains as `${number}`),
+    dividendsRate: percent.format(account.tax.dividends as `${number}`),
+  };
+  if (account.quota?.annual) values.annual = money(account.quota.annual);
+  if (account.quota?.lifetime) values.lifetime = money(account.quota.lifetime);
+  const groups = (regime.quotaGroups ?? []).filter((g) => g.accountTypes.includes(accountKey));
+  const annual = groups.filter((g) => g.annual);
+  const lifetime = groups.filter((g) => g.lifetime);
+  if (annual.length === 1) values.groupAnnual = money(annual[0]!.annual!);
+  if (lifetime.length === 1) values.groupLifetime = money(lifetime[0]!.lifetime!);
+  const years = account.losses.carryforwardYears;
+  if (typeof years === 'number')
+    values.carryforwardYears = new Intl.NumberFormat(language).format(years);
+  return values;
 }
 
 /** The keys of the English texts a language lacks (empty: complete). */

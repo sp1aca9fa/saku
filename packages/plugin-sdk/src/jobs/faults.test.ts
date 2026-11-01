@@ -341,7 +341,14 @@ async function run(
   const db = await testDb();
   await upsertSymbols(db, [
     // SPY's index check (layer C) runs on every case.
-    { ticker: 'SPY', tier: 0, assetClass: 'equity', currency: 'USD', indexSeries: 'IDX' },
+    {
+      ticker: 'SPY',
+      tier: 0,
+      assetClass: 'equity',
+      currency: 'USD',
+      leverageFactor: 1,
+      indexSeries: 'IDX',
+    },
     {
       ticker: 'SSO',
       tier: 0,

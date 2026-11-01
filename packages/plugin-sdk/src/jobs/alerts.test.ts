@@ -1721,7 +1721,9 @@ describe('stand-in close alerts (requirements 04, the stand-in rule 5)', () => {
 
   /** AAA's stand-in on DAY, closed at CLOSED_AT, still the canonical bar's price. */
   const closedStandIn = async (db: TestDb, admin: string) => {
-    await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+    await upsertSymbols(db, [
+      { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    ]);
     const [{ id }] = (await db
       .select({ id: schema.symbols.id })
       .from(schema.symbols)

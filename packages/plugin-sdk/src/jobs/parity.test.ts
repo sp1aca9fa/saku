@@ -166,7 +166,9 @@ const plugins = (skip?: string, cash = true) => ({
  */
 async function seeded(skip?: string, cash = true): Promise<Db> {
   const db = await testDb();
-  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  await upsertSymbols(db, [
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+  ]);
   await runJob(db, plugins(skip, cash), options('bootstrap'));
   return db;
 }

@@ -38,9 +38,9 @@ const PAST = '2026-01-23';
 async function setup() {
   const db = await testDb();
   await upsertSymbols(db, [
-    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
-    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' },
-    { ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD' },
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+    { ticker: 'CCC', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
   ]);
   const ids = Object.fromEntries(
     (await db.select().from(schema.symbols)).map((s) => [s.ticker, s.id] as const),

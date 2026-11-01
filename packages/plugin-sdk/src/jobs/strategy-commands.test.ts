@@ -30,7 +30,9 @@ const strategy = (execution = 'next_open') =>
 /** A database whose only symbol passed a full check through the last date. */
 async function passed() {
   const db = await testDb();
-  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  await upsertSymbols(db, [
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 },
+  ]);
   const id = (await symbolId(db, 'AAA'))!;
   await db
     .insert(schema.bars)
