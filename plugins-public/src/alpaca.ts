@@ -66,11 +66,41 @@ export function alpacaBarsEnd(to: string, now: Date): string {
  */
 export const ALPACA_ACTIONS_LOOKAHEAD_DAYS = 120;
 
-/** The corporate actions query's `end` (a date): `to` plus ALPACA_ACTIONS_LOOKAHEAD_DAYS. */
-export function alpacaActionsEnd(to: string): string {
-  if (!isTradingDate(to)) throw new Error(`Alpaca: unreadable date "${to}"`);
-  const ms = Date.parse(`${to}T00:00:00Z`);
-  return new Date(ms + ALPACA_ACTIONS_LOOKAHEAD_DAYS * 86_400_000).toISOString().slice(0, 10);
+/**
+ * How many calendar days before `from` the corporate actions request starts. Filtering on the
+ * process date, `start=from` would miss an action processed before its ex-date: a forward split
+ * is commonly processed (paid) the trading day before its ex-date (e.g. paid Friday, ex-date
+ * Monday), so a span starting on that Monday would get no split, and a refetch would revise the
+ * stored factor back to 1. 30 days covers a process date up to about a month before the ex-date;
+ * one processed earlier still is missed. Actions found this way whose ex-date is before `from`
+ * are ignored (another span holds them).
+ */
+export const ALPACA_ACTIONS_LOOKBACK_DAYS = 30;
+
+const DAY_MS = 86_400_000;
+
+/** `date` moved by `days` calendar days (`YYYY-MM-DD`); an unreadable date is refused. */
+function shiftDate(date: string, days: number): string {
+  if (!isTradingDate(date)) throw new Error(`Alpaca: unreadable date "${date}"`);
+  return new Date(Date.parse(`${date}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+/** The corporate actions query's `start` (a date): `from` minus ALPACA_ACTIONS_LOOKBACK_DAYS. */
+export function alpacaActionsStart(from: string): string {
+  return shiftDate(from, -ALPACA_ACTIONS_LOOKBACK_DAYS);
+}
+
+/**
+ * The corporate actions query's `end` (a date): `to` plus ALPACA_ACTIONS_LOOKAHEAD_DAYS, capped
+ * at today in New York (from the run's clock `now`). Alpaca lists an action once processed, so a
+ * later `end` would find nothing more, and whether Alpaca accepts an `end` in the future is not
+ * verified live (a refusal would fail every run). Revisit if Alpaca turns out to list announced
+ * future actions.
+ */
+export function alpacaActionsEnd(to: string, now: Date): string {
+  const reach = shiftDate(to, ALPACA_ACTIONS_LOOKAHEAD_DAYS);
+  const today = tradingDateOf(now);
+  return reach < today ? reach : today;
 }
 
 const auth = (ctx: PluginContext) => ({
@@ -144,10 +174,11 @@ export const alpaca: BarSource = {
 
     // Corporate actions are not SIP market data (no 15-minute limit) and take dates only
     // (`YYYY-MM-DD`, per the corporate actions reference). `start`/`end` filter on the process
-    // date, so `end` reaches past `to` (ALPACA_ACTIONS_LOOKAHEAD_DAYS) and the answer may hold
-    // actions whose ex-date is outside the span.
+    // date, so `start` reaches before `from` (ALPACA_ACTIONS_LOOKBACK_DAYS) and `end` past `to`
+    // (ALPACA_ACTIONS_LOOKAHEAD_DAYS, capped at today), and the answer may hold actions whose
+    // ex-date is outside the span.
     const actions = await pages(
-      `${BASE}/v1/corporate-actions?symbols=${symbol}&types=cash_dividend,forward_split,reverse_split&start=${from}&end=${alpacaActionsEnd(to)}&limit=1000`,
+      `${BASE}/v1/corporate-actions?symbols=${symbol}&types=cash_dividend,forward_split,reverse_split&start=${alpacaActionsStart(from)}&end=${alpacaActionsEnd(to, ctx.now)}&limit=1000`,
       ActionsPage,
       ctx,
     );

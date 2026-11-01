@@ -2,9 +2,11 @@ import { fixtureContext } from '@saku/plugin-sdk/testing';
 import { describe, expect, it } from 'vitest';
 import {
   ALPACA_ACTIONS_LOOKAHEAD_DAYS,
+  ALPACA_ACTIONS_LOOKBACK_DAYS,
   ALPACA_RECENT_MS,
   alpaca,
   alpacaActionsEnd,
+  alpacaActionsStart,
   alpacaBarsEnd,
 } from '../src/alpaca';
 import { fixture } from './fixture';
@@ -131,17 +133,51 @@ describe('Alpaca', () => {
       );
     });
 
-    it('asks corporate actions up to the look-ahead past the span', async () => {
+    it('applies an action processed before its ex-date, the ex-date being the first day', async () => {
+      // A forward split paid (processed) the trading day before its ex-date: as Alpaca does,
+      // the answer holds only actions whose process date is within the asked start and end.
+      const split = action('2026-01-05', '2026-01-02');
+      const byProcessDate = (url: URL) => {
+        if (url.pathname !== '/v1/corporate-actions') return answers()(url);
+        const start = url.searchParams.get('start')!;
+        const end = url.searchParams.get('end')!;
+        const inWindow = (a: { process_date: string }) =>
+          a.process_date >= start && a.process_date <= end;
+        return {
+          corporate_actions: {
+            cash_dividends: split.corporate_actions.cash_dividends.filter(inWindow),
+            forward_splits: split.corporate_actions.forward_splits.filter(inWindow),
+          },
+          next_page_token: null,
+        };
+      };
+      const ctx = fixtureContext(byProcessDate, { keys });
+      const bars = await alpaca.fetchBars('AAA', '2026-01-05', '2026-01-06', ctx);
+      const first = bars.find((b) => b.date === '2026-01-05')!;
+      expect([first.divCash, first.splitFactor]).toEqual([0.75, 3]);
+    });
+
+    it('asks corporate actions from the look-back before the span to the look-ahead past it', async () => {
+      expect(ALPACA_ACTIONS_LOOKBACK_DAYS).toBe(30);
       expect(ALPACA_ACTIONS_LOOKAHEAD_DAYS).toBe(120);
-      expect(alpacaActionsEnd('2026-01-06')).toBe('2026-05-06');
+      expect(alpacaActionsStart('2026-01-02')).toBe('2025-12-03');
+      // Across a leap day (2028-02-29).
+      expect(alpacaActionsStart('2028-03-15')).toBe('2028-02-14');
+      expect(() => alpacaActionsStart('2026-02-30')).toThrow(/unreadable date/);
+      const later = new Date('2030-01-01T12:00:00Z');
+      expect(alpacaActionsEnd('2026-01-06', later)).toBe('2026-05-06');
       // Across a year end and a leap day (2028-02-29).
-      expect(alpacaActionsEnd('2027-12-31')).toBe('2028-04-29');
-      expect(() => alpacaActionsEnd('2026-02-30')).toThrow(/unreadable date/);
-      const ctx = fixtureContext(answers(), { keys });
+      expect(alpacaActionsEnd('2027-12-31', later)).toBe('2028-04-29');
+      expect(() => alpacaActionsEnd('2026-02-30', later)).toThrow(/unreadable date/);
+      // Capped at today in New York: 2026-03-02 03:00 UTC is 2026-03-01 22:00 New York (EST).
+      expect(alpacaActionsEnd('2026-01-06', new Date('2026-03-02T03:00:00Z'))).toBe('2026-03-01');
+      // The cap equal to the look-ahead's end.
+      expect(alpacaActionsEnd('2026-01-06', new Date('2026-05-06T16:00:00Z'))).toBe('2026-05-06');
+      const ctx = fixtureContext(answers(), { keys, now: later });
       await alpaca.fetchBars('AAA', '2026-01-02', '2026-01-06', ctx);
       const actions = new URL(ctx.requested.at(-1)!);
       expect(actions.pathname).toBe('/v1/corporate-actions');
-      expect(actions.searchParams.get('start')).toBe('2026-01-02');
+      expect(actions.searchParams.get('start')).toBe('2025-12-03');
       expect(actions.searchParams.get('end')).toBe('2026-05-06');
     });
   });
@@ -183,8 +219,8 @@ describe('Alpaca', () => {
       expect(bars.searchParams.get('start')).toBe('2026-01-02');
       const actions = new URL(ctx.requested.at(-1)!);
       expect(actions.pathname).toBe('/v1/corporate-actions');
-      // 2026-10-29 plus the 120-day look-ahead (process dates), not capped by the clock.
-      expect(actions.searchParams.get('end')).toBe('2027-02-26');
+      // 2026-10-29 plus the 120-day look-ahead (2027-02-26), capped at today in New York.
+      expect(actions.searchParams.get('end')).toBe('2026-10-29');
     });
 
     it('asks nothing when the cap falls before the range starts', async () => {
