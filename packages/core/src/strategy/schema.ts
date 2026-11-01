@@ -1,7 +1,8 @@
 // The strategy definition (requirements 05, YAML), validated by zod. A2 covers what the owner's
 // Setup 1 needs: price, SMA and volatility operands, compare and ensemble signals with tolerance
-// bands, an allocation chain with fixed-weight holdings, and the safe state. Other parts of 05
-// join as later stages need them.
+// bands, an allocation chain with fixed-weight holdings, and the safe state. B1 adds the other v1
+// indicators of requirements 06 (EMA, N-day return, range-based volatility methods, drawdown,
+// N-day high and low). Other parts of 05 join as later stages need them.
 //
 // Every object is strict: an unknown key (a typo such as `tolerencePct`) is refused, never
 // dropped, since a registered version must be exactly what its file says (requirements 05,
@@ -11,24 +12,42 @@ import { z } from 'zod';
 
 const ticker = z.string().min(1);
 
+/** Range-based and close-based volatility methods (docs/indicators.md, B1); `close` when omitted. */
+export const VOLATILITY_METHODS = ['close', 'parkinson', 'garman_klass', 'yang_zhang'] as const;
+/** Methods that need two days in a window (a sample variance): length >= 2. */
+const TWO_DAY_METHODS: readonly string[] = ['close', 'yang_zhang'];
+
+const length = z.number().int().min(1);
+const totalReturn = z.boolean().default(false);
+
 export const IndicatorOperand = z.discriminatedUnion('indicator', [
+  z.strictObject({ indicator: z.literal('price'), ticker, totalReturn }),
+  z.strictObject({ indicator: z.literal('sma'), ticker, length, totalReturn }),
+  z.strictObject({ indicator: z.literal('ema'), ticker, length, totalReturn }),
+  z.strictObject({ indicator: z.literal('return'), ticker, length, totalReturn }),
+  z
+    .strictObject({
+      indicator: z.literal('volatility'),
+      ticker,
+      length,
+      // Optional without a default: a version stored before methods existed re-parses to itself
+      // (registration stores the parsed output).
+      method: z.enum(VOLATILITY_METHODS).optional(),
+      totalReturn,
+    })
+    .refine((o) => o.length >= 2 || !TWO_DAY_METHODS.includes(o.method ?? 'close'), {
+      message: 'this volatility method needs a length of at least 2 (a sample variance)',
+      path: ['length'],
+    }),
+  /** Without `length`: from the all-time high (since the series' first value). */
   z.strictObject({
-    indicator: z.literal('price'),
+    indicator: z.literal('drawdown'),
     ticker,
-    totalReturn: z.boolean().default(false),
+    length: length.optional(),
+    totalReturn,
   }),
-  z.strictObject({
-    indicator: z.literal('sma'),
-    ticker,
-    length: z.number().int().min(1),
-    totalReturn: z.boolean().default(false),
-  }),
-  z.strictObject({
-    indicator: z.literal('volatility'),
-    ticker,
-    length: z.number().int().min(2),
-    totalReturn: z.boolean().default(false),
-  }),
+  z.strictObject({ indicator: z.literal('high'), ticker, length, totalReturn }),
+  z.strictObject({ indicator: z.literal('low'), ticker, length, totalReturn }),
 ]);
 export const Operand = z.union([IndicatorOperand, z.strictObject({ threshold: z.number() })]);
 
@@ -40,26 +59,31 @@ const comparison = {
 };
 export const Comparison = z.strictObject(comparison);
 
+/** Indicators whose value is a price level (rescaled by a split), not a percentage. */
+const PRICE_LEVELS: readonly string[] = ['price', 'sma', 'ema', 'high', 'low'];
+
 /**
- * A plain price or its average (`totalReturn: false`) compared with a fixed level (decisions log
- * 2026-11-01, C18 (a)): a split rescales every earlier plain price, so the same level means
- * something else before and after one (a 2:1 split halves the price and the comparison flips with
- * nothing having happened). Refused. A fund compared with its own average is scale-free; volatility is
- * a percentage, so it may be compared with a level. A total-return series against a level is not
- * rescaled by a split but depends on where the stored history starts (open decision C26), so the
- * message does not suggest it.
+ * A plain price level (`totalReturn: false`: price, SMA, EMA, N-day high or low) compared with a
+ * fixed level (decisions log 2026-11-01, C18 (a); docs/indicators.md B1 "Fixed levels"): a split
+ * rescales every earlier plain price, so the same level means something else before and after one
+ * (a 2:1 split halves the price and the comparison flips with nothing having happened). Refused.
+ * A fund compared with its own average is scale-free; return, volatility and drawdown are
+ * percentages, so they may be compared with a level. A total-return series against a level is
+ * not rescaled by a split but depends on where the stored history starts (open decision C26), so
+ * the message does not suggest it.
  */
 export function plainPriceAgainstLevel(c: { left: Operand; right: Operand }): boolean {
   const plain = (o: Operand) =>
-    'indicator' in o && (o.indicator === 'price' || o.indicator === 'sma') && !o.totalReturn;
+    'indicator' in o && PRICE_LEVELS.includes(o.indicator) && !o.totalReturn;
   const level = (o: Operand) => 'threshold' in o;
   return (plain(c.left) && level(c.right)) || (level(c.left) && plain(c.right));
 }
 
 export const PLAIN_PRICE_AGAINST_LEVEL =
-  'a plain price (totalReturn: false) is compared with a fixed level: a split rescales earlier ' +
-  'plain prices, so the level would mean something else after one. Compare the fund with its own ' +
-  'average, or use a percentage (volatility) against the level, instead';
+  'a plain price, average, high or low (totalReturn: false) is compared with a fixed level: a ' +
+  'split rescales earlier plain prices, so the level would mean something else after one. ' +
+  'Compare the fund with its own average, or use a percentage (return, volatility or drawdown) ' +
+  'against the level, instead';
 
 export const Signal = z.discriminatedUnion('type', [
   z.strictObject({ id: z.string().min(1), type: z.literal('compare'), ...comparison }),

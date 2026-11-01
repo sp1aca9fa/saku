@@ -3,7 +3,19 @@
 // trading on them is the execution model's job (next_open by default).
 import { totalReturnIndex } from '../adjusted';
 import type { RawBar, TradingDate } from '../domain';
-import { sma, volatility } from './indicators';
+import {
+  type SeriesBar,
+  drawdown,
+  ema,
+  garmanKlass,
+  parkinson,
+  periodReturn,
+  rollingHigh,
+  rollingLow,
+  sma,
+  volatility,
+  yangZhang,
+} from './indicators';
 import type {
   Allocation,
   Comparison,
@@ -39,6 +51,32 @@ export function splitAdjusted(bars: RawBar[]): number[] {
   return out;
 }
 
+/**
+ * Each day's open, high and low on the series' basis (docs/indicators.md, B1): scaled by the
+ * same factor as the day's series value against its raw close (price: the split adjustment;
+ * total return: the index value / the raw close), so ratios within the day (H/L, C/O) are the
+ * raw ones and the overnight ratio O_t / C_t-1 includes the day's dividend and split. A field the
+ * source did not give stays missing (never estimated from the close).
+ *
+ * The close is scaled the same way (raw close x factor, the series value up to rounding) rather
+ * than taken from the series: multiplying all four by one positive number keeps their equalities
+ * and order exact in floating point, so a consistent day (low <= open, close <= high) stays
+ * consistent and a flat one (high = low) gives exactly 0, never a rounding-made negative variance
+ * that would read as inconsistent data on one history and not on another (incremental = full).
+ */
+export function onSeriesBasis(bars: RawBar[], series: number[]): SeriesBar[] {
+  return bars.map((b, i) => {
+    const factor = series[i]! / b.close;
+    const scaled = (v: number | undefined) => (v === undefined ? undefined : v * factor);
+    return {
+      open: scaled(b.open),
+      high: scaled(b.high),
+      low: scaled(b.low),
+      close: b.close * factor,
+    };
+  });
+}
+
 const tickersOf = (o: Operand): string[] => ('ticker' in o ? [o.ticker] : []);
 const comparisonsOf = (s: Strategy['signals'][number]): Comparison[] =>
   s.type === 'compare' ? [s] : s.members;
@@ -55,19 +93,40 @@ export function signalTickers(s: Strategy): string[] {
 }
 
 /**
- * How many of a ticker's own latest bars, up to and including a date, the signals' values on that
- * date read (the formulas in `indicators.ts`, requirements 06): a price 1 bar, an SMA of n n bars,
- * a volatility of n n + 1 bars (n returns). Per signal ticker: the longest of its operands, and
- * whether any operand reads its total-return series. A signal's state can still carry an older
- * value through its tolerance band (the previous state is kept inside it); that is the state on
- * the day before, decided then.
+ * How many of a ticker's own latest bars, up to and including a date, an indicator operand's
+ * value on that date reads (the formulas in docs/indicators.md, requirements 06; 0 for a
+ * threshold): a price 1 bar; an SMA, N-day high or low, N-day drawdown, Parkinson or Garman-Klass
+ * volatility of n n bars; a close-to-close volatility or a return over n days n + 1 bars (n
+ * returns); a Yang-Zhang volatility of n n + 1 bars (the close before its window). An EMA and the
+ * all-time drawdown read every bar since the series' first one: Infinity (any bar of the ticker
+ * is inside their lookback; a stand-in at any age counts, erring toward counting).
  */
-/** Bars of its ticker an indicator operand's value on a date reads (0 for a threshold). */
 export function operandBars(o: Operand): number {
   if (!('ticker' in o)) return 0;
-  return o.indicator === 'price' ? 1 : o.indicator === 'sma' ? o.length : o.length + 1;
+  switch (o.indicator) {
+    case 'price':
+      return 1;
+    case 'sma':
+    case 'high':
+    case 'low':
+      return o.length;
+    case 'return':
+      return o.length + 1;
+    case 'ema':
+      return Infinity;
+    case 'drawdown':
+      return o.length ?? Infinity;
+    case 'volatility':
+      return o.method === 'parkinson' || o.method === 'garman_klass' ? o.length : o.length + 1;
+  }
 }
 
+/**
+ * Per signal ticker: the longest lookback of its operands (`operandBars`), and whether any
+ * operand reads its total-return series. A signal's state can still carry an older value through
+ * its tolerance band (the previous state is kept inside it); that is the state on the day before,
+ * decided then.
+ */
 export function signalLookbacks(s: Strategy): Map<string, { bars: number; totalReturn: boolean }> {
   const out = new Map<string, { bars: number; totalReturn: boolean }>();
   for (const c of s.signals.flatMap(comparisonsOf)) {
@@ -85,7 +144,44 @@ export function signalLookbacks(s: Strategy): Map<string, { bars: number; totalR
 }
 
 const operandKey = (o: IndicatorOperand) =>
-  `${o.indicator}:${o.ticker}:${'length' in o ? o.length : ''}:${o.totalReturn ? 'tr' : 'p'}`;
+  [
+    o.indicator,
+    o.ticker,
+    'length' in o ? (o.length ?? 'all') : '',
+    o.indicator === 'volatility' ? (o.method ?? 'close') : '',
+    o.totalReturn ? 'tr' : 'p',
+  ].join(':');
+
+/** An indicator operand's values over its ticker's bars (`series`: price or total return). */
+function indicatorValues(o: IndicatorOperand, bars: RawBar[], s: number[]): (number | undefined)[] {
+  switch (o.indicator) {
+    case 'price':
+      return s;
+    case 'sma':
+      return sma(s, o.length);
+    case 'ema':
+      return ema(s, o.length);
+    case 'return':
+      return periodReturn(s, o.length);
+    case 'drawdown':
+      return drawdown(s, o.length);
+    case 'high':
+      return rollingHigh(s, o.length);
+    case 'low':
+      return rollingLow(s, o.length);
+    case 'volatility':
+      switch (o.method ?? 'close') {
+        case 'close':
+          return volatility(s, o.length);
+        case 'parkinson':
+          return parkinson(onSeriesBasis(bars, s), o.length);
+        case 'garman_klass':
+          return garmanKlass(onSeriesBasis(bars, s), o.length);
+        case 'yang_zhang':
+          return yangZhang(onSeriesBasis(bars, s), o.length);
+      }
+  }
+}
 
 /** One comparison's state through time: tolerance band, near-ties, plain first comparison. */
 function compareStep(
@@ -120,7 +216,9 @@ function conditionHolds(when: Condition, on: (id: string) => boolean): boolean {
 
 /**
  * Evaluates a strategy (frequency daily) on every date all its signal tickers have a bar, from
- * the first date every signal is defined (after the warm-up).
+ * the first date every signal is defined (after the warm-up). A later date where an operand has
+ * no value (a range-based volatility whose window holds a day without an open, high or low, or
+ * with a data error) is not evaluated either: no decision that day, never a guessed value.
  */
 export function evaluate(strategy: Strategy, bars: Record<string, RawBar[]>): StrategyDay[] {
   if (strategy.evaluation.frequency !== 'daily') {
@@ -148,13 +246,7 @@ export function evaluate(strategy: Strategy, bars: Record<string, RawBar[]>): St
     const key = operandKey(o);
     let byDate = values.get(key);
     if (!byDate) {
-      const s = series(o.ticker, o.totalReturn);
-      const v =
-        o.indicator === 'price'
-          ? s
-          : o.indicator === 'sma'
-            ? sma(s, o.length)
-            : volatility(s, o.length);
+      const v = indicatorValues(o, bars[o.ticker]!, series(o.ticker, o.totalReturn));
       byDate = new Map(bars[o.ticker]!.map((b, i) => [b.date, v[i]]));
       values.set(key, byDate);
     }

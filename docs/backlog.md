@@ -32,3 +32,4 @@
 | 2026-11-01 | Strategy YAML: take a list item's dash column from the parser (today a text search; odd styles such as `- -x` with an indented comment are not refused) | Claude (review) | Reliability | new | Open after 2 fix rounds; no real ticker or name starts with '-'; check/register print the parsed strategy |
 | 2026-11-01 | Stand-in close alert: a 'superseded' state for an earlier close delivered after a re-close (today reads 'changed') | Claude (review) | Honesty | new | Open after 2 fix rounds; wording only, no signal effect |
 | 2026-11-01 | Monthly audit: also list closed-day bars graded red, and series/FX revisions and withdrawals (bars only today) | Claude (build) | Reliability | new | A3 audit first version covers bar revisions only |
+- Signals: on a date skipped because one operand has no value, the other comparisons still update their tolerance-band state (core and reference agree). Review whether a skipped date should leave all states unchanged (B1).

@@ -7,17 +7,27 @@
 export interface RefBar {
   date: string;
   open?: number;
+  high?: number;
+  low?: number;
   close: number;
   divCash: number;
   splitFactor: number;
   closeIsSplitAdjusted: boolean;
 }
 
+export type RefIndicator =
+  'price' | 'sma' | 'ema' | 'return' | 'volatility' | 'drawdown' | 'high' | 'low';
+
+export type RefVolatilityMethod = 'close' | 'parkinson' | 'garman_klass' | 'yang_zhang';
+
 export interface RefOperand {
-  indicator?: 'price' | 'sma' | 'volatility';
+  indicator?: RefIndicator;
   ticker?: string;
+  /** Left out for `drawdown` means all-time. */
   length?: number;
   totalReturn?: boolean;
+  /** Volatility only; `close` when left out. */
+  method?: RefVolatilityMethod;
   threshold?: number;
 }
 
@@ -109,6 +119,205 @@ export function refVolatility(values: number[], length: number): (number | undef
   return out;
 }
 
+// ---- B1 indicators (docs/indicators.md "Indicators (B1, v1)"; requirements 06 v1). ----
+// Written as literally as the contract reads: every value is recomputed from its own loop.
+// A doubtful value never yields a number: the contract's data-error rules give no value instead.
+
+const positive = (x: number | undefined): x is number =>
+  x !== undefined && Number.isFinite(x) && x > 0;
+
+/**
+ * EMA: alpha = 2 / (N + 1); seed at bar N - 1 = mean of the first N values; then recursive.
+ * A non-finite EMA gives no value (and, being recursive, stays non-finite afterwards).
+ */
+export function refEma(values: number[], length: number): (number | undefined)[] {
+  const alpha = 2 / (length + 1);
+  const out: (number | undefined)[] = [];
+  let ema: number | undefined;
+  for (let i = 0; i < values.length; i++) {
+    if (i < length - 1) {
+      out.push(undefined);
+      continue;
+    }
+    if (ema === undefined) {
+      let sum = 0;
+      for (let j = 0; j < length; j++) sum += values[j]!;
+      ema = sum / length;
+    } else {
+      ema = alpha * values[i]! + (1 - alpha) * ema;
+    }
+    out.push(Number.isFinite(ema) ? ema : undefined);
+  }
+  return out;
+}
+
+/**
+ * Simple return over N bars in percent: (v_t / v_t-N - 1) x 100; warm-up N bars. No value when
+ * either value read is not positive or not finite.
+ */
+export function refReturn(values: number[], length: number): (number | undefined)[] {
+  return values.map((v, i) => {
+    if (i < length) return undefined;
+    const before = values[i - length];
+    if (!positive(v) || !positive(before)) return undefined;
+    return (v / before - 1) * 100;
+  });
+}
+
+/** Highest of the last N values (today included); warm-up N - 1 bars; no value if one is not finite. */
+export function refHigh(values: number[], length: number): (number | undefined)[] {
+  return values.map((_, i) => {
+    if (i < length - 1) return undefined;
+    let m = -Infinity;
+    for (let j = i - length + 1; j <= i; j++) {
+      if (!Number.isFinite(values[j])) return undefined;
+      if (values[j]! > m) m = values[j]!;
+    }
+    return m;
+  });
+}
+
+/** Lowest of the last N values (today included); warm-up N - 1 bars; no value if one is not finite. */
+export function refLow(values: number[], length: number): (number | undefined)[] {
+  return values.map((_, i) => {
+    if (i < length - 1) return undefined;
+    let m = Infinity;
+    for (let j = i - length + 1; j <= i; j++) {
+      if (!Number.isFinite(values[j])) return undefined;
+      if (values[j]! < m) m = values[j]!;
+    }
+    return m;
+  });
+}
+
+/**
+ * Drawdown in percent: (v_t / peak - 1) x 100, the peak being the highest of the last N values
+ * (today included), or of every value since the first one when `length` is left out. No value
+ * when a value read is not positive or not finite; for the all-time drawdown every value since
+ * the first is read, so one bad value gives no value from that day on.
+ */
+export function refDrawdown(values: number[], length?: number): (number | undefined)[] {
+  return values.map((v, i) => {
+    const from = length === undefined ? 0 : i - length + 1;
+    if (from < 0) return undefined;
+    let peak = -Infinity;
+    for (let j = from; j <= i; j++) {
+      if (!positive(values[j])) return undefined;
+      if (values[j]! > peak) peak = values[j]!;
+    }
+    return (v / peak - 1) * 100;
+  });
+}
+
+/** One day's open, high, low and close on the series' basis. */
+export interface RefOhlc {
+  open?: number;
+  high?: number;
+  low?: number;
+  close: number;
+}
+
+/**
+ * OHLC on the series' basis: each of the day's raw open, high, low and close times the same
+ * factor (series value / raw close), so equal raw values stay exactly equal and a flat day gives
+ * exactly 0. A missing open, high or low stays missing.
+ */
+export function refOhlc(bars: RefBar[], totalReturn: boolean): RefOhlc[] {
+  const series = totalReturn ? refTotalReturn(bars) : refPrice(bars);
+  return bars.map((b, i) => {
+    const factor = series[i]! / b.close;
+    return {
+      open: b.open === undefined ? undefined : b.open * factor,
+      high: b.high === undefined ? undefined : b.high * factor,
+      low: b.low === undefined ? undefined : b.low * factor,
+      close: b.close * factor,
+    };
+  });
+}
+
+/**
+ * True when every day from `from` to `to` has an open, high and low, all four values positive
+ * and finite, the high not below the low, and the open and close within [low, high]. Otherwise
+ * the window gives no value (never estimated).
+ */
+function windowUsable(d: RefOhlc[], from: number, to: number): boolean {
+  for (let j = from; j <= to; j++) {
+    const x = d[j]!;
+    if (!positive(x.open) || !positive(x.high) || !positive(x.low) || !positive(x.close)) {
+      return false;
+    }
+    if (x.high < x.low) return false;
+    if (x.open < x.low || x.open > x.high) return false;
+    if (x.close < x.low || x.close > x.high) return false;
+  }
+  return true;
+}
+
+/** sqrt(252 x variance) x 100, or no value for a negative or non-finite variance. */
+export const refAnnualize = (variance: number): number | undefined =>
+  variance < 0 || !Number.isFinite(variance) ? undefined : Math.sqrt(252 * variance) * 100;
+
+/** Parkinson: sqrt(252 x S / (4 ln 2 x N)) x 100, S = sum of (ln(H/L))^2 over the last N days. */
+export function refParkinson(d: RefOhlc[], length: number): (number | undefined)[] {
+  return d.map((_, i) => {
+    const from = i - length + 1;
+    if (from < 0 || !windowUsable(d, from, i)) return undefined;
+    let S = 0;
+    for (let j = from; j <= i; j++) S += Math.log(d[j]!.high! / d[j]!.low!) ** 2;
+    return refAnnualize(S / (4 * Math.log(2) * length));
+  });
+}
+
+/** Garman-Klass: sqrt(252 x mean of [0.5 (ln H/L)^2 - (2 ln 2 - 1)(ln C/O)^2]) x 100. */
+export function refGarmanKlass(d: RefOhlc[], length: number): (number | undefined)[] {
+  return d.map((_, i) => {
+    const from = i - length + 1;
+    if (from < 0 || !windowUsable(d, from, i)) return undefined;
+    let sum = 0;
+    for (let j = from; j <= i; j++) {
+      const x = d[j]!;
+      const hl = Math.log(x.high! / x.low!);
+      const co = Math.log(x.close / x.open!);
+      sum += 0.5 * hl * hl - (2 * Math.log(2) - 1) * co * co;
+    }
+    return refAnnualize(sum / length);
+  });
+}
+
+/** Sample variance (n - 1), two-pass. */
+function sampleVariance(xs: number[]): number {
+  const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+  return xs.reduce((a, b) => a + (b - mean) ** 2, 0) / (xs.length - 1);
+}
+
+/**
+ * Yang-Zhang: sqrt(252 x (s_o + k s_c + (1 - k) s_rs)) x 100 over the last N days; s_o and s_c
+ * sample variances of ln(O_t / C_t-1) and ln(C_t / O_t), s_rs the mean Rogers-Satchell term,
+ * k = 0.34 / (1.34 + (N + 1) / (N - 1)). The window is the last N days; the close before it is
+ * read only for the first overnight ratio.
+ */
+export function refYangZhang(d: RefOhlc[], length: number): (number | undefined)[] {
+  const k = 0.34 / (1.34 + (length + 1) / (length - 1));
+  return d.map((_, i) => {
+    const from = i - length + 1;
+    if (from < 1 || !windowUsable(d, from, i) || !positive(d[from - 1]!.close)) return undefined;
+    const overnight: number[] = [];
+    const openToClose: number[] = [];
+    let rs = 0;
+    for (let j = from; j <= i; j++) {
+      const x = d[j]!;
+      overnight.push(Math.log(x.open! / d[j - 1]!.close));
+      openToClose.push(Math.log(x.close / x.open!));
+      rs +=
+        Math.log(x.high! / x.close) * Math.log(x.high! / x.open!) +
+        Math.log(x.low! / x.close) * Math.log(x.low! / x.open!);
+    }
+    const so = sampleVariance(overnight);
+    const sc = sampleVariance(openToClose);
+    return refAnnualize(so + k * sc + (1 - k) * (rs / length));
+  });
+}
+
 type State = 'unset' | 'true' | 'false';
 
 /** One comparison step as a state machine (tolerance band, near-ties, plain first day). */
@@ -151,9 +360,32 @@ export function refEvaluate(s: RefStrategy, bars: Record<string, RefBar[]>): Ref
     const list = bars[o.ticker!]!;
     const i = list.findIndex((b) => b.date === date);
     const series = o.totalReturn ? refTotalReturn(list) : refPrice(list);
-    if (o.indicator === 'price') return series[i];
-    if (o.indicator === 'sma') return refSma(series, o.length!)[i];
-    return refVolatility(series, o.length!)[i];
+    switch (o.indicator) {
+      case 'price':
+        return series[i];
+      case 'sma':
+        return refSma(series, o.length!)[i];
+      case 'ema':
+        return refEma(series, o.length!)[i];
+      case 'return':
+        return refReturn(series, o.length!)[i];
+      case 'drawdown':
+        return refDrawdown(series, o.length)[i];
+      case 'high':
+        return refHigh(series, o.length!)[i];
+      case 'low':
+        return refLow(series, o.length!)[i];
+      case 'volatility': {
+        const method = o.method ?? 'close';
+        if (method === 'close') return refVolatility(series, o.length!)[i];
+        const d = refOhlc(list, o.totalReturn ?? false);
+        if (method === 'parkinson') return refParkinson(d, o.length!)[i];
+        if (method === 'garman_klass') return refGarmanKlass(d, o.length!)[i];
+        return refYangZhang(d, o.length!)[i];
+      }
+      default:
+        throw new Error(`reference: unknown indicator ${String(o.indicator)}`);
+    }
   };
   let dates: string[] | undefined;
   for (const t of tickers) {
