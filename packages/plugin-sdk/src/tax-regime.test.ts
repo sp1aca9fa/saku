@@ -8,7 +8,9 @@ import { loadPlugins } from './registry';
 import {
   compareDecimalText,
   installTaxRegime,
+  regimeTranslator,
   setTaxRegime,
+  taxRegimeFingerprint,
   taxRegimeProblems,
 } from './tax-regime';
 import type { TaxRegime } from './types';
@@ -19,12 +21,15 @@ function regime(key = 'testland'): TaxRegime {
     info: {
       key,
       kind: 'tax_regime',
+      version: '1',
       nameKey: 'name',
       country: 'QZ',
       currency: 'XTS',
       sources: ['https://tax.testland.test/'],
     },
     yearStart: '01-01',
+    yearDate: 'settlement_date',
+    fxDate: 'trade_date',
     accountTypes: [
       {
         key: 'taxable',
@@ -33,8 +38,14 @@ function regime(key = 'testland'): TaxRegime {
         descriptionKey: 'a',
         eligibility: { leveraged: true, assetClasses: 'all', purchaseModes: ['lump_sum'] },
         tax: { realizedGains: '0.20315', dividends: '1' },
-        losses: { offsets: ['gains'], carryforwardYears: 'unlimited', conditions: [] },
-        foreignTaxCredit: true,
+        losses: {
+          offsets: ['gains'],
+          carryforwardYears: 'unlimited',
+          conditions: [{ kind: 'filing', appliesTo: ['offsets', 'carryforward'], textKey: 'c' }],
+        },
+        foreignTaxCredit: { conditions: [] },
+        foreignDividendBase: 'gross',
+        foreignWithholding: [{ country: 'QA', rate: '0' }],
       },
       {
         key: 'growth',
@@ -54,6 +65,7 @@ function regime(key = 'testland'): TaxRegime {
         tax: { realizedGains: '0', dividends: '0.0' },
         losses: { offsets: [], carryforwardYears: 0, conditions: [] },
         foreignTaxCredit: false,
+        foreignDividendBase: 'net_of_withholding',
       },
       {
         key: 'plan',
@@ -74,6 +86,7 @@ function regime(key = 'testland'): TaxRegime {
         tax: { realizedGains: '0', dividends: '0' },
         losses: { offsets: [], carryforwardYears: 0, conditions: [] },
         foreignTaxCredit: false,
+        foreignDividendBase: 'net_of_withholding',
       },
     ],
     quotaGroups: [
@@ -91,9 +104,12 @@ function regime(key = 'testland'): TaxRegime {
       sales: 'M',
       dividends: 'M',
     },
-    foreignWithholding: [],
+    foreignWithholding: [{ country: 'QA', rate: '0.15' }],
     transfers: [{ from: 'growth', to: 'taxable' }],
-    texts: { en: { name: 'Testland', a: 'A' }, ja: { a: 'エー' } },
+    texts: {
+      en: { name: 'Testland', a: 'A', c: 'Only if you file; {carryforwardYears} years.' },
+      ja: { a: 'エー' },
+    },
   };
 }
 
@@ -184,5 +200,56 @@ describe('tax regime declarations', () => {
     expect(await installTaxRegime(db, loaded)).toEqual({ regime: loaded[0] });
     // The plug-in removed or renamed since: unknown, never another regime.
     expect(await installTaxRegime(db, [regime('otherland')])).toEqual({ unknown: 'testland' });
+  });
+
+  it("bounds an account type's limits by its groups' limits", () => {
+    const r = regime();
+    r.quotaGroups![0]!.lifetime = { amount: '11999999.99', currency: 'XTS' };
+    r.quotaGroups![0]!.annual = { amount: '1000000', currency: 'XTS' };
+    expect(taxRegimeProblems(r)).toEqual([
+      'accountTypes[1].quota: annual limit 2400000 is above the annual limit 1000000 of quotaGroups[0]',
+      'accountTypes[1].quota: lifetime limit 12000000.00 is above the lifetime limit 11999999.99 of quotaGroups[0]',
+      'accountTypes[2].quota: annual limit 1200000 is above the annual limit 1000000 of quotaGroups[0]',
+    ]);
+  });
+
+  it('fingerprints the rules, not the wording or the key order', () => {
+    const base = taxRegimeFingerprint(regime());
+    expect(base).toMatch(/^[0-9a-f]{64}$/);
+    const worded = regime();
+    worded.texts.en!.a = 'Another wording';
+    expect(taxRegimeFingerprint(worded)).toBe(base);
+    const reordered = regime();
+    reordered.info = { ...reordered.info };
+    const { key, ...rest } = reordered.info;
+    reordered.info = { ...rest, key } as typeof reordered.info;
+    expect(taxRegimeFingerprint(reordered)).toBe(base);
+    const rule = regime();
+    rule.accountTypes[0]!.tax.dividends = '0.99';
+    expect(taxRegimeFingerprint(rule)).not.toBe(base);
+    const yearDate = regime();
+    yearDate.yearDate = 'trade_date';
+    expect(taxRegimeFingerprint(yearDate)).not.toBe(base);
+  });
+
+  it('a changed declaration is not used until set again (refused once users have tax data)', async () => {
+    const db = await testDb();
+    await setTaxRegime(db, 'testland', [regime()]);
+    const updated = regime();
+    updated.info.version = '2';
+    updated.accountTypes[0]!.tax.realizedGains = '0.3';
+    expect(await installTaxRegime(db, [updated])).toEqual({
+      changed: { key: 'testland', version: '2', setVersion: '1' },
+    });
+    // No user tax data (no tax tables yet): the admin accepts it by setting the regime again.
+    await setTaxRegime(db, 'testland', [updated]);
+    expect(await installTaxRegime(db, [updated])).toEqual({ regime: updated });
+  });
+
+  it('fills placeholders and throws on one left unfilled', () => {
+    const t = regimeTranslator(regime(), 'ja');
+    expect(t('c', { carryforwardYears: 3 })).toBe('Only if you file; 3 years.');
+    expect(() => t('c')).toThrow(/text c needs a value for \{carryforwardYears\}/);
+    expect(t('a')).toBe('エー');
   });
 });

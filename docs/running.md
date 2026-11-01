@@ -25,7 +25,7 @@ last two only when every source answered for every item. Details: `docs/data-pip
 |---|---|
 | `pnpm db:migrate` | Applies database migrations. Run after every update (the update script does) |
 | `pnpm settings set <name> <value>` | Install settings, such as `base_currency`, `time_zone`, `primary_language` |
-| `pnpm symbols import <file>` | Loads a universe file (see `templates/universe/`) |
+| `pnpm symbols import <file>` | Loads a universe file (see `templates/universe/`). Each symbol states `ticker`, `tier`, `assetClass`, `currency` and `leverageFactor` (1 for an unleveraged fund, 2 for 2x, -1 for inverse; required, so a leveraged fund is never taken for an unleveraged one), and optionally `underlying`, `issuer`, `indexSeries` and `domicile` (ISO 3166-1 alpha-2, where its dividends come from: withholding at source). A file with any problem is refused whole |
 | `pnpm user create <username>` | Creates an account (the first is an admin) |
 | `pnpm plugins` | Loads and validates every plug-in and lists them |
 | `pnpm plugins tax-regime <key>` | Sets the install's tax regime (`tax_regime`) to a loaded regime plug-in; an unknown key is refused, and so is a change once users have tax data (`pnpm settings set tax_regime` is refused: it cannot check the key) |

@@ -291,8 +291,8 @@ export type TaxFxKind = Exclude<FxKind, 'valuation'>;
 /** Which products an account type may hold and how they may be bought. */
 export interface TaxEligibility {
   /**
-   * Leveraged and inverse products (`symbols.leverage_factor` other than 1) may be held. A
-   * product whose factor is unknown counts as leveraged.
+   * Leveraged and inverse products (`symbols.leverage_factor` other than 1) may be held. The
+   * symbol import requires every symbol to state its factor (1 for an unleveraged fund).
    */
   leveraged: boolean;
   /** The asset classes it may hold (`symbols.asset_class`), or `'all'`. */
@@ -339,12 +339,22 @@ export interface TaxRates {
   dividends: DecimalText;
 }
 
-/** A condition a loss offset or carryforward depends on. */
-export interface LossCondition {
+/** A condition a tax rule depends on. */
+export interface TaxCondition {
   /** `filing`: the person files a tax return for the year. */
   kind: 'filing';
-  /** What the user is told about it. */
+  /** What the user is told about it (placeholders: `REGIME_TEXT_PLACEHOLDERS`). */
   textKey: RegimeTextKey;
+}
+
+/** A condition on a loss rule, naming the rules it applies to. */
+export interface LossCondition extends TaxCondition {
+  /**
+   * `offsets`: setting a loss against gains or dividends within the year; `carryforward`:
+   * carrying an unused loss into later years. An in-year offset can need nothing while the
+   * carryforward needs a filed return.
+   */
+  appliesTo: ('offsets' | 'carryforward')[];
 }
 
 /** What happens to a realized loss in an account type. */
@@ -353,7 +363,7 @@ export interface TaxLosses {
   offsets: LossOffset[];
   /** Regime years a loss not used may be carried forward (whole number, 0: none), or no limit. */
   carryforwardYears: number | 'unlimited';
-  /** Conditions for the offsets and the carryforward (none: they always apply). */
+  /** Conditions for the offsets or the carryforward (none: they always apply). */
   conditions: LossCondition[];
 }
 
@@ -369,8 +379,21 @@ export interface TaxAccountType {
   quota?: TaxQuota;
   tax: TaxRates;
   losses: TaxLosses;
-  /** Whether foreign tax withheld on dividends (`TaxRegime.foreignWithholding`) is credited. */
-  foreignTaxCredit: boolean;
+  /**
+   * Whether foreign tax withheld on dividends is credited against this regime's tax: `false`,
+   * or credited under its conditions (none: always).
+   */
+  foreignTaxCredit: false | { conditions: TaxCondition[] };
+  /**
+   * What the dividend tax (`tax.dividends`) on a foreign dividend is charged on: the gross
+   * dividend, or what is left after the withholding at source.
+   */
+  foreignDividendBase: 'gross' | 'net_of_withholding';
+  /**
+   * Withholding at source for this account type where it differs from the regime's
+   * (`TaxRegime.foreignWithholding`), per paying country; countries not listed take the regime's.
+   */
+  foreignWithholding?: ForeignWithholding[];
 }
 
 /** A lifetime or annual limit several account types share (e.g. one lifetime cap for two). */
@@ -415,6 +438,12 @@ export interface TaxRegimeInfo {
   /** Stable identifier (the `tax_regime` setting); never changed once user tax data exists. */
   key: string;
   kind: 'tax_regime';
+  /**
+   * The declaration's version (e.g. `2026.1`), raised with every change of a rule. The install
+   * stores the declaration's fingerprint when the regime is set; a changed declaration is not
+   * used until the admin sets it again, which is refused once users have tax data.
+   */
+  version: string;
   nameKey: RegimeTextKey;
   /** The country whose rules these are (ISO 3166-1 alpha-2; a made-up one: a user-assigned code). */
   country: string;
@@ -429,6 +458,10 @@ export interface TaxRegime {
   info: TaxRegimeInfo;
   /** First day of the regime year (`MM-DD`), for annual limits and carryforward. */
   yearStart: string;
+  /** Which date of a trade places it in a regime year (quotas, gains, carryforward). */
+  yearDate: 'trade_date' | 'settlement_date';
+  /** Which date's tax rate (`fx`) converts a trade. */
+  fxDate: 'trade_date' | 'settlement_date';
   accountTypes: TaxAccountType[];
   quotaGroups?: QuotaGroup[];
   costBasis: { method: LotMethod; sameDayOrder: SameDayOrder };

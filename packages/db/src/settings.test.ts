@@ -13,6 +13,7 @@ import {
   RECHECK_DEFAULT_MINUTES,
   recheckMinutes,
   setSetting,
+  taxRegimeDeclaration,
   unmatchedTolerances,
   userTaxDataExists,
 } from './settings';
@@ -91,30 +92,50 @@ describe('settings', () => {
 
   it('sets tax_regime only to a loaded regime, and keeps it while users have tax data', async () => {
     const db = await testDb();
+    const ex = { key: 'examplia', version: '1', fingerprint: 'f1' };
+    const other = { key: 'other', version: '1', fingerprint: 'o1' };
     await expect(
       setSetting(db, 'tax_regime', 'Bad Key', 'cli', { taxRegimes: [] }),
     ).rejects.toThrow(/valid/);
     // Without the loaded regimes at hand (`pnpm settings set`), refused: the key is unchecked.
     await expect(setSetting(db, 'tax_regime', 'examplia')).rejects.toThrow(/pnpm plugins/);
     await expect(
-      setSetting(db, 'tax_regime', 'other', 'cli', { taxRegimes: ['examplia'] }),
+      setSetting(db, 'tax_regime', 'other', 'cli', { taxRegimes: [ex] }),
     ).rejects.toThrow(/No loaded tax regime has the key other \(loaded: examplia\)/);
-    await setSetting(db, 'tax_regime', 'examplia', 'cli', { taxRegimes: ['examplia', 'other'] });
-    // No user tax data yet: a change is allowed.
-    await setSetting(db, 'tax_regime', 'other', 'cli', { taxRegimes: ['examplia', 'other'] });
+    expect(await taxRegimeDeclaration(db)).toBeUndefined();
+    await setSetting(db, 'tax_regime', 'examplia', 'cli', { taxRegimes: [ex, other] });
+    expect(await taxRegimeDeclaration(db)).toEqual(ex);
+    // No user tax data yet: a change of regime, or of its declaration, is allowed.
+    await setSetting(db, 'tax_regime', 'other', 'cli', { taxRegimes: [ex, other] });
     expect(await getSetting(db, 'tax_regime')).toBe('other');
+    const other2 = { ...other, version: '2', fingerprint: 'o2' };
+    await setSetting(db, 'tax_regime', 'other', 'cli', { taxRegimes: [ex, other2] });
+    expect(await taxRegimeDeclaration(db)).toEqual(other2);
 
-    // With a row in a user tax table, the regime cannot change (the same value can be set again).
+    // With a row in a user tax table: neither the regime nor its declaration can change (the
+    // same declaration can be set again).
     const lots = sqliteTable('test_tax_lots', { ownerId: text('owner_id').notNull() });
     await db.run(sql`CREATE TABLE test_tax_lots (owner_id text NOT NULL)`);
     expect(await userTaxDataExists(db, [lots])).toBe(false);
-    await checkTaxRegimeChange(db, 'examplia', ['examplia', 'other'], [lots]);
+    await checkTaxRegimeChange(db, 'examplia', [ex, other2], [lots]);
     await db.insert(lots).values({ ownerId: 'u1' });
     expect(await userTaxDataExists(db, [lots])).toBe(true);
-    await expect(
-      checkTaxRegimeChange(db, 'examplia', ['examplia', 'other'], [lots]),
-    ).rejects.toThrow(/tax_regime is other and cannot be changed/);
-    await checkTaxRegimeChange(db, 'other', ['examplia', 'other'], [lots]);
+    await expect(checkTaxRegimeChange(db, 'examplia', [ex, other2], [lots])).rejects.toThrow(
+      /tax_regime is other and cannot be changed/,
+    );
+    expect(await checkTaxRegimeChange(db, 'other', [ex, other2], [lots])).toEqual(other2);
+    await expect(checkTaxRegimeChange(db, 'other', [ex, other], [lots])).rejects.toThrow(
+      /The other regime's rules changed since it was set \(version 2, now version 1\)/,
+    );
+    // A stored declaration that cannot be read matches nothing.
+    await db
+      .update(appSettings)
+      .set({ value: 'garbage' })
+      .where(sql`${appSettings.key} = 'tax_regime_declaration'`);
+    expect(await taxRegimeDeclaration(db)).toEqual({ invalid: true });
+    await expect(checkTaxRegimeChange(db, 'other', [other2], [lots])).rejects.toThrow(
+      /an unknown declaration/,
+    );
   });
 
   it('lists every per-user table as tax data or not, so the tax_regime lock never misses one', () => {

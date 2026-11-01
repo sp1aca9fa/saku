@@ -2,7 +2,15 @@
 // declaration when the plug-ins load, the regime's texts, and the install's `tax_regime` setting.
 // A regime only declares; the tax engine computes. Nothing here does tax arithmetic: amounts and
 // rates stay decimal text, only checked for form, range and consistency (no float ever holds one).
-import { type Db, getSetting, setSetting } from '@saku/db';
+import { canonicalJson, type Json } from '@saku/core';
+import {
+  type Db,
+  type TaxRegimeDeclaration,
+  getSetting,
+  setSetting,
+  sha256,
+  taxRegimeDeclaration,
+} from '@saku/db';
 import type {
   LossOffset,
   LotMethod,
@@ -27,6 +35,29 @@ export const TAX_FX_KINDS = [
   'tax_sell',
 ] as const satisfies readonly TaxFxKind[];
 
+export const TRADE_DATES = ['trade_date', 'settlement_date'] as const;
+export const FOREIGN_DIVIDEND_BASES = ['gross', 'net_of_withholding'] as const;
+export const LOSS_CONDITION_EFFECTS = ['offsets', 'carryforward'] as const;
+
+/**
+ * The placeholders each kind of regime text receives, filled by the app from the declaration
+ * (so a text never disagrees with a rule): rates and limits formatted for the reader, years as a
+ * number. A text may use only its kind's placeholders (a key used for two kinds: only those both
+ * receive); a text no declaration names receives none. Plain `{name}` only, no other braces.
+ */
+export const REGIME_TEXT_PLACEHOLDERS = {
+  regimeName: [],
+  accountName: [],
+  /** Of the account type described: its rates and limits, and its loss carryforward. */
+  accountDescription: ['gainsRate', 'dividendsRate', 'annual', 'lifetime', 'carryforwardYears'],
+  /** A loss condition: the account type's carryforward. */
+  lossCondition: ['carryforwardYears'],
+  creditCondition: [],
+  groupName: [],
+  rateName: [],
+} as const satisfies Record<string, readonly string[]>;
+export type RegimeTextKind = keyof typeof REGIME_TEXT_PLACEHOLDERS;
+
 /** The longest loss carryforward a regime may declare in years (beyond it: `'unlimited'`). */
 export const MAX_CARRYFORWARD_YEARS = 100;
 
@@ -36,6 +67,8 @@ const ITEM_KEY = /^[a-z][a-z0-9_]{1,39}$/;
 /** A regime's own name for a tax rate (`TTM`). */
 const RATE_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,19}$/;
 const LANGUAGE = /^[a-z]{2,3}(-[A-Z]{2})?$/;
+const VERSION = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,39}$/;
+const PLACEHOLDER = /\{(\w+)\}/g;
 /** Non-negative, plain notation; 40 characters is far beyond any real amount or rate. */
 const DECIMAL = /^(0|[1-9][0-9]*)(\.[0-9]+)?$/;
 
@@ -122,9 +155,14 @@ export function taxRegimeProblems(regime: unknown): string[] {
       }
     }
   } else if (texts !== undefined) bad('texts', 'must be an object of languages');
-  const textKey = (v: unknown, path: string) => {
-    if (typeof v !== 'string' || v === '') bad(path, 'must be a text key');
-    else if (en && lookup(en, v) === undefined) bad(path, `no English text "${v}"`);
+  /** Per text key, the placeholders it may use (the intersection over the kinds it serves). */
+  const allowedPlaceholders = new Map<string, Set<string>>();
+  const textKey = (v: unknown, path: string, kind: RegimeTextKind) => {
+    if (typeof v !== 'string' || v === '') return bad(path, 'must be a text key');
+    if (en && lookup(en, v) === undefined) bad(path, `no English text "${v}"`);
+    const own = new Set<string>(REGIME_TEXT_PLACEHOLDERS[kind]);
+    const before = allowedPlaceholders.get(v);
+    allowedPlaceholders.set(v, before ? new Set([...before].filter((p) => own.has(p))) : own);
   };
 
   // info
@@ -136,7 +174,10 @@ export function taxRegimeProblems(regime: unknown): string[] {
       bad('info.key', 'must be 2-40 of a-z, 0-9 and -, starting with a letter');
     }
     if (i.kind !== 'tax_regime') bad('info.kind', 'must be "tax_regime"');
-    textKey(i.nameKey, 'info.nameKey');
+    if (i.version !== undefined && (typeof i.version !== 'string' || !VERSION.test(i.version))) {
+      bad('info.version', 'must be 1-40 of letters, digits, ., +, _ and -, e.g. "2026.1"');
+    }
+    textKey(i.nameKey, 'info.nameKey', 'regimeName');
     if (typeof i.country === 'string' && /^[A-Z]{2}$/.test(i.country)) country = i.country;
     else bad('info.country', 'must be an ISO 3166-1 alpha-2 code');
     if (typeof i.currency === 'string' && /^[A-Z]{3}$/.test(i.currency)) currency = i.currency;
@@ -204,20 +245,45 @@ export function taxRegimeProblems(regime: unknown): string[] {
     if (new Set(v).size !== v.length) bad(path, 'names one twice');
     return v as T[];
   };
+  // Every field checked with it is required: a missing one is reported once, as required.
   const oneOf = (v: unknown, path: string, allowed: readonly string[]) => {
-    if (!allowed.includes(v as string)) bad(path, `must be one of ${allowed.join(', ')}`);
+    if (v !== undefined && !allowed.includes(v as string))
+      bad(path, `must be one of ${allowed.join(', ')}`);
+  };
+
+  /** A withholding list: ISO country codes other than the regime's own, each once, rates 0..1. */
+  const withholding = (list: unknown, path: string) => {
+    if (!Array.isArray(list)) return bad(path, 'must be a list');
+    const seen = new Set<unknown>();
+    list.forEach((w, n) => {
+      const wp = `${path}[${n}]`;
+      if (!fields(w ?? null, wp, ['country', 'rate'], ['country', 'rate'])) return;
+      const x = w as Record<string, unknown>;
+      if (typeof x.country !== 'string' || !/^[A-Z]{2}$/.test(x.country)) {
+        bad(`${wp}.country`, 'must be an ISO 3166-1 alpha-2 code');
+      } else if (x.country === country) {
+        bad(
+          `${wp}.country`,
+          "the regime's own country is not foreign (its dividends are taxed by the account type's rate)",
+        );
+      }
+      if (seen.has(x.country)) bad(`${wp}.country`, `"${String(x.country)}" declared twice`);
+      seen.add(x.country);
+      rate(x.rate, `${wp}.rate`);
+    });
   };
 
   // yearStart
   if (typeof r.yearStart !== 'string' || !validMonthDay(r.yearStart)) {
     bad('yearStart', 'must be a day of the year as MM-DD (not 02-29)');
   }
+  oneOf(r.yearDate, 'yearDate', TRADE_DATES);
+  oneOf(r.fxDate, 'fxDate', TRADE_DATES);
 
-  // Groups' limits, read before the account types (a release may rest on a group's limit).
   const groups = Array.isArray(r.quotaGroups) ? r.quotaGroups : [];
-  if (r.quotaGroups !== undefined && !Array.isArray(r.quotaGroups))
+  if (r.quotaGroups !== undefined && !Array.isArray(r.quotaGroups)) {
     bad('quotaGroups', 'must be a list');
-  const groupLimits = new Map<string, Set<'annual' | 'lifetime'>>();
+  }
 
   // accountTypes
   const accountKeys = new Set<string>();
@@ -233,18 +299,54 @@ export function taxRegimeProblems(regime: unknown): string[] {
       accountKeys.add(a.key);
     }
   }
-  for (const g of groups) {
-    if (!isObject(g) || !Array.isArray(g.accountTypes)) continue;
-    const has = new Set<'annual' | 'lifetime'>();
-    if (g.annual !== undefined) has.add('annual');
-    if (g.lifetime !== undefined) has.add('lifetime');
-    for (const k of g.accountTypes) {
-      if (typeof k !== 'string') continue;
-      const set = groupLimits.get(k) ?? new Set();
-      for (const l of has) set.add(l);
-      groupLimits.set(k, set);
-    }
+
+  // quotaGroups (before the account types: their limits bound the account types' limits)
+  interface GroupLimits {
+    path: string;
+    annual?: string;
+    lifetime?: string;
+    declares: Set<'annual' | 'lifetime'>;
   }
+  const groupsOf = new Map<string, GroupLimits[]>();
+  const groupKeys = new Set<string>();
+  groups.forEach((g, n) => {
+    const path = `quotaGroups[${n}]`;
+    if (!fields(g ?? null, path, GROUP_FIELDS, GROUP_REQUIRED)) return;
+    const q = g as Record<string, unknown>;
+    if (typeof q.key !== 'string' || !ITEM_KEY.test(q.key)) {
+      bad(`${path}.key`, 'must be 2-40 of a-z, 0-9 and _, starting with a letter');
+    } else if (groupKeys.has(q.key)) bad(`${path}.key`, `"${q.key}" declared twice`);
+    else groupKeys.add(q.key);
+    textKey(q.nameKey, `${path}.nameKey`, 'groupName');
+    const annual = q.annual === undefined ? undefined : limit(q.annual, `${path}.annual`);
+    const lifetime = q.lifetime === undefined ? undefined : limit(q.lifetime, `${path}.lifetime`);
+    if (q.annual === undefined && q.lifetime === undefined) {
+      bad(path, 'declare an annual or a lifetime limit');
+    }
+    annualVsLifetime(annual, lifetime, path);
+    const declares = new Set<'annual' | 'lifetime'>();
+    if (q.annual !== undefined) declares.add('annual');
+    if (q.lifetime !== undefined) declares.add('lifetime');
+    const limits: GroupLimits = {
+      path,
+      declares,
+      ...(annual !== undefined && { annual }),
+      ...(lifetime !== undefined && { lifetime }),
+    };
+    if (!Array.isArray(q.accountTypes) || q.accountTypes.length === 0) {
+      bad(`${path}.accountTypes`, 'name at least one account type');
+    } else {
+      if (new Set(q.accountTypes).size !== q.accountTypes.length) {
+        bad(`${path}.accountTypes`, 'names one twice');
+      }
+      q.accountTypes.forEach((k, m) => {
+        if (typeof k !== 'string' || !accountKeys.has(k)) {
+          bad(`${path}.accountTypes[${m}]`, `no account type "${String(k)}"`);
+        } else groupsOf.set(k, [...(groupsOf.get(k) ?? []), limits]);
+      });
+    }
+  });
+
   let taxable = false;
   for (const [n, a] of accounts.entries()) {
     const path = `accountTypes[${n}]`;
@@ -259,8 +361,9 @@ export function taxRegimeProblems(regime: unknown): string[] {
       if (t.treatment !== 'taxable')
         bad(`${path}.treatment`, 'the "taxable" account type is taxable');
     }
-    textKey(t.nameKey, `${path}.nameKey`);
-    textKey(t.descriptionKey, `${path}.descriptionKey`);
+    textKey(t.nameKey, `${path}.nameKey`, 'accountName');
+    textKey(t.descriptionKey, `${path}.descriptionKey`, 'accountDescription');
+    const ownGroups = typeof t.key === 'string' ? (groupsOf.get(t.key) ?? []) : [];
 
     const e = t.eligibility;
     if (fields(e, `${path}.eligibility`, ELIGIBILITY_FIELDS, ELIGIBILITY_REQUIRED)) {
@@ -292,6 +395,25 @@ export function taxRegimeProblems(regime: unknown): string[] {
         bad(`${path}.quota`, 'declare an annual or a lifetime limit (leave quota out for none)');
       }
       annualVsLifetime(annual, lifetime, `${path}.quota`);
+      // An account type's limit above a shared one it counts against could never be used.
+      for (const g of ownGroups) {
+        const above = (
+          mine: string | undefined,
+          what: string,
+          theirs: string | undefined,
+          of: string,
+        ) => {
+          if (mine && theirs && compareDecimalText(mine, theirs) > 0) {
+            bad(
+              `${path}.quota`,
+              `${what} limit ${mine} is above the ${of} limit ${theirs} of ${g.path}`,
+            );
+          }
+        };
+        above(annual, 'annual', g.annual, 'annual');
+        above(annual, 'annual', g.lifetime, 'lifetime');
+        above(lifetime, 'lifetime', g.lifetime, 'lifetime');
+      }
       if (
         q.release !== undefined &&
         fields(q.release, `${path}.quota.release`, RELEASE_FIELDS, RELEASE_FIELDS)
@@ -303,9 +425,8 @@ export function taxRegimeProblems(regime: unknown): string[] {
           ['annual', 'lifetime'],
           true,
         );
-        const fromGroups = typeof t.key === 'string' ? groupLimits.get(t.key) : undefined;
         for (const l of limits) {
-          if (q[l] === undefined && !fromGroups?.has(l)) {
+          if (q[l] === undefined && !ownGroups.some((g) => g.declares.has(l))) {
             bad(
               `${path}.quota.release.limits`,
               `frees the ${l} limit, which neither the account type nor its groups declare`,
@@ -341,21 +462,58 @@ export function taxRegimeProblems(regime: unknown): string[] {
       }
       if (!Array.isArray(l.conditions)) bad(`${path}.losses.conditions`, 'must be a list');
       else {
-        const kinds = new Set<unknown>();
+        const seen = new Set<string>();
+        const offsets = Array.isArray(l.offsets) ? l.offsets : [];
         l.conditions.forEach((c, m) => {
           const cp = `${path}.losses.conditions[${m}]`;
-          if (!fields(c ?? null, cp, ['kind', 'textKey'], ['kind', 'textKey'])) return;
+          const fieldsOk = fields(c ?? null, cp, LOSS_CONDITION_FIELDS, LOSS_CONDITION_FIELDS);
+          if (!fieldsOk) return;
           const cond = c as Record<string, unknown>;
-          oneOf(cond.kind, `${cp}.kind`, ['filing']);
-          if (kinds.has(cond.kind)) bad(cp, `"${String(cond.kind)}" declared twice`);
-          kinds.add(cond.kind);
-          textKey(cond.textKey, `${cp}.textKey`);
+          oneOf(cond.kind, `${cp}.kind`, CONDITION_KINDS);
+          const effects = subset(cond.appliesTo, `${cp}.appliesTo`, LOSS_CONDITION_EFFECTS, true);
+          for (const effect of effects) {
+            const id = `${String(cond.kind)} ${effect}`;
+            if (seen.has(id)) bad(cp, `"${String(cond.kind)}" on ${effect} declared twice`);
+            seen.add(id);
+            if (effect === 'offsets' && offsets.length === 0) {
+              bad(
+                `${cp}.appliesTo`,
+                'a condition on offsets, which the account type does not allow',
+              );
+            }
+            if (effect === 'carryforward' && years === 0) {
+              bad(`${cp}.appliesTo`, 'a condition on a carryforward of 0 years');
+            }
+          }
+          textKey(cond.textKey, `${cp}.textKey`, 'lossCondition');
         });
       }
     }
 
-    if (typeof t.foreignTaxCredit !== 'boolean')
-      bad(`${path}.foreignTaxCredit`, 'must be true or false');
+    const credit = t.foreignTaxCredit;
+    if (credit !== false) {
+      const cp = `${path}.foreignTaxCredit`;
+      if (!isObject(credit)) bad(cp, 'must be false or { conditions: [...] }');
+      else if (fields(credit, cp, ['conditions'], ['conditions'])) {
+        if (!Array.isArray(credit.conditions)) bad(`${cp}.conditions`, 'must be a list');
+        else {
+          const kinds = new Set<unknown>();
+          credit.conditions.forEach((c, m) => {
+            const kp = `${cp}.conditions[${m}]`;
+            if (!fields(c ?? null, kp, ['kind', 'textKey'], ['kind', 'textKey'])) return;
+            const cond = c as Record<string, unknown>;
+            oneOf(cond.kind, `${kp}.kind`, CONDITION_KINDS);
+            if (kinds.has(cond.kind)) bad(kp, `"${String(cond.kind)}" declared twice`);
+            kinds.add(cond.kind);
+            textKey(cond.textKey, `${kp}.textKey`, 'creditCondition');
+          });
+        }
+      }
+    }
+    oneOf(t.foreignDividendBase, `${path}.foreignDividendBase`, FOREIGN_DIVIDEND_BASES);
+    if (t.foreignWithholding !== undefined) {
+      withholding(t.foreignWithholding, `${path}.foreignWithholding`);
+    }
   }
   if (Array.isArray(r.accountTypes) && !taxable) {
     bad(
@@ -363,36 +521,6 @@ export function taxRegimeProblems(regime: unknown): string[] {
       'a "taxable" account type is required (the default for timing and leveraged strategies)',
     );
   }
-
-  // quotaGroups
-  const groupKeys = new Set<string>();
-  groups.forEach((g, n) => {
-    const path = `quotaGroups[${n}]`;
-    if (!fields(g ?? null, path, GROUP_FIELDS, GROUP_REQUIRED)) return;
-    const q = g as Record<string, unknown>;
-    if (typeof q.key !== 'string' || !ITEM_KEY.test(q.key)) {
-      bad(`${path}.key`, 'must be 2-40 of a-z, 0-9 and _, starting with a letter');
-    } else if (groupKeys.has(q.key)) bad(`${path}.key`, `"${q.key}" declared twice`);
-    else groupKeys.add(q.key);
-    textKey(q.nameKey, `${path}.nameKey`);
-    if (!Array.isArray(q.accountTypes) || q.accountTypes.length === 0) {
-      bad(`${path}.accountTypes`, 'name at least one account type');
-    } else {
-      if (new Set(q.accountTypes).size !== q.accountTypes.length)
-        bad(`${path}.accountTypes`, 'names one twice');
-      q.accountTypes.forEach((k, m) => {
-        if (typeof k !== 'string' || !accountKeys.has(k)) {
-          bad(`${path}.accountTypes[${m}]`, `no account type "${String(k)}"`);
-        }
-      });
-    }
-    const annual = q.annual === undefined ? undefined : limit(q.annual, `${path}.annual`);
-    const lifetime = q.lifetime === undefined ? undefined : limit(q.lifetime, `${path}.lifetime`);
-    if (q.annual === undefined && q.lifetime === undefined) {
-      bad(path, 'declare an annual or a lifetime limit');
-    }
-    annualVsLifetime(annual, lifetime, path);
-  });
 
   // costBasis
   if (fields(r.costBasis, 'costBasis', ['method', 'sameDayOrder'], ['method', 'sameDayOrder'])) {
@@ -415,7 +543,7 @@ export function taxRegimeProblems(regime: unknown): string[] {
         if (!fields(def ?? null, path, ['kind', 'nameKey'], ['kind', 'nameKey'])) continue;
         const d = def as Record<string, unknown>;
         oneOf(d.kind, `${path}.kind`, TAX_FX_KINDS);
-        textKey(d.nameKey, `${path}.nameKey`);
+        textKey(d.nameKey, `${path}.nameKey`, 'rateName');
       }
     }
     for (const use of ['purchases', 'sales', 'dividends'] as const) {
@@ -429,27 +557,9 @@ export function taxRegimeProblems(regime: unknown): string[] {
   }
 
   // foreignWithholding
-  if (!Array.isArray(r.foreignWithholding))
+  if (!Array.isArray(r.foreignWithholding)) {
     bad('foreignWithholding', 'must be a list (empty: none declared)');
-  else {
-    const seen = new Set<unknown>();
-    r.foreignWithholding.forEach((w, n) => {
-      const path = `foreignWithholding[${n}]`;
-      if (!fields(w ?? null, path, ['country', 'rate'], ['country', 'rate'])) return;
-      const x = w as Record<string, unknown>;
-      if (typeof x.country !== 'string' || !/^[A-Z]{2}$/.test(x.country)) {
-        bad(`${path}.country`, 'must be an ISO 3166-1 alpha-2 code');
-      } else if (x.country === country) {
-        bad(
-          `${path}.country`,
-          "the regime's own country is not foreign (its dividends are taxed by the account type's rate)",
-        );
-      }
-      if (seen.has(x.country)) bad(`${path}.country`, `"${String(x.country)}" declared twice`);
-      seen.add(x.country);
-      rate(x.rate, `${path}.rate`);
-    });
-  }
+  } else withholding(r.foreignWithholding, 'foreignWithholding');
 
   // transfers
   if (!Array.isArray(r.transfers))
@@ -472,12 +582,39 @@ export function taxRegimeProblems(regime: unknown): string[] {
     });
   }
 
+  // Placeholders: every language's texts use only what their kind receives.
+  if (isObject(texts)) {
+    for (const [lang, tree] of Object.entries(texts)) {
+      if (textTreeProblem(tree)) continue;
+      for (const key of leafKeys(tree as RegimeTexts)) {
+        const text = lookup(tree as RegimeTexts, key)!;
+        const allowed = allowedPlaceholders.get(key) ?? new Set<string>();
+        if (/[{}]/.test(text.replace(PLACEHOLDER, ''))) {
+          bad(`texts.${lang}.${key}`, 'braces only as {name} placeholders');
+        }
+        for (const [, name] of text.matchAll(PLACEHOLDER)) {
+          if (!allowed.has(name!)) {
+            bad(
+              `texts.${lang}.${key}`,
+              `placeholder {${name}} is not one this text receives (${[...allowed].join(', ') || 'none'})`,
+            );
+          }
+        }
+      }
+    }
+  }
+
   return problems;
 }
+
+const CONDITION_KINDS = ['filing'] as const;
+const LOSS_CONDITION_FIELDS = ['kind', 'appliesTo', 'textKey'];
 
 const REGIME_FIELDS = [
   'info',
   'yearStart',
+  'yearDate',
+  'fxDate',
   'accountTypes',
   'quotaGroups',
   'costBasis',
@@ -487,7 +624,7 @@ const REGIME_FIELDS = [
   'texts',
 ];
 const REGIME_REQUIRED = REGIME_FIELDS.filter((f) => f !== 'quotaGroups');
-const INFO_FIELDS = ['key', 'kind', 'nameKey', 'country', 'currency', 'sources'];
+const INFO_FIELDS = ['key', 'kind', 'version', 'nameKey', 'country', 'currency', 'sources'];
 const ACCOUNT_FIELDS = [
   'key',
   'treatment',
@@ -498,8 +635,10 @@ const ACCOUNT_FIELDS = [
   'tax',
   'losses',
   'foreignTaxCredit',
+  'foreignDividendBase',
+  'foreignWithholding',
 ];
-const ACCOUNT_REQUIRED = ACCOUNT_FIELDS.filter((f) => f !== 'quota');
+const ACCOUNT_REQUIRED = ACCOUNT_FIELDS.filter((f) => f !== 'quota' && f !== 'foreignWithholding');
 const ELIGIBILITY_FIELDS = ['leveraged', 'assetClasses', 'designatedOnly', 'purchaseModes'];
 const ELIGIBILITY_REQUIRED = ['leveraged', 'assetClasses', 'purchaseModes'];
 const QUOTA_FIELDS = ['annual', 'lifetime', 'release'];
@@ -568,8 +707,10 @@ export function validateTaxRegimes(regimes: TaxRegime[]): void {
 
 /**
  * A translator for a regime's own texts in one language; a missing text falls back to English
- * (requirements 08: other languages may be partial). `{name}` placeholders are filled as in
- * `@saku/content`. An unknown key throws (validation makes every declared key resolve).
+ * (requirements 08: other languages may be partial). `{name}` placeholders are filled from
+ * `values`; one left unfilled throws (a rule's amount must never show as `{annual}` or go
+ * missing). Stricter than `@saku/content`'s translator, which leaves an unfilled placeholder as
+ * it is. An unknown key throws (validation makes every declared key resolve).
  */
 export function regimeTranslator(
   regime: Pick<TaxRegime, 'texts' | 'info'>,
@@ -579,11 +720,15 @@ export function regimeTranslator(
   const base = regime.texts.en!;
   return (key, values = {}) => {
     const text = (own && lookup(own, key)) ?? lookup(base, key);
-    if (text === undefined)
+    if (text === undefined) {
       throw new Error(`Tax regime ${regime.info.key} has no text for ${key}.`);
-    return text.replace(/\{(\w+)\}/g, (match, name: string) =>
-      name in values ? String(values[name]) : match,
-    );
+    }
+    return text.replace(PLACEHOLDER, (_, name: string) => {
+      if (!Object.hasOwn(values, name)) {
+        throw new Error(`Tax regime ${regime.info.key}: text ${key} needs a value for {${name}}.`);
+      }
+      return String(values[name]);
+    });
   };
 }
 
@@ -596,26 +741,61 @@ export function regimeMissingTexts(regime: Pick<TaxRegime, 'texts'>, language: s
 }
 
 /**
- * The install's tax regime: the loaded regime the `tax_regime` setting names; `unset` before the
- * admin chose one; `unknown` when the setting names a regime not loaded (removed or renamed
- * since): no tax result may be computed then, never one under another regime.
+ * The fingerprint of a regime's rules: sha256 of the RFC 8785 canonical JSON of the declaration
+ * without its texts (wording, not rules; amounts in texts are placeholders filled from the
+ * declaration). Any change of a rule, key or text key changes it.
+ */
+export function taxRegimeFingerprint(regime: TaxRegime): string {
+  const { texts: _texts, ...rules } = regime;
+  return sha256(canonicalJson(rules as unknown as Json));
+}
+
+/** A loaded regime's declaration as the `tax_regime` setting stores it. */
+export function taxRegimeDeclarationOf(regime: TaxRegime): TaxRegimeDeclaration {
+  return {
+    key: regime.info.key,
+    version: regime.info.version,
+    fingerprint: taxRegimeFingerprint(regime),
+  };
+}
+
+/**
+ * The install's tax regime: the loaded regime the `tax_regime` setting names, when its
+ * declaration is the one the setting was made with. `unset` before the admin chose one;
+ * `unknown` when no loaded regime has the key (removed or renamed since); `changed` when the
+ * loaded declaration differs from the stored one (a plug-in update changed a rule): no tax
+ * result may be computed then, until the admin sets the regime again (`pnpm plugins tax-regime`,
+ * refused once users have tax data). Never a result under other rules than the ones chosen.
  */
 export async function installTaxRegime(
   db: Db,
   regimes: readonly TaxRegime[],
-): Promise<{ regime: TaxRegime } | { unset: true } | { unknown: string }> {
+): Promise<
+  | { regime: TaxRegime }
+  | { unset: true }
+  | { unknown: string }
+  | { changed: { key: string; version: string; setVersion: string | null } }
+> {
   const key = await getSetting(db, 'tax_regime');
   if (key === undefined) return { unset: true };
   const regime = regimes.find((r) => r.info.key === key);
-  return regime ? { regime } : { unknown: key };
+  if (!regime) return { unknown: key };
+  const stored = await taxRegimeDeclaration(db);
+  const valid = stored !== undefined && !('invalid' in stored) ? stored : undefined;
+  if (!valid || valid.key !== key || valid.fingerprint !== taxRegimeFingerprint(regime)) {
+    return { changed: { key, version: regime.info.version, setVersion: valid?.version ?? null } };
+  }
+  return { regime };
 }
 
-/** Sets the install's tax regime to a loaded regime's key (`checkTaxRegimeChange`). */
+/** Sets the install's tax regime to a loaded regime (`checkTaxRegimeChange`), with its declaration. */
 export async function setTaxRegime(
   db: Db,
   key: string,
   regimes: readonly TaxRegime[],
   actor = 'cli',
 ): Promise<void> {
-  await setSetting(db, 'tax_regime', key, actor, { taxRegimes: regimes.map((r) => r.info.key) });
+  await setSetting(db, 'tax_regime', key, actor, {
+    taxRegimes: regimes.map(taxRegimeDeclarationOf),
+  });
 }

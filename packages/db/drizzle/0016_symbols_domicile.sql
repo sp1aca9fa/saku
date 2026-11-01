@@ -1,0 +1,1 @@
+ALTER TABLE `symbols` ADD `domicile` text;

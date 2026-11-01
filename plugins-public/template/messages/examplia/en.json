@@ -3,7 +3,7 @@
   "accounts": {
     "general": {
       "name": "General account",
-      "description": "An ordinary brokerage account. Realized gains and dividends are taxed at {gainsRate}; losses offset gains and dividends and carry forward for {years} years if you file a tax return."
+      "description": "An ordinary brokerage account. Realized gains are taxed at {gainsRate} and dividends at {dividendsRate}. Losses offset gains and dividends in the same year; what is left carries forward for {carryforwardYears} years if you file a tax return."
     },
     "saver": {
       "name": "Saver account",
@@ -11,11 +11,14 @@
     }
   },
   "losses": {
-    "filing": "Losses offset other income and carry forward only if you file a tax return for the year."
+    "filing": "Offsetting losses within the year needs no tax return. A loss left over carries forward for {carryforwardYears} years only if you file a tax return."
   },
   "fx": {
     "mid": "Mid rate",
     "buy": "Selling rate (you buy foreign currency)",
     "sell": "Buying rate (you sell foreign currency)"
+  },
+  "credit": {
+    "filing": "Foreign tax withheld on dividends is credited only if you file a tax return."
   }
 }

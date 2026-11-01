@@ -15,6 +15,8 @@ export const exampleTaxRegime: TaxRegime = {
   info: {
     key: 'examplia',
     kind: 'tax_regime',
+    // Raised with every change of a rule (an install set to an older one refuses the change).
+    version: '2026.1',
     nameKey: 'name',
     // A user-assigned ISO 3166-1 code (QM-QZ): no real country.
     country: 'QX',
@@ -23,6 +25,9 @@ export const exampleTaxRegime: TaxRegime = {
   },
   // Examplia's tax year runs from April 1 to March 31.
   yearStart: '04-01',
+  // A trade belongs to the year of its trade date and is converted at that date's rate.
+  yearDate: 'trade_date',
+  fxDate: 'trade_date',
   accountTypes: [
     {
       key: 'taxable',
@@ -38,9 +43,12 @@ export const exampleTaxRegime: TaxRegime = {
       losses: {
         offsets: ['gains', 'dividends'],
         carryforwardYears: 5,
-        conditions: [{ kind: 'filing', textKey: 'losses.filing' }],
+        // In-year offsets need nothing; the carryforward needs a filed return.
+        conditions: [{ kind: 'filing', appliesTo: ['carryforward'], textKey: 'losses.filing' }],
       },
-      foreignTaxCredit: true,
+      foreignTaxCredit: { conditions: [{ kind: 'filing', textKey: 'credit.filing' }] },
+      // The dividend tax is charged on what is left after the foreign withholding.
+      foreignDividendBase: 'net_of_withholding',
     },
     {
       key: 'saver',
@@ -57,6 +65,9 @@ export const exampleTaxRegime: TaxRegime = {
       tax: { realizedGains: '0', dividends: '0' },
       losses: { offsets: [], carryforwardYears: 0, conditions: [] },
       foreignTaxCredit: false,
+      foreignDividendBase: 'gross',
+      // A made-up treaty exempts saver accounts from the other country's withholding.
+      foreignWithholding: [{ country: 'QY', rate: '0' }],
     },
   ],
   costBasis: { method: 'moving_average', sameDayOrder: 'execution' },

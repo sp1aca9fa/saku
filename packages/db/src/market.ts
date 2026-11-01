@@ -77,6 +77,76 @@ export interface SymbolInput {
   underlying?: string;
   issuer?: string;
   indexSeries?: string;
+  /** ISO 3166-1 alpha-2 country the fund is domiciled in. */
+  domicile?: string;
+}
+
+const SYMBOL_FIELDS = [
+  'ticker',
+  'tier',
+  'assetClass',
+  'currency',
+  'leverageFactor',
+  'underlying',
+  'issuer',
+  'indexSeries',
+  'domicile',
+];
+
+/**
+ * A universe file's symbols (`pnpm symbols import`), checked whole: every symbol states its
+ * leverage factor (1 for an unleveraged fund; a factor left out would read as 1 and let a
+ * leveraged fund pass a tax regime's "no leveraged products" rule), a finite number other than
+ * 0; a domicile, when given, is an ISO 3166-1 alpha-2 code; no unknown fields. Throws naming
+ * every problem.
+ */
+export function parseSymbolList(value: unknown): SymbolInput[] {
+  if (!Array.isArray(value)) throw new Error('A universe file is a JSON list of symbols.');
+  const problems: string[] = [];
+  value.forEach((s: unknown, n) => {
+    const at = `symbol ${n + 1}`;
+    if (s === null || typeof s !== 'object' || Array.isArray(s)) {
+      problems.push(`${at}: not an object`);
+      return;
+    }
+    const o = s as Record<string, unknown>;
+    const name = typeof o.ticker === 'string' && o.ticker !== '' ? o.ticker : at;
+    for (const k of Object.keys(o)) {
+      if (!SYMBOL_FIELDS.includes(k)) problems.push(`${name}: unknown field "${k}"`);
+    }
+    if (typeof o.ticker !== 'string' || o.ticker === '') problems.push(`${at}: ticker missing`);
+    if (typeof o.tier !== 'number' || !Number.isInteger(o.tier) || o.tier < 0) {
+      problems.push(`${name}: tier must be a whole number from 0`);
+    }
+    if (typeof o.assetClass !== 'string' || o.assetClass === '') {
+      problems.push(`${name}: assetClass missing`);
+    }
+    if (typeof o.currency !== 'string' || !/^[A-Z]{3}$/.test(o.currency)) {
+      problems.push(`${name}: currency must be an ISO 4217 code`);
+    }
+    if (
+      typeof o.leverageFactor !== 'number' ||
+      !Number.isFinite(o.leverageFactor) ||
+      o.leverageFactor === 0
+    ) {
+      problems.push(
+        `${name}: leverageFactor must be stated (1 for an unleveraged fund, 2 for 2x, -1 for inverse)`,
+      );
+    }
+    for (const k of ['underlying', 'issuer', 'indexSeries'] as const) {
+      if (o[k] !== undefined && (typeof o[k] !== 'string' || o[k] === '')) {
+        problems.push(`${name}: ${k} must be text`);
+      }
+    }
+    if (
+      o.domicile !== undefined &&
+      (typeof o.domicile !== 'string' || !/^[A-Z]{2}$/.test(o.domicile))
+    ) {
+      problems.push(`${name}: domicile must be an ISO 3166-1 alpha-2 code`);
+    }
+  });
+  if (problems.length > 0) throw new Error(`Universe file refused: ${problems.join('; ')}.`);
+  return value as SymbolInput[];
 }
 
 /** Adds symbols that are missing and updates the descriptive fields of those that exist. */
@@ -94,6 +164,7 @@ export async function upsertSymbols(db: Db, list: SymbolInput[]): Promise<void> 
       underlyingSymbolId,
       issuer: s.issuer ?? null,
       indexSeries: s.indexSeries ?? null,
+      domicile: s.domicile ?? null,
     };
     await db
       .insert(symbols)

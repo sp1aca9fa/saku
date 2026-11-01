@@ -124,7 +124,7 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `user_settings` | owner_id, example_amount, defaults (json) | Per user |
 | `plugin_info` | key, kind, description (json), saved_at | Written by each job run; the description also keeps `formerProviders` (`{ id, since }`: provider ids it was saved under before and when each stopped, for 32 days) |
 | `source_roles` | data_kind, plugin_key, role, position | Admin's choice |
-| `symbols` | id, ticker, tier, asset_class, leverage_factor, underlying_symbol_id, index_series, issuer, inception_date, active | Leverage, underlying and index series drive layer C |
+| `symbols` | id, ticker, tier, asset_class, leverage_factor, underlying_symbol_id, index_series, issuer, domicile, inception_date, active | Leverage, underlying and index series drive layer C; leverage (stated for every symbol at import) and domicile (ISO 3166-1 alpha-2, null when not stated) feed tax regimes' eligibility and withholding |
 | `bars_raw` | symbol_id, date, source, open, high, low, close, close_is_split_adjusted, volume, div_cash, split_factor, provider_adj_close, fetched_at; PK (symbol_id, date, source) | Never deleted |
 | `bars` | symbol_id, date, open, high, low, close (unadjusted), volume, div_cash, split_factor, adj_close (ours: forward-accumulated total-return index), source, stand_in, stand_in_band, stand_in_basis (0012: the band and basis of the build that wrote a stand-in bar), status; PK (symbol_id, date) | Canonical |
 | `bar_revisions` | id, symbol_id, date, source, field, old_value, new_value, detected_at, run_id | Raw fields only |
@@ -172,7 +172,7 @@ interface BarSource { info: PluginInfo; fetchBars(ticker: string, from: TradingD
 interface SeriesSource { info: PluginInfo; fetchSeries(id: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<SeriesPoint[] | SeriesFetch>; } // with publishedAt when known; SeriesFetch = { points, completeSpan } (current values complete for their span: core infers withdrawals on full fetches, docs/data-pipeline.md "Vanished values")
 interface FxSource { info: PluginInfo; fetch(pair: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<FxRate[]>; }
 interface IssuerSource { info: PluginInfo; supports(ticker: string): boolean; fetchRecords(ticker: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<IssuerRecord[]>; }
-interface TaxRegime { info: TaxRegimeInfo; yearStart: string; accountTypes: TaxAccountType[]; quotaGroups?: QuotaGroup[]; costBasis; fx; foreignWithholding; transfers; texts; } // declarative, C1; amounts and rates as decimal text (docs/plugins.md "Writing a tax regime")
+interface TaxRegime { info: TaxRegimeInfo /* key, version, ... */; yearStart: string; yearDate; fxDate; accountTypes: TaxAccountType[]; quotaGroups?: QuotaGroup[]; costBasis; fx; foreignWithholding; transfers; texts; } // declarative, C1; amounts and rates as decimal text (docs/plugins.md "Writing a tax regime")
 interface Check { id: string; layer: 'A'|'B'|'C'|'D'|'E'; run(ctx: CheckContext): CheckResult[]; } // pure
 type HealthStatus = 'green' | 'yellow' | 'red';
 interface Notifier { info: NotifierInfo; validTarget(target: string): boolean; send(target: string, text: string, ctx: PluginContext): Promise<void>; } // A2; text already in the user's language

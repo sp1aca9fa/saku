@@ -187,6 +187,11 @@ export const symbols = sqliteTable(
       (): AnySQLiteColumn => symbols.id,
     ),
     issuer: text('issuer'),
+    /**
+     * Country the fund is domiciled in (ISO 3166-1 alpha-2): where its dividends are paid from,
+     * for withholding at source (tax regimes). Null: not stated (withholding unknown).
+     */
+    domicile: text('domicile'),
     /** A series of the index the fund tracks (layer C check), e.g. a FRED index level. */
     indexSeries: text('index_series'),
     inceptionDate: text('inception_date'),

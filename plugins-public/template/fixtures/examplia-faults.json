@@ -63,17 +63,27 @@
     },
     {
       "path": ["accountTypes", 1, "quota", "lifetime"],
-      "value": { "amount": "999999", "currency": "XTS" },
+      "value": {
+        "amount": "999999",
+        "currency": "XTS"
+      },
       "message": "annual limit 1000000 is above the lifetime limit 999999"
     },
     {
       "path": ["accountTypes", 1, "quota", "release"],
-      "value": { "limits": ["lifetime"], "basis": "book_value", "from": "next_year" },
+      "value": {
+        "limits": ["lifetime"],
+        "basis": "book_value",
+        "from": "next_year"
+      },
       "message": "frees the lifetime limit, which neither the account type nor its groups declare"
     },
     {
       "path": ["accountTypes", 1, "quota", "anual"],
-      "value": { "amount": "1", "currency": "XTS" },
+      "value": {
+        "amount": "1",
+        "currency": "XTS"
+      },
       "message": "quota: unknown field \"anual\""
     },
     {
@@ -119,10 +129,18 @@
     {
       "path": ["accountTypes", 0, "foreignTaxCredit"],
       "value": null,
-      "message": "foreignTaxCredit: must be true or false"
+      "message": "foreignTaxCredit: must be false or \\{ conditions"
     },
-    { "path": ["info", "key"], "value": "Examplia", "message": "info\\.key: must be 2-40" },
-    { "path": ["info", "kind"], "value": "bar", "message": "info\\.kind: must be \"tax_regime\"" },
+    {
+      "path": ["info", "key"],
+      "value": "Examplia",
+      "message": "info\\.key: must be 2-40"
+    },
+    {
+      "path": ["info", "kind"],
+      "value": "bar",
+      "message": "info\\.kind: must be \"tax_regime\""
+    },
     {
       "path": ["info", "currency"],
       "value": "XT",
@@ -143,8 +161,16 @@
       "value": ["ftp://tax.examplia.test"],
       "message": "info\\.sources\\[0\\]: must be an http\\(s\\) address"
     },
-    { "path": ["yearStart"], "value": "02-29", "message": "yearStart: must be a day of the year" },
-    { "path": ["yearStart"], "value": "13-01", "message": "yearStart: must be a day of the year" },
+    {
+      "path": ["yearStart"],
+      "value": "02-29",
+      "message": "yearStart: must be a day of the year"
+    },
+    {
+      "path": ["yearStart"],
+      "value": "13-01",
+      "message": "yearStart: must be a day of the year"
+    },
     {
       "path": ["costBasis", "method"],
       "value": "lifo",
@@ -177,12 +203,22 @@
     },
     {
       "path": ["transfers"],
-      "value": [{ "from": "taxable", "to": "nisa" }],
+      "value": [
+        {
+          "from": "taxable",
+          "to": "nisa"
+        }
+      ],
       "message": "transfers\\[0\\]\\.to: no account type \"nisa\""
     },
     {
       "path": ["transfers"],
-      "value": [{ "from": "saver", "to": "saver" }],
+      "value": [
+        {
+          "from": "saver",
+          "to": "saver"
+        }
+      ],
       "message": "a transfer is between two account types"
     },
     {
@@ -192,17 +228,30 @@
           "key": "shared",
           "nameKey": "name",
           "accountTypes": ["saver", "other"],
-          "lifetime": { "amount": "5000000", "currency": "XTS" }
+          "lifetime": {
+            "amount": "5000000",
+            "currency": "XTS"
+          }
         }
       ],
       "message": "quotaGroups\\[0\\]\\.accountTypes\\[1\\]: no account type \"other\""
     },
     {
       "path": ["quotaGroups"],
-      "value": [{ "key": "shared", "nameKey": "name", "accountTypes": ["saver"] }],
+      "value": [
+        {
+          "key": "shared",
+          "nameKey": "name",
+          "accountTypes": ["saver"]
+        }
+      ],
       "message": "quotaGroups\\[0\\]: declare an annual or a lifetime limit"
     },
-    { "path": ["texts", "en"], "value": null, "message": "texts\\.en: must be an object of texts" },
+    {
+      "path": ["texts", "en"],
+      "value": null,
+      "message": "texts\\.en: must be an object of texts"
+    },
     {
       "path": ["texts", "ja", "extra"],
       "value": "余分",
@@ -213,6 +262,161 @@
       "value": " ",
       "message": "texts\\.en: fx: text \"mid\" is empty"
     },
-    { "path": ["deductions"], "value": [], "message": "regime: unknown field \"deductions\"" }
+    {
+      "path": ["deductions"],
+      "value": [],
+      "message": "regime: unknown field \"deductions\""
+    },
+    {
+      "path": ["accountTypes", 0, "foreignTaxCredit"],
+      "value": true,
+      "message": "foreignTaxCredit: must be false or \\{ conditions"
+    },
+    {
+      "path": ["accountTypes", 0, "foreignTaxCredit", "conditions", 0, "kind"],
+      "value": "residency",
+      "message": "foreignTaxCredit\\.conditions\\[0\\]\\.kind: must be one of filing"
+    },
+    {
+      "path": ["accountTypes", 0, "losses", "conditions", 0, "appliesTo"],
+      "value": [],
+      "message": "conditions\\[0\\]\\.appliesTo: name at least one"
+    },
+    {
+      "path": ["accountTypes", 0, "losses", "conditions", 0, "appliesTo"],
+      "value": ["refunds"],
+      "message": "appliesTo\\[0\\]: must be one of offsets, carryforward"
+    },
+    {
+      "path": ["accountTypes", 0, "losses", "conditions", 0, "appliesTo"],
+      "value": ["carryforward", "carryforward"],
+      "message": "appliesTo: names one twice"
+    },
+    {
+      "path": ["accountTypes", 1, "losses", "conditions"],
+      "value": [
+        {
+          "kind": "filing",
+          "appliesTo": ["offsets"],
+          "textKey": "losses.filing"
+        }
+      ],
+      "message": "a condition on offsets, which the account type does not allow"
+    },
+    {
+      "path": ["accountTypes", 1, "losses", "conditions"],
+      "value": [
+        {
+          "kind": "filing",
+          "appliesTo": ["carryforward"],
+          "textKey": "losses.filing"
+        }
+      ],
+      "message": "a condition on a carryforward of 0 years"
+    },
+    {
+      "path": ["accountTypes", 0, "foreignDividendBase"],
+      "value": "net",
+      "message": "foreignDividendBase: must be one of gross, net_of_withholding"
+    },
+    {
+      "path": ["yearDate"],
+      "value": "value_date",
+      "message": "yearDate: must be one of trade_date, settlement_date"
+    },
+    {
+      "path": ["fxDate"],
+      "value": null,
+      "message": "fxDate: must be one of trade_date, settlement_date"
+    },
+    {
+      "path": ["info", "version"],
+      "value": "",
+      "message": "info\\.version: must be 1-40"
+    },
+    {
+      "path": ["accountTypes", 1, "foreignWithholding"],
+      "value": [
+        {
+          "country": "QY",
+          "rate": "0.5"
+        },
+        {
+          "country": "QY",
+          "rate": "0"
+        }
+      ],
+      "message": "accountTypes\\[1\\]\\.foreignWithholding\\[1\\]\\.country: \"QY\" declared twice"
+    },
+    {
+      "path": ["accountTypes", 1, "foreignWithholding"],
+      "value": [
+        {
+          "country": "QX",
+          "rate": "0"
+        }
+      ],
+      "message": "accountTypes\\[1\\]\\.foreignWithholding\\[0\\]\\.country: the regime's own country is not foreign"
+    },
+    {
+      "path": ["accountTypes", 1, "foreignWithholding", 0, "rate"],
+      "value": 0,
+      "message": "accountTypes\\[1\\]\\.foreignWithholding\\[0\\]\\.rate: must be a decimal"
+    },
+    {
+      "path": ["texts", "en", "accounts", "saver", "name"],
+      "value": "Saver {annual}",
+      "message": "texts\\.en\\.accounts\\.saver\\.name: placeholder \\{annual\\} is not one this text receives \\(none\\)"
+    },
+    {
+      "path": ["texts", "ja", "losses", "filing"],
+      "value": "{gainsRate}の損失",
+      "message": "texts\\.ja\\.losses\\.filing: placeholder \\{gainsRate\\} is not one this text receives \\(carryforwardYears\\)"
+    },
+    {
+      "path": ["texts", "en", "fx", "mid"],
+      "value": "Mid {rate",
+      "message": "texts\\.en\\.fx\\.mid: braces only as \\{name\\} placeholders"
+    },
+    {
+      "path": ["texts", "en", "unused"],
+      "value": "Not named by the declaration {annual}",
+      "message": "texts\\.en\\.unused: placeholder \\{annual\\} is not one this text receives \\(none\\)"
+    },
+    {
+      "path": ["accountTypes", 1, "nameKey"],
+      "value": "accounts.general.description",
+      "message": "texts\\.en\\.accounts\\.general\\.description: placeholder \\{gainsRate\\} is not one this text receives \\(none\\)"
+    },
+    {
+      "path": ["quotaGroups"],
+      "value": [
+        {
+          "key": "shared",
+          "nameKey": "name",
+          "accountTypes": ["saver"],
+          "annual": {
+            "amount": "500000",
+            "currency": "XTS"
+          }
+        }
+      ],
+      "message": "accountTypes\\[1\\]\\.quota: annual limit 1000000 is above the annual limit 500000 of quotaGroups\\[0\\]"
+    },
+    {
+      "path": ["quotaGroups"],
+      "value": [
+        {
+          "key": "shared",
+          "nameKey": "name",
+          "accountTypes": ["saver"],
+          "lifetime": {
+            "amount": "999999.99",
+            "currency": "XTS"
+          }
+        }
+      ],
+      "message": "accountTypes\\[1\\]\\.quota: annual limit 1000000 is above the lifetime limit 999999.99 of quotaGroups\\[0\\]"
+    }
   ]
 }

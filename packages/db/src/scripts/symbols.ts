@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createDb } from '../client';
 import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '../env';
-import { type SymbolInput, activeSymbols, upsertSymbols } from '../market';
+import { activeSymbols, parseSymbolList, upsertSymbols } from '../market';
 import { exitIfUnmigrated } from '../migrate';
 
 loadRootEnv();
@@ -27,7 +27,13 @@ if (command === 'list') {
     );
   }
 } else if (command === 'import' && file) {
-  const list = JSON.parse(readFileSync(resolve(findRepoRoot(), file), 'utf8')) as SymbolInput[];
+  let list;
+  try {
+    list = parseSymbolList(JSON.parse(readFileSync(resolve(findRepoRoot(), file), 'utf8')));
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
   await upsertSymbols(db, list);
   console.log(`${list.length} symbol(s) imported.`);
 } else {

@@ -66,31 +66,86 @@ export async function userTaxDataExists(
 }
 
 /**
+ * The loaded regime's declaration a `tax_regime` value names: its key, version and fingerprint
+ * (sha256 of its canonical rules, `taxRegimeFingerprint` in the plug-in SDK).
+ */
+export interface TaxRegimeDeclaration {
+  key: string;
+  version: string;
+  fingerprint: string;
+}
+
+/** Where the declaration the regime was set with is kept (not an admin setting of its own). */
+const TAX_REGIME_DECLARATION = 'tax_regime_declaration';
+
+/**
+ * The declaration `tax_regime` was last set with; undefined when none is stored; `invalid` when
+ * the stored row cannot be read (only a hand edit can do that): then it matches no declaration.
+ */
+export async function taxRegimeDeclaration(
+  db: Db,
+): Promise<TaxRegimeDeclaration | { invalid: true } | undefined> {
+  const [row] = await db
+    .select()
+    .from(appSettings)
+    .where(eq(appSettings.key, TAX_REGIME_DECLARATION));
+  if (!row) return undefined;
+  const v = row.value as Record<string, unknown> | null;
+  return v !== null &&
+    typeof v === 'object' &&
+    typeof v.key === 'string' &&
+    typeof v.version === 'string' &&
+    typeof v.fingerprint === 'string'
+    ? { key: v.key, version: v.version, fingerprint: v.fingerprint }
+    : { invalid: true };
+}
+
+/**
  * Refuses a `tax_regime` value that names no loaded regime (`known`; undefined: not checked
- * against the loaded plug-ins, refused too) or that changes the regime while users have tax data.
+ * against the loaded plug-ins, refused too), and, while users have tax data, a change of the
+ * regime or of its declaration under the same key (a different fingerprint than the one it was
+ * set with: that data was computed under the old rules, and is never silently rebased).
+ * Returns the declaration to store.
  */
 export async function checkTaxRegimeChange(
   db: Db,
   value: string,
-  known: readonly string[] | undefined,
+  known: readonly TaxRegimeDeclaration[] | undefined,
   tables: readonly SQLiteTable[] = USER_TAX_TABLES,
-): Promise<void> {
+): Promise<TaxRegimeDeclaration> {
   if (known === undefined) {
     throw new Error(
       'tax_regime is set with `pnpm plugins tax-regime <key>`, which checks the key against the loaded tax regimes.',
     );
   }
-  if (!known.includes(value)) {
+  const declaration = known.find((d) => d.key === value);
+  if (!declaration) {
     throw new Error(
-      `No loaded tax regime has the key ${value} (loaded: ${known.length > 0 ? known.join(', ') : 'none'}).`,
+      `No loaded tax regime has the key ${value} (loaded: ${known.length > 0 ? known.map((d) => d.key).join(', ') : 'none'}).`,
     );
   }
   const current = await getSetting(db, 'tax_regime');
-  if (current !== undefined && current !== value && (await userTaxDataExists(db, tables))) {
+  if (current === undefined || !(await userTaxDataExists(db, tables))) return declaration;
+  if (current !== value) {
     throw new Error(
       `tax_regime is ${current} and cannot be changed: users have tax data computed under it.`,
     );
   }
+  const stored = await taxRegimeDeclaration(db);
+  if (
+    stored === undefined ||
+    'invalid' in stored ||
+    stored.fingerprint !== declaration.fingerprint
+  ) {
+    const was =
+      stored === undefined || 'invalid' in stored
+        ? 'an unknown declaration'
+        : `version ${stored.version}`;
+    throw new Error(
+      `The ${value} regime's rules changed since it was set (${was}, now version ${declaration.version}): users have tax data computed under the old rules, so the new ones are refused. Restore the plug-in version it was set with.`,
+    );
+  }
+  return declaration;
 }
 
 /** The default re-check deadline: one hour before the next regular US open (C16). */
@@ -184,15 +239,32 @@ export async function setSetting(
   key: SettingKey,
   value: string,
   actor = 'cli',
-  /** `tax_regime` only: the keys of the loaded tax regimes (the setting names one of them). */
-  options: { taxRegimes?: readonly string[] } = {},
+  /** `tax_regime` only: the loaded tax regimes' declarations (the setting names one of them). */
+  options: { taxRegimes?: readonly TaxRegimeDeclaration[] } = {},
 ) {
   if (!SETTINGS[key](value)) throw new Error(`Not a valid ${key}: ${value}`);
   const current = await getSetting(db, key);
   if (key === 'base_currency' && current !== undefined && current !== value) {
     throw new Error(`base_currency is ${current} and cannot be changed once set.`);
   }
-  if (key === 'tax_regime') await checkTaxRegimeChange(db, value, options.taxRegimes);
+  if (key === 'tax_regime') {
+    const declaration = await checkTaxRegimeChange(db, value, options.taxRegimes);
+    // The value and the declaration it was set with are written together.
+    await db.transaction(async (tx) => {
+      await tx
+        .insert(appSettings)
+        .values({ key, value })
+        .onConflictDoUpdate({ target: appSettings.key, set: { value } });
+      await tx
+        .insert(appSettings)
+        .values({ key: TAX_REGIME_DECLARATION, value: declaration })
+        .onConflictDoUpdate({ target: appSettings.key, set: { value: declaration } });
+      await tx
+        .insert(activityLog)
+        .values({ actor, action: 'setting.set', detail: { key, value, declaration } });
+    });
+    return;
+  }
   await db
     .insert(appSettings)
     .values({ key, value })

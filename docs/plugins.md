@@ -157,16 +157,18 @@ in core computes with them. It has no methods and makes no requests. Start from
 
 | Field | What it declares |
 |---|---|
-| `info` | `key` (the `tax_regime` setting; never changed once users have tax data), `kind: 'tax_regime'`, `nameKey`, `country` (ISO 3166-1 alpha-2), `currency` (ISO 4217: taxes and limits are computed in it), `sources` (links to the official rules, at least one) |
+| `info` | `key` (the `tax_regime` setting; never changed once users have tax data), `kind: 'tax_regime'`, `version` (raised with every change of a rule, e.g. `2026.1`), `nameKey`, `country` (ISO 3166-1 alpha-2), `currency` (ISO 4217: taxes and limits are computed in it), `sources` (links to the official rules, at least one) |
 | `yearStart` | First day of the regime year as `MM-DD` (`01-01`, `04-06`): annual limits and carryforward count in these years |
+| `yearDate`, `fxDate` | `trade_date` or `settlement_date`: which date of a trade places it in a regime year, and which date's tax rate converts it |
 | `accountTypes` | Each: `key` (a `taxable` one is required, the default for timing and leveraged strategies), `treatment` (`taxable` or `tax_advantaged`), `nameKey`, `descriptionKey`, then the rows below |
-| `eligibility` | `leveraged` (whether leveraged or inverse products may be held; an unknown leverage counts as leveraged), `assetClasses` (`'all'` or a list of `symbols.asset_class` values), `designatedOnly` (only products on a list an authority keeps; where the list comes from is not in the contract yet, so such an account type holds nothing eligible until it is), `purchaseModes` (`lump_sum`, `periodic`) |
+| `eligibility` | `leveraged` (whether leveraged or inverse products may be held, by `symbols.leverage_factor`; the symbol import requires every symbol to state it), `assetClasses` (`'all'` or a list of `symbols.asset_class` values), `designatedOnly` (only products on a list an authority keeps; where the list comes from is not in the contract yet, so such an account type holds nothing eligible until it is), `purchaseModes` (`lump_sum`, `periodic`) |
 | `quota` | `annual` and `lifetime` limits (at least one; leave `quota` out for none) and `release`: which limits a sale frees (`limits`), at `book_value` or `proceeds`, from the `next_year` or the `trade_date`. No `release`: a sale frees nothing |
-| `quotaGroups` | Limits several account types share (e.g. one lifetime cap for two), each with `key`, `nameKey`, `accountTypes` and an `annual` or `lifetime` limit. An account type's `release` may free a limit its group declares |
+| `quotaGroups` | Limits several account types share (e.g. one lifetime cap for two), each with `key`, `nameKey`, `accountTypes` and an `annual` or `lifetime` limit. An account type's `release` may free a limit its group declares; its own limits are not above its groups' (annual at most the group's annual and lifetime, lifetime at most the group's lifetime) |
 | `tax` | `realizedGains` and `dividends` rates, as fractions (`"0.20315"` for 20.315%) |
-| `losses` | `offsets` (`gains`, `dividends`; empty for none), `carryforwardYears` (0 to 100, or `'unlimited'`), `conditions` (e.g. `{ kind: 'filing', textKey }`: only for a person who files a return) |
-| `foreignTaxCredit` | Per account type: whether foreign tax withheld on dividends is credited |
-| `foreignWithholding` | Withholding at source per paying country (`{ country, rate }`). A country not listed has an unknown withholding (never read as 0) |
+| `losses` | `offsets` (`gains`, `dividends`; empty for none), `carryforwardYears` (0 to 100, or `'unlimited'`), `conditions`, each naming what it applies to (`{ kind: 'filing', appliesTo: ['carryforward'], textKey }`: the carryforward only for a person who files a return, in-year offsets without one) |
+| `foreignTaxCredit` | Per account type: `false`, or `{ conditions: [...] }` (the same condition kinds, without `appliesTo`; none: always credited) |
+| `foreignDividendBase` | Per account type: whether the dividend tax on a foreign dividend is charged on the `gross` dividend or `net_of_withholding` |
+| `foreignWithholding` | Withholding at source per paying country (`{ country, rate }`), matched against `symbols.domicile`; an account type may override it for some countries (its own `foreignWithholding`). A country not listed, or a symbol without a domicile, has an unknown withholding (never read as 0) |
 | `costBasis` | `method` (`moving_average`, `fifo`) and `sameDayOrder` (how one day's trades of a product meet the method: `execution`, `purchases_first`, `sales_first`) |
 | `fx` | The regime's own rate names, each mapped onto a stored kind (`tax_mid`, `tax_buy`, `tax_sell`; e.g. `TTM`, `TTS`, `TTB`), and which name converts `purchases`, `sales` and `dividends` |
 | `transfers` | Moves allowed without a sale (`{ from, to }`); any other move is a sale and a new purchase, both costs shown |
@@ -182,7 +184,18 @@ Rules the loader enforces (a regime that breaks one is refused whole, with every
   names something declared.
 - Every text key resolves in the English texts; another language names no key English lacks.
   Write amounts and rates in texts as `{placeholders}` the app fills from the declaration, so a
-  text never disagrees with a rule.
+  text never disagrees with a rule. Each kind of text receives only its own placeholders
+  (`REGIME_TEXT_PLACEHOLDERS`: an account description `gainsRate`, `dividendsRate`, `annual`,
+  `lifetime`, `carryforwardYears`; a loss condition `carryforwardYears`; names and other
+  conditions none); a text using another one, or braces other than `{name}`, is refused, and the
+  regime's translator throws when a placeholder is left unfilled.
+- An account type's limits are within its groups' limits; a loss condition applies to something
+  the account type has (offsets, a carryforward above 0 years).
+
+The install stores the declaration's fingerprint (sha256 of its canonical JSON without the texts)
+and version when the regime is set. A plug-in update that changes a rule is not used until the
+admin sets the regime again (`pnpm plugins tax-regime <key>`); once users have tax data, that is
+refused (their data was computed under the old rules): restore the plug-in version it was set with.
 
 Choose the install's regime with `pnpm plugins tax-regime <key>` (`docs/running.md`). A rule the
 contract cannot declare is a reason to extend the contract at a stage review, never country code

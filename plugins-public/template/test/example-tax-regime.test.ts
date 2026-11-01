@@ -77,4 +77,29 @@ describe('Examplia tax regime (template)', () => {
     expect(regimeTranslator(exampleTaxRegime, 'fr')(saver.nameKey)).toBe('Saver account');
     expect(() => en('accounts.nothing')).toThrow(/no text/);
   });
+
+  it('renders every account text from the declaration, in each language', () => {
+    for (const language of ['en', 'ja']) {
+      const t = regimeTranslator(exampleTaxRegime, language);
+      for (const a of exampleTaxRegime.accountTypes) {
+        // What the app passes: the declared values (formatting is the app's).
+        const values = {
+          gainsRate: a.tax.realizedGains,
+          dividendsRate: a.tax.dividends,
+          annual: a.quota?.annual?.amount ?? '',
+          lifetime: a.quota?.lifetime?.amount ?? '',
+          carryforwardYears: String(a.losses.carryforwardYears),
+        };
+        expect(t(a.descriptionKey, values)).not.toMatch(/[{}]/);
+        for (const c of a.losses.conditions) {
+          expect(t(c.textKey, { carryforwardYears: values.carryforwardYears })).toContain('5');
+        }
+      }
+    }
+    // The filing condition is on the carryforward only, as its text says.
+    const taxable = exampleTaxRegime.accountTypes[0]!;
+    expect(taxable.losses.conditions).toEqual([
+      { kind: 'filing', appliesTo: ['carryforward'], textKey: 'losses.filing' },
+    ]);
+  });
 });
