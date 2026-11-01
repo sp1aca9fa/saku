@@ -1,6 +1,7 @@
 // Install-wide admin settings (requirements 12). Validated here so the CLI, the app and jobs
 // agree on what a setting may hold.
 import { eq } from 'drizzle-orm';
+import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 import type { Db } from './client';
 import { activityLog, appSettings } from './schema';
 
@@ -37,7 +38,60 @@ export const SETTINGS = {
    * 0 to RECHECK_MAX_MINUTES.
    */
   red_recheck_minutes_before_open: (v: string) => parseRecheckMinutes(v) !== null,
+  /**
+   * The install's tax regime (requirements 07, 12): a loaded `TaxRegime` plug-in's key. Set only
+   * with the loaded regimes' keys at hand (`setSetting`'s `taxRegimes`, `pnpm plugins
+   * tax-regime`), so an unknown key is refused; not changed once user tax data exists.
+   */
+  tax_regime: (v: string) => /^[a-z][a-z0-9-]{1,39}$/.test(v),
 } as const;
+
+/**
+ * The per-user tables holding tax data (tax accounts, lots, quota ledger, loss carryforward):
+ * none yet, the tax engine adds them (C1). While any has a row, `tax_regime` cannot change: that
+ * data was computed under the regime's account types and rules. A test makes every table with
+ * an `owner_id` be listed here or declared not tax data, so a new one is never forgotten.
+ */
+export const USER_TAX_TABLES: readonly SQLiteTable[] = [];
+
+/** Whether any user has tax data (a row in one of `tables`, default `USER_TAX_TABLES`). */
+export async function userTaxDataExists(
+  db: Db,
+  tables: readonly SQLiteTable[] = USER_TAX_TABLES,
+): Promise<boolean> {
+  for (const table of tables) {
+    if ((await db.select().from(table).limit(1)).length > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Refuses a `tax_regime` value that names no loaded regime (`known`; undefined: not checked
+ * against the loaded plug-ins, refused too) or that changes the regime while users have tax data.
+ */
+export async function checkTaxRegimeChange(
+  db: Db,
+  value: string,
+  known: readonly string[] | undefined,
+  tables: readonly SQLiteTable[] = USER_TAX_TABLES,
+): Promise<void> {
+  if (known === undefined) {
+    throw new Error(
+      'tax_regime is set with `pnpm plugins tax-regime <key>`, which checks the key against the loaded tax regimes.',
+    );
+  }
+  if (!known.includes(value)) {
+    throw new Error(
+      `No loaded tax regime has the key ${value} (loaded: ${known.length > 0 ? known.join(', ') : 'none'}).`,
+    );
+  }
+  const current = await getSetting(db, 'tax_regime');
+  if (current !== undefined && current !== value && (await userTaxDataExists(db, tables))) {
+    throw new Error(
+      `tax_regime is ${current} and cannot be changed: users have tax data computed under it.`,
+    );
+  }
+}
 
 /** The default re-check deadline: one hour before the next regular US open (C16). */
 export const RECHECK_DEFAULT_MINUTES = 60;
@@ -125,12 +179,20 @@ export async function getSetting(db: Db, key: SettingKey): Promise<string | unde
   return row ? String(row.value) : undefined;
 }
 
-export async function setSetting(db: Db, key: SettingKey, value: string, actor = 'cli') {
+export async function setSetting(
+  db: Db,
+  key: SettingKey,
+  value: string,
+  actor = 'cli',
+  /** `tax_regime` only: the keys of the loaded tax regimes (the setting names one of them). */
+  options: { taxRegimes?: readonly string[] } = {},
+) {
   if (!SETTINGS[key](value)) throw new Error(`Not a valid ${key}: ${value}`);
   const current = await getSetting(db, key);
   if (key === 'base_currency' && current !== undefined && current !== value) {
     throw new Error(`base_currency is ${current} and cannot be changed once set.`);
   }
+  if (key === 'tax_regime') await checkTaxRegimeChange(db, value, options.taxRegimes);
   await db
     .insert(appSettings)
     .values({ key, value })

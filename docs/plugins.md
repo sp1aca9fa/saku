@@ -18,7 +18,7 @@ responses go only in the private repo; public fixtures are synthetic.
 ## Kinds and methods
 
 Types are in `packages/plugin-sdk/src/types.ts`. A package exports `bars`, `series`, `fx`,
-`issuers`, `calendars` and `notifiers` (any subset).
+`issuers`, `calendars`, `notifiers` and `taxRegimes` (any subset).
 
 | Export | Interface | Methods |
 |---|---|---|
@@ -28,6 +28,7 @@ Types are in `packages/plugin-sdk/src/types.ts`. A package exports `bars`, `seri
 | `issuers` | `IssuerSource` | `supports(ticker)`; `fetchRecords(ticker, from, to, ctx)` returns NAV, distributions and splits, each record with the currency (ISO 4217) of its NAV and distribution (required with a NAV and with a nonzero distribution; a response with a record lacking it is refused whole) (checks only, never a value used) |
 | `calendars` | `CalendarSource` | a `calendars` array of exchange or series holiday tables |
 | `notifiers` | `Notifier` | `validTarget(target)`; `send(target, text, ctx)`. Errors must not contain the target or the key |
+| `taxRegimes` | `TaxRegime` | none: declarations only (see "Writing a tax regime") |
 
 Dates are `YYYY-MM-DD` trading dates. Return raw values as the provider gives them (provider
 adjusted values only in the fields meant for checks); never compute indicators or derived series.
@@ -138,15 +139,55 @@ data within the asked range; a later run's window covers the date.
 
 ## Start from the template
 
-`plugins-public/template/` holds a runnable bar source for a made-up provider, with fixtures and a
-test (see its `README.md`). The template is not loaded by the jobs. A tax regime template comes
-with the tax stage; none exists yet.
+`plugins-public/template/` holds a runnable bar source for a made-up provider and a tax regime for
+a made-up country, each with fixtures and a test (see its `README.md`). The template is not loaded
+by the jobs.
 
 1. Copy `plugins-public/template/` to a new folder (in `plugins/` for a private plug-in, with
    its own `package.json`, `tsconfig.json` and `src/index.ts`; see how `plugins-public/` is set up).
 2. Rename the source, set its `key`, `info` and limits from the provider's terms.
 3. Replace the fixtures with the provider's answers saved as files, and map them in the source.
 4. Export it from `src/index.ts`.
+
+## Writing a tax regime
+
+A `TaxRegime` declares a country's account types and tax rules (requirements 07); the tax engine
+in core computes with them. It has no methods and makes no requests. Start from
+`plugins-public/template/src/example-tax-regime.ts` (Examplia, a made-up country).
+
+| Field | What it declares |
+|---|---|
+| `info` | `key` (the `tax_regime` setting; never changed once users have tax data), `kind: 'tax_regime'`, `nameKey`, `country` (ISO 3166-1 alpha-2), `currency` (ISO 4217: taxes and limits are computed in it), `sources` (links to the official rules, at least one) |
+| `yearStart` | First day of the regime year as `MM-DD` (`01-01`, `04-06`): annual limits and carryforward count in these years |
+| `accountTypes` | Each: `key` (a `taxable` one is required, the default for timing and leveraged strategies), `treatment` (`taxable` or `tax_advantaged`), `nameKey`, `descriptionKey`, then the rows below |
+| `eligibility` | `leveraged` (whether leveraged or inverse products may be held; an unknown leverage counts as leveraged), `assetClasses` (`'all'` or a list of `symbols.asset_class` values), `designatedOnly` (only products on a list an authority keeps; where the list comes from is not in the contract yet, so such an account type holds nothing eligible until it is), `purchaseModes` (`lump_sum`, `periodic`) |
+| `quota` | `annual` and `lifetime` limits (at least one; leave `quota` out for none) and `release`: which limits a sale frees (`limits`), at `book_value` or `proceeds`, from the `next_year` or the `trade_date`. No `release`: a sale frees nothing |
+| `quotaGroups` | Limits several account types share (e.g. one lifetime cap for two), each with `key`, `nameKey`, `accountTypes` and an `annual` or `lifetime` limit. An account type's `release` may free a limit its group declares |
+| `tax` | `realizedGains` and `dividends` rates, as fractions (`"0.20315"` for 20.315%) |
+| `losses` | `offsets` (`gains`, `dividends`; empty for none), `carryforwardYears` (0 to 100, or `'unlimited'`), `conditions` (e.g. `{ kind: 'filing', textKey }`: only for a person who files a return) |
+| `foreignTaxCredit` | Per account type: whether foreign tax withheld on dividends is credited |
+| `foreignWithholding` | Withholding at source per paying country (`{ country, rate }`). A country not listed has an unknown withholding (never read as 0) |
+| `costBasis` | `method` (`moving_average`, `fifo`) and `sameDayOrder` (how one day's trades of a product meet the method: `execution`, `purchases_first`, `sales_first`) |
+| `fx` | The regime's own rate names, each mapped onto a stored kind (`tax_mid`, `tax_buy`, `tax_sell`; e.g. `TTM`, `TTS`, `TTB`), and which name converts `purchases`, `sales` and `dividends` |
+| `transfers` | Moves allowed without a sale (`{ from, to }`); any other move is a sale and a new purchase, both costs shown |
+| `texts` | Per language code a tree of texts; `en` is required and complete, others may be partial |
+
+Rules the loader enforces (a regime that breaks one is refused whole, with every problem named):
+
+- Every amount and rate is a decimal written as text (`"2400000"`, `"0.1"`), never a number: no
+  sign, exponent, grouping or `%`. Rates are from 0 to 1. Limits are above 0 and in the regime's
+  `currency`; an annual limit is not above the lifetime one.
+- No unknown fields (a misspelt optional field would silently drop a rule). Keys of account types
+  and groups are 2-40 of `a-z`, `0-9` and `_`; every reference (groups, transfers, `fx` uses)
+  names something declared.
+- Every text key resolves in the English texts; another language names no key English lacks.
+  Write amounts and rates in texts as `{placeholders}` the app fills from the declaration, so a
+  text never disagrees with a rule.
+
+Choose the install's regime with `pnpm plugins tax-regime <key>` (`docs/running.md`). A rule the
+contract cannot declare is a reason to extend the contract at a stage review, never country code
+in core. Have someone who knows the rules check the declaration; the regime gets its own golden
+cases once the engine exists.
 
 ## Testing on fixtures
 

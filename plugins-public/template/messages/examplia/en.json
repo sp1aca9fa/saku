@@ -1,0 +1,21 @@
+{
+  "name": "Examplia (made-up country)",
+  "accounts": {
+    "general": {
+      "name": "General account",
+      "description": "An ordinary brokerage account. Realized gains and dividends are taxed at {gainsRate}; losses offset gains and dividends and carry forward for {years} years if you file a tax return."
+    },
+    "saver": {
+      "name": "Saver account",
+      "description": "A tax-free account for unleveraged equity funds, bought in one go or by a regular plan. You may buy up to {annual} a year; selling does not give that room back."
+    }
+  },
+  "losses": {
+    "filing": "Losses offset other income and carry forward only if you file a tax return for the year."
+  },
+  "fx": {
+    "mid": "Mid rate",
+    "buy": "Selling rate (you buy foreign currency)",
+    "sell": "Buying rate (you sell foreign currency)"
+  }
+}

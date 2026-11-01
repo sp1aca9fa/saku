@@ -3,6 +3,7 @@
 import type {
   Calendar,
   EarlyCloses,
+  FxKind,
   FxRate,
   FxValue,
   FxWithdrawal,
@@ -245,6 +246,204 @@ export interface Notifier {
   send(target: string, text: string, ctx: PluginContext): Promise<void>;
 }
 
+// Tax regimes (requirements 07 "What a regime plug-in declares", 15). A regime only declares;
+// the tax engine in core computes (C1, with decimal.js). Every amount and rate is a decimal
+// written as text, never a float (system design: decimal money, tax and quotas). Checked when
+// the plug-ins load (`validateTaxRegime`): a declaration that does not pass is refused whole.
+
+/**
+ * A non-negative decimal in plain notation: digits, optionally a point and more digits
+ * (`"0.20315"`, `"2400000"`). No sign, exponent, grouping or spaces.
+ */
+export type DecimalText = string;
+
+/** An amount in a currency (ISO 4217 code, e.g. `"XTS"`). Always the regime's `currency`. */
+export interface MoneyText {
+  amount: DecimalText;
+  currency: string;
+}
+
+/**
+ * A text the regime ships in its own language files (`TaxRegime.texts`): a dotted key into them
+ * (e.g. `"accounts.general.name"`), resolved in the user's language with English as fallback.
+ */
+export type RegimeTextKey = string;
+
+/** How a purchase may be made: one purchase of any size, or a recurring plan (DCA). */
+export type PurchaseMode = 'lump_sum' | 'periodic';
+
+/** What a realized loss may be set against. */
+export type LossOffset = 'gains' | 'dividends';
+
+/** How the cost of a sold position is found from its purchases. */
+export type LotMethod = 'moving_average' | 'fifo';
+
+/**
+ * The order in which one day's trades of one product meet the lot method: as executed, or all
+ * purchases before the sales (so a same-day repurchase enters the sold position's cost), or all
+ * sales first.
+ */
+export type SameDayOrder = 'execution' | 'purchases_first' | 'sales_first';
+
+/** The stored tax rate kinds (`FX_KINDS` in core, without `valuation`). */
+export type TaxFxKind = Exclude<FxKind, 'valuation'>;
+
+/** Which products an account type may hold and how they may be bought. */
+export interface TaxEligibility {
+  /**
+   * Leveraged and inverse products (`symbols.leverage_factor` other than 1) may be held. A
+   * product whose factor is unknown counts as leveraged.
+   */
+  leveraged: boolean;
+  /** The asset classes it may hold (`symbols.asset_class`), or `'all'`. */
+  assetClasses: 'all' | string[];
+  /**
+   * Only products the regime designates (a list kept by an authority, e.g. funds approved for a
+   * savings scheme). Where that list comes from is not part of the contract yet (it is decided
+   * with the first regime that needs it); until then no product is eligible for such an account
+   * type. Default false.
+   */
+  designatedOnly?: boolean;
+  /** The purchase modes allowed (at least one). */
+  purchaseModes: PurchaseMode[];
+}
+
+/**
+ * When a sale gives quota back: which limits, at what value (the sold position's cost, its
+ * `book value`, or the sale's proceeds), and from when (the start of the next regime year, or
+ * the trade date).
+ */
+export interface QuotaRelease {
+  limits: ('annual' | 'lifetime')[];
+  basis: 'book_value' | 'proceeds';
+  from: 'next_year' | 'trade_date';
+}
+
+/**
+ * An account type's purchase limits. Purchases count against them at their cost in the regime's
+ * currency (converted at the purchase rate, `TaxFx.purchases`). A year is the regime year
+ * (`TaxRegime.yearStart`).
+ */
+export interface TaxQuota {
+  /** Most that may be bought in one regime year. */
+  annual?: MoneyText;
+  /** Most that may be held at cost over a lifetime. */
+  lifetime?: MoneyText;
+  /** Whether and how a sale frees quota; absent: a sale frees nothing. */
+  release?: QuotaRelease;
+}
+
+/** Tax rates on what an account type realizes, as fractions (`"0.20315"` for 20.315%). */
+export interface TaxRates {
+  realizedGains: DecimalText;
+  dividends: DecimalText;
+}
+
+/** A condition a loss offset or carryforward depends on. */
+export interface LossCondition {
+  /** `filing`: the person files a tax return for the year. */
+  kind: 'filing';
+  /** What the user is told about it. */
+  textKey: RegimeTextKey;
+}
+
+/** What happens to a realized loss in an account type. */
+export interface TaxLosses {
+  /** What a loss may be set against within the year; empty: no offset. */
+  offsets: LossOffset[];
+  /** Regime years a loss not used may be carried forward (whole number, 0: none), or no limit. */
+  carryforwardYears: number | 'unlimited';
+  /** Conditions for the offsets and the carryforward (none: they always apply). */
+  conditions: LossCondition[];
+}
+
+/** One kind of account a person may hold under the regime. */
+export interface TaxAccountType {
+  /** Stable identifier (`taxable` is required); never changed once user data exists. */
+  key: string;
+  treatment: 'taxable' | 'tax_advantaged';
+  nameKey: RegimeTextKey;
+  descriptionKey: RegimeTextKey;
+  eligibility: TaxEligibility;
+  /** Absent: no purchase limit. */
+  quota?: TaxQuota;
+  tax: TaxRates;
+  losses: TaxLosses;
+  /** Whether foreign tax withheld on dividends (`TaxRegime.foreignWithholding`) is credited. */
+  foreignTaxCredit: boolean;
+}
+
+/** A lifetime or annual limit several account types share (e.g. one lifetime cap for two). */
+export interface QuotaGroup {
+  key: string;
+  nameKey: RegimeTextKey;
+  accountTypes: string[];
+  annual?: MoneyText;
+  lifetime?: MoneyText;
+}
+
+/** Tax withheld at source on dividends paid from another country. */
+export interface ForeignWithholding {
+  /** ISO 3166-1 alpha-2 code of the country the dividend comes from. */
+  country: string;
+  rate: DecimalText;
+}
+
+/**
+ * Which exchange rate converts each kind of amount into the regime's currency. `rates` names
+ * the regime's own rates (e.g. `TTM`, `TTS`, `TTB`) and maps each onto a stored kind.
+ */
+export interface TaxFx {
+  rates: Record<string, { kind: TaxFxKind; nameKey: RegimeTextKey }>;
+  purchases: string;
+  sales: string;
+  dividends: string;
+}
+
+/** A move of holdings from one account type to another without a sale. */
+export interface TaxTransfer {
+  from: string;
+  to: string;
+}
+
+/** A regime's language files: per language code a tree of texts; `en` is required and complete. */
+export interface RegimeTexts {
+  [key: string]: string | RegimeTexts;
+}
+
+export interface TaxRegimeInfo {
+  /** Stable identifier (the `tax_regime` setting); never changed once user tax data exists. */
+  key: string;
+  kind: 'tax_regime';
+  nameKey: RegimeTextKey;
+  /** The country whose rules these are (ISO 3166-1 alpha-2; a made-up one: a user-assigned code). */
+  country: string;
+  /** The currency taxes and limits are computed in (ISO 4217). */
+  currency: string;
+  /** Official sources of the rules (laws, the tax authority's pages); at least one. */
+  sources: string[];
+}
+
+/** A country's tax rules for the engine (requirements 07). Declarations only, no code. */
+export interface TaxRegime {
+  info: TaxRegimeInfo;
+  /** First day of the regime year (`MM-DD`), for annual limits and carryforward. */
+  yearStart: string;
+  accountTypes: TaxAccountType[];
+  quotaGroups?: QuotaGroup[];
+  costBasis: { method: LotMethod; sameDayOrder: SameDayOrder };
+  fx: TaxFx;
+  /**
+   * Withholding at source per paying country (not the regime's own `info.country`). A dividend
+   * from a country not listed has an unknown withholding: the engine says so, never assumes 0.
+   */
+  foreignWithholding: ForeignWithholding[];
+  /** Moves allowed without a sale; any other move is a sale and a new purchase. */
+  transfers: TaxTransfer[];
+  /** Per language code (`en` required). */
+  texts: Record<string, RegimeTexts>;
+}
+
 /** What a plug-in package's `src/index.ts` exports. */
 export interface PluginModule {
   bars?: BarSource[];
@@ -253,4 +452,5 @@ export interface PluginModule {
   issuers?: IssuerSource[];
   calendars?: CalendarSource[];
   notifiers?: Notifier[];
+  taxRegimes?: TaxRegime[];
 }

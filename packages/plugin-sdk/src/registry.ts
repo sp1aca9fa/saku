@@ -24,6 +24,7 @@ import {
   mergeFormerIds,
   sameLimits,
 } from './http';
+import { validateTaxRegimes } from './tax-regime';
 import type {
   BarSource,
   IssuerSource,
@@ -49,7 +50,16 @@ export interface LoadedPlugins extends Required<PluginModule> {
 }
 
 export function emptyPlugins(): LoadedPlugins {
-  return { bars: [], series: [], fx: [], issuers: [], calendars: [], notifiers: [], missing: [] };
+  return {
+    bars: [],
+    series: [],
+    fx: [],
+    issuers: [],
+    calendars: [],
+    notifiers: [],
+    taxRegimes: [],
+    missing: [],
+  };
 }
 
 export async function loadPlugins(root: string = findRepoRoot()): Promise<LoadedPlugins> {
@@ -67,8 +77,11 @@ export async function loadPlugins(root: string = findRepoRoot()): Promise<Loaded
     loaded.issuers.push(...(mod.issuers ?? []));
     loaded.calendars.push(...(mod.calendars ?? []));
     loaded.notifiers.push(...(mod.notifiers ?? []));
+    loaded.taxRegimes.push(...(mod.taxRegimes ?? []));
   }
   validateInfos([...allInfos(loaded), ...loaded.notifiers.map((n) => n.info)]);
+  // Tax regimes send no requests and store no rows: checked on their own (`validateTaxRegime`).
+  validateTaxRegimes(loaded.taxRegimes);
   return loaded;
 }
 

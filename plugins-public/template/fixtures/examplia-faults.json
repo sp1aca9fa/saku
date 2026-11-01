@@ -1,0 +1,218 @@
+{
+  "about": "Faults injected one at a time into the Examplia regime; each must be refused with the message given (a regular expression).",
+  "faults": [
+    {
+      "path": ["accountTypes", 0, "tax", "realizedGains"],
+      "value": 0.25,
+      "message": "accountTypes\\[0\\]\\.tax\\.realizedGains: must be a decimal written as text"
+    },
+    {
+      "path": ["accountTypes", 0, "tax", "dividends"],
+      "value": "1.5",
+      "message": "accountTypes\\[0\\]\\.tax\\.dividends: a rate is from 0 to 1"
+    },
+    {
+      "path": ["accountTypes", 0, "tax", "dividends"],
+      "value": "-0.1",
+      "message": "dividends: must be a decimal"
+    },
+    {
+      "path": ["accountTypes", 0, "tax", "dividends"],
+      "value": "2e-1",
+      "message": "dividends: must be a decimal"
+    },
+    {
+      "path": ["accountTypes", 0, "tax", "dividends"],
+      "value": "0,25",
+      "message": "dividends: must be a decimal"
+    },
+    {
+      "path": ["accountTypes", 0, "key"],
+      "value": "general",
+      "message": "a \"taxable\" account type is required"
+    },
+    {
+      "path": ["accountTypes", 0, "treatment"],
+      "value": "tax_advantaged",
+      "message": "the \"taxable\" account type is taxable"
+    },
+    {
+      "path": ["accountTypes", 1, "key"],
+      "value": "taxable",
+      "message": "\"taxable\" declared twice"
+    },
+    {
+      "path": ["accountTypes", 1, "quota", "annual", "currency"],
+      "value": "USD",
+      "message": "must be the regime's currency XTS \\(got USD\\)"
+    },
+    {
+      "path": ["accountTypes", 1, "quota", "annual", "currency"],
+      "value": "xts",
+      "message": "quota\\.annual\\.currency: must be an ISO 4217 code"
+    },
+    {
+      "path": ["accountTypes", 1, "quota", "annual", "amount"],
+      "value": "0",
+      "message": "a limit is above 0"
+    },
+    {
+      "path": ["accountTypes", 1, "quota", "annual", "amount"],
+      "value": 1000000,
+      "message": "annual\\.amount: must be a decimal written as text"
+    },
+    {
+      "path": ["accountTypes", 1, "quota", "lifetime"],
+      "value": { "amount": "999999", "currency": "XTS" },
+      "message": "annual limit 1000000 is above the lifetime limit 999999"
+    },
+    {
+      "path": ["accountTypes", 1, "quota", "release"],
+      "value": { "limits": ["lifetime"], "basis": "book_value", "from": "next_year" },
+      "message": "frees the lifetime limit, which neither the account type nor its groups declare"
+    },
+    {
+      "path": ["accountTypes", 1, "quota", "anual"],
+      "value": { "amount": "1", "currency": "XTS" },
+      "message": "quota: unknown field \"anual\""
+    },
+    {
+      "path": ["accountTypes", 1, "eligibility", "purchaseModes"],
+      "value": [],
+      "message": "purchaseModes: name at least one"
+    },
+    {
+      "path": ["accountTypes", 1, "eligibility", "purchaseModes"],
+      "value": ["monthly"],
+      "message": "purchaseModes\\[0\\]: must be one of lump_sum, periodic"
+    },
+    {
+      "path": ["accountTypes", 1, "eligibility", "leveraged"],
+      "value": "no",
+      "message": "eligibility\\.leveraged: must be true or false"
+    },
+    {
+      "path": ["accountTypes", 1, "eligibility", "assetClasses"],
+      "value": [],
+      "message": "assetClasses: \"all\" or a list"
+    },
+    {
+      "path": ["accountTypes", 0, "losses", "carryforwardYears"],
+      "value": 2.5,
+      "message": "carryforwardYears: a whole number of years"
+    },
+    {
+      "path": ["accountTypes", 0, "losses", "offsets"],
+      "value": ["income"],
+      "message": "offsets\\[0\\]: must be one of gains, dividends"
+    },
+    {
+      "path": ["accountTypes", 0, "losses", "conditions", 0, "kind"],
+      "value": "residency",
+      "message": "conditions\\[0\\]\\.kind: must be one of filing"
+    },
+    {
+      "path": ["accountTypes", 0, "nameKey"],
+      "value": "accounts.general.title",
+      "message": "nameKey: no English text \"accounts\\.general\\.title\""
+    },
+    {
+      "path": ["accountTypes", 0, "foreignTaxCredit"],
+      "value": null,
+      "message": "foreignTaxCredit: must be true or false"
+    },
+    { "path": ["info", "key"], "value": "Examplia", "message": "info\\.key: must be 2-40" },
+    { "path": ["info", "kind"], "value": "bar", "message": "info\\.kind: must be \"tax_regime\"" },
+    {
+      "path": ["info", "currency"],
+      "value": "XT",
+      "message": "info\\.currency: must be an ISO 4217 code"
+    },
+    {
+      "path": ["info", "country"],
+      "value": "QXX",
+      "message": "info\\.country: must be an ISO 3166-1 alpha-2 code"
+    },
+    {
+      "path": ["info", "sources"],
+      "value": [],
+      "message": "info\\.sources: name at least one official source"
+    },
+    {
+      "path": ["info", "sources"],
+      "value": ["ftp://tax.examplia.test"],
+      "message": "info\\.sources\\[0\\]: must be an http\\(s\\) address"
+    },
+    { "path": ["yearStart"], "value": "02-29", "message": "yearStart: must be a day of the year" },
+    { "path": ["yearStart"], "value": "13-01", "message": "yearStart: must be a day of the year" },
+    {
+      "path": ["costBasis", "method"],
+      "value": "lifo",
+      "message": "costBasis\\.method: must be one of moving_average, fifo"
+    },
+    {
+      "path": ["costBasis", "sameDayOrder"],
+      "value": "random",
+      "message": "costBasis\\.sameDayOrder: must be one of"
+    },
+    {
+      "path": ["fx", "purchases"],
+      "value": "TTS",
+      "message": "fx\\.purchases: must name one of the declared rates \\(MID, ASK, BID\\)"
+    },
+    {
+      "path": ["fx", "rates", "MID", "kind"],
+      "value": "valuation",
+      "message": "fx\\.rates\\.MID\\.kind: must be one of tax_mid, tax_buy, tax_sell"
+    },
+    {
+      "path": ["foreignWithholding", 0, "country"],
+      "value": "QX",
+      "message": "the regime's own country is not foreign"
+    },
+    {
+      "path": ["foreignWithholding", 0, "rate"],
+      "value": "10%",
+      "message": "foreignWithholding\\[0\\]\\.rate: must be a decimal"
+    },
+    {
+      "path": ["transfers"],
+      "value": [{ "from": "taxable", "to": "nisa" }],
+      "message": "transfers\\[0\\]\\.to: no account type \"nisa\""
+    },
+    {
+      "path": ["transfers"],
+      "value": [{ "from": "saver", "to": "saver" }],
+      "message": "a transfer is between two account types"
+    },
+    {
+      "path": ["quotaGroups"],
+      "value": [
+        {
+          "key": "shared",
+          "nameKey": "name",
+          "accountTypes": ["saver", "other"],
+          "lifetime": { "amount": "5000000", "currency": "XTS" }
+        }
+      ],
+      "message": "quotaGroups\\[0\\]\\.accountTypes\\[1\\]: no account type \"other\""
+    },
+    {
+      "path": ["quotaGroups"],
+      "value": [{ "key": "shared", "nameKey": "name", "accountTypes": ["saver"] }],
+      "message": "quotaGroups\\[0\\]: declare an annual or a lifetime limit"
+    },
+    { "path": ["texts", "en"], "value": null, "message": "texts\\.en: must be an object of texts" },
+    {
+      "path": ["texts", "ja", "extra"],
+      "value": "余分",
+      "message": "texts\\.ja: keys not in English: extra"
+    },
+    {
+      "path": ["texts", "en", "fx", "mid"],
+      "value": " ",
+      "message": "texts\\.en: fx: text \"mid\" is empty"
+    },
+    { "path": ["deductions"], "value": [], "message": "regime: unknown field \"deductions\"" }
+  ]
+}

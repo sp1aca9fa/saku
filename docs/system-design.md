@@ -42,7 +42,7 @@ flowchart LR
 | `packages/data` | Verification layers, severity rules, stand-in rule, fault injection, calendars | A |
 | `packages/db` | Schema, migrations, queries, user CLI, seed, backup and restore | A1 |
 | `packages/auth` | Passwords, TOTP, backup codes, secret encryption | A1 (tables, CLI), D1 (UI) |
-| `packages/core` | Engine: adjusted series, indicators, signals, strategies, execution models, backtests, tax engine | A2 (minimal), B, C |
+| `packages/core` | Engine: adjusted series, indicators, signals, strategies, execution models, backtests, metrics (`docs/analytics.md`), tax engine | A2 (minimal), B, C |
 | `packages/reference` | Independent core math (not tax) | B1 |
 | `packages/analytics` | Robustness, overfitting statistics, Monte Carlo, finder | B3, F3 |
 | `apps/web` | UI, server actions (light only), admin pages | D (admin bits earlier as needed) |
@@ -172,7 +172,7 @@ interface BarSource { info: PluginInfo; fetchBars(ticker: string, from: TradingD
 interface SeriesSource { info: PluginInfo; fetchSeries(id: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<SeriesPoint[] | SeriesFetch>; } // with publishedAt when known; SeriesFetch = { points, completeSpan } (current values complete for their span: core infers withdrawals on full fetches, docs/data-pipeline.md "Vanished values")
 interface FxSource { info: PluginInfo; fetch(pair: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<FxRate[]>; }
 interface IssuerSource { info: PluginInfo; supports(ticker: string): boolean; fetchRecords(ticker: string, from: TradingDate, to: TradingDate, ctx: PluginContext): Promise<IssuerRecord[]>; }
-interface TaxRegime { info: PluginInfo; accountTypes: AccountType[]; rules: RegimeRules; } // declarative, C1
+interface TaxRegime { info: TaxRegimeInfo; yearStart: string; accountTypes: TaxAccountType[]; quotaGroups?: QuotaGroup[]; costBasis; fx; foreignWithholding; transfers; texts; } // declarative, C1; amounts and rates as decimal text (docs/plugins.md "Writing a tax regime")
 interface Check { id: string; layer: 'A'|'B'|'C'|'D'|'E'; run(ctx: CheckContext): CheckResult[]; } // pure
 type HealthStatus = 'green' | 'yellow' | 'red';
 interface Notifier { info: NotifierInfo; validTarget(target: string): boolean; send(target: string, text: string, ctx: PluginContext): Promise<void>; } // A2; text already in the user's language

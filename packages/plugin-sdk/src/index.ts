@@ -6,6 +6,7 @@ export * from './jobs/spike';
 export * from './jobs/verify';
 export * from './registry';
 export * from './server-only';
+export * from './tax-regime';
 export type * from './types';
 export * from './jobs/forward';
 export * from './jobs/anchor';
