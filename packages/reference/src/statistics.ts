@@ -14,7 +14,7 @@ import { REF_DISPERSION_FLOOR, REF_MIN_RETURNS } from './metrics';
 
 // ---- Results ----
 
-export type RefStatisticReason = RefNoValueReason | 'tooFewTrials' | 'notCovered';
+export type RefStatisticReason = RefNoValueReason | 'tooFewTrials' | 'notCovered' | 'datesDiffer';
 
 export type RefStatistic<T> = { ok: true; value: T } | { ok: false; reason: RefStatisticReason };
 
@@ -182,6 +182,9 @@ export function refPhiInv(p: number): number {
 
 // ---- Stationary block bootstrap ----
 
+/** The default mean block length, 20 trading days (a choice: about one month). */
+export const REF_DEFAULT_MEAN_BLOCK = 20;
+
 /**
  * Day indexes of one bootstrapped path of `L` days from a sample of `n` days (Politis and
  * Romano 1994): day 0 `i = int(n)`; each next day `u = float()`, a new block (`i = int(n)`) when
@@ -191,7 +194,7 @@ export function refStationaryBootstrap(
   rng: RefRandom,
   n: number,
   L: number,
-  meanBlock = 20,
+  meanBlock = REF_DEFAULT_MEAN_BLOCK,
 ): number[] {
   if (!Number.isInteger(n) || n < 1) throw new Error('reference bootstrap: n is not >= 1');
   if (!Number.isInteger(L) || L < 0) throw new Error('reference bootstrap: L is not >= 0');
@@ -247,18 +250,24 @@ export function refCheckEquity(name: string, list: readonly RefEquitySample[]): 
   }
 }
 
-interface Rows {
+export interface RefAlignedRows {
   /** x[j][i - 1] = x_(j,i), i = 1 .. T. */
   x: number[][];
   T: number;
+  /** The common dates a_0 .. a_T. */
+  dates: string[];
 }
 
 /**
  * The aligned excess returns of the trials with the no-value reasons in the contract's order:
- * fewer than `minTrials` (`tooFewTrials`), any equity <= 0, T < MIN_RETURNS, an unknown cash
- * return, a trial without swings.
+ * fewer than `minTrials` (`tooFewTrials`), any equity <= 0, a trial's date strictly between two
+ * consecutive common dates (`datesDiffer`), T < MIN_RETURNS, an unknown cash return, a trial
+ * without swings.
  */
-function alignedRows(input: RefTrialsInput, minTrials: number): RefStatistic<Rows> {
+export function refAlignedExcessReturns(
+  input: RefTrialsInput,
+  minTrials = 1,
+): RefStatistic<RefAlignedRows> {
   input.trials.forEach((t, j) => refCheckEquity(`trial ${j}`, t));
   const M = input.trials.length;
   if (M < minTrials) return not('tooFewTrials');
@@ -270,6 +279,18 @@ function alignedRows(input: RefTrialsInput, minTrials: number): RefStatistic<Row
   const common: string[] = [];
   for (const p of input.trials[0]!) {
     if (others.every((set) => set.has(p.date))) common.push(p.date);
+  }
+  // A date strictly between two consecutive common dates is one strictly between the first and
+  // the last common date that is not itself common; dates outside that range are only cut.
+  if (common.length >= 2) {
+    const isCommon = new Set(common);
+    const first = common[0]!;
+    const last = common[common.length - 1]!;
+    for (const trial of input.trials) {
+      for (const p of trial) {
+        if (p.date > first && p.date < last && !isCommon.has(p.date)) return not('datesDiffer');
+      }
+    }
   }
   const T = common.length - 1;
   if (T < REF_MIN_RETURNS) return not('tooShort');
@@ -290,7 +311,7 @@ function alignedRows(input: RefTrialsInput, minTrials: number): RefStatistic<Row
     x.push(row);
   }
   for (const row of x) if (!(sampleSd(row) > REF_DISPERSION_FLOOR)) return not('noDispersion');
-  return yes({ x, T });
+  return yes({ x, T, dates: common });
 }
 
 function average(xs: number[]): number {
@@ -345,11 +366,37 @@ function effectiveOf(x: number[][], T: number): RefEffectiveTrials {
   return { effective: rho + (1 - rho) * M, trials: M, averageCorrelation: rho, returns: T };
 }
 
-/** N = rho + (1 - rho) x M, rho the average pairwise correlation clamped to [0, 1]. */
-export function refEffectiveTrials(input: RefTrialsInput): RefStatistic<RefEffectiveTrials> {
-  const rows = alignedRows(input, 1);
+/**
+ * N = rho + (1 - rho) x M from a returns matrix (one row per trial), rho the average pairwise
+ * correlation clamped to [0, 1]. No trial: `tooFewTrials`; a row with fewer than 2 returns or
+ * sd <= DISPERSION_FLOOR: `noDispersion`; rows of unequal length or a non-finite return throw.
+ */
+export function refEffectiveTrials(
+  x: readonly (readonly number[])[],
+): RefStatistic<RefEffectiveTrials> {
+  for (const row of x) {
+    if (row.length !== x[0]!.length) throw new Error('reference effective trials: unequal rows');
+    for (const v of row) {
+      if (typeof v !== 'number' || !Number.isFinite(v)) {
+        throw new Error('reference effective trials: a return is not a finite number');
+      }
+    }
+  }
+  if (x.length === 0) return not('tooFewTrials');
+  const rows = x.map((row) => [...row]);
+  for (const row of rows) {
+    if (row.length < 2 || !(sampleSd(row) > REF_DISPERSION_FLOOR)) return not('noDispersion');
+  }
+  return yes(effectiveOf(rows, rows[0]!.length));
+}
+
+/** The effective number of trials of the trials' aligned excess returns. */
+export function refEffectiveTrialsOfTrials(
+  input: RefTrialsInput,
+): RefStatistic<RefEffectiveTrials> {
+  const rows = refAlignedExcessReturns(input, 1);
   if (!rows.ok) return not(rows.reason);
-  return yes(effectiveOf(rows.value.x, rows.value.T));
+  return refEffectiveTrials(rows.value.x);
 }
 
 // ---- Deflated Sharpe ratio ----
@@ -408,13 +455,15 @@ export interface RefDeflatedSharpe {
 export function refDeflatedSharpe(
   input: RefTrialsInput & { selected: number },
 ): RefStatistic<RefDeflatedSharpe> {
-  const rows = alignedRows(input, 1);
+  // A caller error, so before any data state (with no trial, no index is in range).
+  const sel = input.selected;
+  if (!Number.isInteger(sel) || sel < 0 || sel >= input.trials.length) {
+    throw new Error('reference DSR: selected is not the index of a trial');
+  }
+  const rows = refAlignedExcessReturns(input, 1);
   if (!rows.ok) return not(rows.reason);
   const { x, T } = rows.value;
   const M = x.length;
-  if (!Number.isInteger(input.selected) || input.selected < 0 || input.selected >= M) {
-    throw new Error('reference DSR: selected is not the index of a trial');
-  }
   const own = x[input.selected]!;
   const SR = dailySharpe(own);
   // Population central moments m_k = sum((x - mean)^k) / T.
@@ -497,7 +546,7 @@ export function refPbo(input: RefTrialsInput & { partitions?: number }): RefStat
   if (!Number.isInteger(S) || S < 2 || S % 2 !== 0) {
     throw new Error('reference PBO: partitions is not an even integer >= 2');
   }
-  const rows = alignedRows(input, 2);
+  const rows = refAlignedExcessReturns(input, 2);
   if (!rows.ok) return not(rows.reason);
   const { x, T } = rows.value;
   const M = x.length;
@@ -532,7 +581,10 @@ export function refPbo(input: RefTrialsInput & { partitions?: number }): RefStat
     }
     const m = blocks.length * b;
     const variance = (Q - (A * A) / m) / (m - 1);
-    if (!(variance > REF_DISPERSION_FLOOR * REF_DISPERSION_FLOOR)) return undefined;
+    // Floor scaled with the returns' size: for a constant return the subtraction leaves only
+    // rounding of about 1e-16 x S2.
+    const floor = Math.max(REF_DISPERSION_FLOOR * REF_DISPERSION_FLOOR, (1e-14 * Q) / m);
+    if (!(variance > floor)) return undefined;
     return A / m / Math.sqrt(variance);
   };
 

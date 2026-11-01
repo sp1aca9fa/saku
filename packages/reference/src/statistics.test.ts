@@ -2,6 +2,7 @@
 // of the contract, the paper's worked example, and cases worked out by hand from the contract's
 // formulas (never read from the code). High-precision Phi values were computed separately with
 // 420-digit decimal arithmetic (the all-positive erf series), outside this repository.
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { RefBar } from './index';
 import { refMetrics, type RefEquitySample } from './metrics';
@@ -9,7 +10,9 @@ import {
   RefRandom,
   refDeflatedSharpe,
   refDeflatedSharpeFromMoments,
+  refAlignedExcessReturns,
   refEffectiveTrials,
+  refEffectiveTrialsOfTrials,
   refExpectedMaxSharpe,
   refNearTie,
   refPbo,
@@ -20,8 +23,8 @@ import {
   type RefStatistic,
 } from './statistics';
 import {
-  REF_CRISIS_WINDOWS,
   REF_WILSON_Z,
+  type RefCrisisWindow,
   refCrisisReplays,
   refGoalProjection,
   refNeighbors,
@@ -114,14 +117,14 @@ describe('reference random numbers: the contract check values', () => {
 
 describe('reference normal distribution', () => {
   it('the contract check values', () => {
-    // Any correct method: 1e-13 relative is the requirement, not the last bit. The 420-digit
-    // values are Phi(-1) = 0.158655253931457051, PhiInv(0.01) = -2.326347874040841101: this
-    // implementation gives 0.15865525393145705 and -2.326347874040841, a few ulp from the
-    // contract's figures.
-    close(refPhi(-1), 0.15865525393145707, 1e-15);
-    close(refPhi(0.3), 0.6179114221889526, 1e-15);
-    close(refPhiInv(0.01), -2.3263478740408408, 1e-15);
-    expect(refPhiInv(0.975)).toBe(1.959963984540054);
+    // High-precision true values 0.158655253931457051, 0.617911422188952637,
+    // -2.326347874040841101, 1.959963984540054236 (as nearest doubles), met within 1e-15 relative.
+    close(refPhi(-1), 0.15865525393145705, 1e-15);
+    close(refPhi(0.3), 0.6179114221889527, 1e-15);
+    close(refPhiInv(0.01), -2.326347874040841, 1e-15);
+    close(refPhiInv(0.975), 1.9599639845400543, 1e-15);
+    expect(refPhi(-Infinity)).toBe(0);
+    expect(refPhi(Infinity)).toBe(1);
   });
   it('1e-13 relative for |z| <= 8 and 1e-11 to |z| = 37 (420-digit values)', () => {
     const exact: [number, number][] = [
@@ -198,59 +201,113 @@ const trial = (f: (i: number) => number, n = 20) => equity(series(n, (i) => 0.00
 describe('reference trials: no-value reasons in order', () => {
   const good = trial(p2);
   it('no trial, a wiped-out trial, too few returns, an unknown cash return, no swings', () => {
-    expect(reason(refEffectiveTrials({ trials: [], cashReturn: zeroCash }))).toBe('tooFewTrials');
-    const wiped = good.map((p, i) => (i === 3 ? { ...p, equity: 0 } : p));
-    expect(reason(refEffectiveTrials({ trials: [good, wiped], cashReturn: zeroCash }))).toBe(
-      'equityNotPositive',
+    expect(reason(refEffectiveTrialsOfTrials({ trials: [], cashReturn: zeroCash }))).toBe(
+      'tooFewTrials',
     );
+    const wiped = good.map((p, i) => (i === 3 ? { ...p, equity: 0 } : p));
     expect(
-      reason(refEffectiveTrials({ trials: [good, trial(p2, 19)], cashReturn: zeroCash })),
+      reason(refEffectiveTrialsOfTrials({ trials: [good, wiped], cashReturn: zeroCash })),
+    ).toBe('equityNotPositive');
+    expect(
+      reason(refEffectiveTrialsOfTrials({ trials: [good, trial(p2, 19)], cashReturn: zeroCash })),
     ).toBe('tooShort');
-    expect(reason(refEffectiveTrials({ trials: [good] }))).toBe('cashRateMissing');
+    expect(reason(refEffectiveTrialsOfTrials({ trials: [good] }))).toBe('cashRateMissing');
     // Unknown only on a_0 is not needed.
     const notFirst = (d: string) => (d === good[0]!.date ? undefined : 0);
-    expect(reason(refEffectiveTrials({ trials: [good], cashReturn: notFirst }))).toBe('value');
+    expect(reason(refEffectiveTrialsOfTrials({ trials: [good], cashReturn: notFirst }))).toBe(
+      'value',
+    );
     const flat = equity(series(20, () => 0.001));
-    expect(reason(refEffectiveTrials({ trials: [good, flat], cashReturn: zeroCash }))).toBe(
+    expect(reason(refEffectiveTrialsOfTrials({ trials: [good, flat], cashReturn: zeroCash }))).toBe(
       'noDispersion',
     );
     // Order: tooShort before cashRateMissing.
-    expect(reason(refEffectiveTrials({ trials: [trial(p2, 19)] }))).toBe('tooShort');
+    expect(reason(refEffectiveTrialsOfTrials({ trials: [trial(p2, 19)] }))).toBe('tooShort');
+  });
+  it('datesDiffer: a date strictly between consecutive common dates; checked after equity', () => {
+    const gap = good.filter((_, i) => i !== 5); // the other trial has a date in its gap
+    expect(reason(refEffectiveTrialsOfTrials({ trials: [good, gap], cashReturn: zeroCash }))).toBe(
+      'datesDiffer',
+    );
+    const wiped = gap.map((p, i) => (i === 2 ? { ...p, equity: -1 } : p));
+    expect(
+      reason(refEffectiveTrialsOfTrials({ trials: [good, wiped], cashReturn: zeroCash })),
+    ).toBe('equityNotPositive');
+    // datesDiffer before tooShort and cashRateMissing.
+    expect(
+      reason(refEffectiveTrialsOfTrials({ trials: [good.slice(0, 10), gap.slice(0, 9)] })),
+    ).toBe('datesDiffer');
+    // Dates before the first or after the last common date are only cut.
+    const longer = trial(p2, 40);
+    const middle = longer.slice(5, 30);
+    const rows = value(refAlignedExcessReturns({ trials: [longer, middle], cashReturn: zeroCash }));
+    expect([rows.T, rows.dates[0], rows.dates[24]]).toEqual([
+      24,
+      middle[0]!.date,
+      middle[24]!.date,
+    ]);
   });
   it('uses only the dates every trial has', () => {
     const longer = trial(p2, 40); // 2024-01-01 .. 2024-02-10
     const later = longer.slice(15); // 26 dates, 25 returns in common
-    const n = value(refEffectiveTrials({ trials: [longer, later], cashReturn: zeroCash }));
+    const n = value(refEffectiveTrialsOfTrials({ trials: [longer, later], cashReturn: zeroCash }));
     expect(n.returns).toBe(25);
   });
   it('refuses unreal or unordered dates and non-finite equity', () => {
     const bad = [{ date: '2024-02-30', equity: 1 }];
-    expect(() => refEffectiveTrials({ trials: [bad] })).toThrow();
+    expect(() => refEffectiveTrialsOfTrials({ trials: [bad] })).toThrow();
     const order = [good[1]!, good[0]!];
-    expect(() => refEffectiveTrials({ trials: [order] })).toThrow();
-    expect(() => refEffectiveTrials({ trials: [[{ date: '2024-01-01', equity: NaN }]] })).toThrow();
+    expect(() => refEffectiveTrialsOfTrials({ trials: [order] })).toThrow();
+    expect(() =>
+      refEffectiveTrialsOfTrials({ trials: [[{ date: '2024-01-01', equity: NaN }]] }),
+    ).toThrow();
   });
 });
 
 describe('reference effective number of trials', () => {
+  it('a returns matrix: tooFewTrials, noDispersion (flat or under 2 returns), throws on bad rows', () => {
+    expect(reason(refEffectiveTrials([]))).toBe('tooFewTrials');
+    expect(
+      reason(
+        refEffectiveTrials([
+          [0.01, -0.01, 0.02],
+          [0.001, 0.001, 0.001],
+        ]),
+      ),
+    ).toBe('noDispersion');
+    expect(reason(refEffectiveTrials([[0.01]]))).toBe('noDispersion');
+    expect(() => refEffectiveTrials([[0.01, 0.02], [0.01]])).toThrow();
+    expect(() => refEffectiveTrials([[0.01, NaN]])).toThrow();
+    // p and -p: correlation -1, clamped to 0: N = 2; returns = the row length.
+    const n = value(
+      refEffectiveTrials([
+        [1, -1, 1, -1],
+        [-1, 1, -1, 1],
+      ]),
+    );
+    expect(n).toEqual({ effective: 2, trials: 2, averageCorrelation: 0, returns: 4 });
+  });
   it('one trial: N = 1, rho undefined', () => {
-    const n = value(refEffectiveTrials({ trials: [trial(p2)], cashReturn: zeroCash }));
+    const n = value(refEffectiveTrialsOfTrials({ trials: [trial(p2)], cashReturn: zeroCash }));
     expect(n).toEqual({ effective: 1, trials: 1, averageCorrelation: undefined, returns: 20 });
   });
   it('copies: rho = 1, N = 1; orthogonal: rho = 0, N = M; negative clamps to 0', () => {
     const copies = value(
-      refEffectiveTrials({ trials: [trial(p2), trial(p2), trial(p2)], cashReturn: zeroCash }),
+      refEffectiveTrialsOfTrials({
+        trials: [trial(p2), trial(p2), trial(p2)],
+        cashReturn: zeroCash,
+      }),
     );
     close(copies.averageCorrelation!, 1, 1e-12);
     close(copies.effective, 1, 1e-12);
     const orth = value(
-      refEffectiveTrials({ trials: [trial(p2), trial(p4)], cashReturn: zeroCash }),
+      refEffectiveTrialsOfTrials({ trials: [trial(p2), trial(p4)], cashReturn: zeroCash }),
     );
     expect(Math.abs(orth.averageCorrelation!)).toBeLessThan(1e-12);
     close(orth.effective, 2, 1e-12);
     // Pairs: +1, -1, -1: mean -1/3, clamped to 0, so N = M = 3.
     const neg = value(
-      refEffectiveTrials({
+      refEffectiveTrialsOfTrials({
         trials: [trial(p2), trial(p2), trial((i) => -p2(i))],
         cashReturn: zeroCash,
       }),
@@ -260,7 +317,7 @@ describe('reference effective number of trials', () => {
   });
   it('corr(p, p + q) = 1 / sqrt(2) for orthogonal p, q of equal spread: N = rho + (1 - rho) 2', () => {
     const n = value(
-      refEffectiveTrials({
+      refEffectiveTrialsOfTrials({
         trials: [trial(p2), trial((i) => p2(i) + p4(i))],
         cashReturn: zeroCash,
       }),
@@ -335,7 +392,11 @@ describe('reference deflated Sharpe ratio', () => {
     });
     expect(reason(d)).toBe('noDispersion');
   });
-  it('refuses a selected index that is not a trial', () => {
+  it('refuses a selected index that is not a trial, before any data state', () => {
+    expect(() => refDeflatedSharpe({ trials: [], cashReturn: zeroCash, selected: 0 })).toThrow();
+    expect(() =>
+      refDeflatedSharpe({ trials: [trial(p2, 5)], cashReturn: zeroCash, selected: 0.5 }),
+    ).toThrow();
     expect(() =>
       refDeflatedSharpe({ trials: [trial(p2)], cashReturn: zeroCash, selected: 1 }),
     ).toThrow();
@@ -402,6 +463,12 @@ describe('reference PBO (CSCV)', () => {
     expect(
       reason(refPbo({ trials: [make(up), flatLater], cashReturn: zeroCash, partitions: 2 })),
     ).toBe('noDispersion');
+    // A constant non-zero return in block 1: (S2 - S1^2/m)/(m - 1) leaves only rounding, below
+    // the scale-aware floor 1e-14 x S2 / m (a fixed 1e-24 would read it as a spread).
+    const constLater = make((i) => (i < 20 ? up(i) : 0.0037));
+    expect(
+      reason(refPbo({ trials: [make(up), constLater], cashReturn: zeroCash, partitions: 2 })),
+    ).toBe('noDispersion');
     expect(() =>
       refPbo({ trials: [make(up), make(down)], cashReturn: zeroCash, partitions: 3 }),
     ).toThrow();
@@ -457,8 +524,28 @@ describe('reference walk-forward folds', () => {
     expect(
       reason(refWalkForward({ points: pts.slice(0, 730), benchmark: pts, cashReturn: cash })),
     ).toBe('tooShort');
-    expect(reason(refWalkForward({ points: [], benchmark: pts }))).toBe('tooShort');
-    expect(() => refWalkForward({ points: pts, benchmark: pts, folds: 0 })).toThrow();
+    expect(reason(refWalkForward({ points: [], benchmark: pts, cashReturn: cash }))).toBe(
+      'tooShort',
+    );
+    expect(() =>
+      refWalkForward({ points: pts, benchmark: pts, cashReturn: cash, folds: 0 }),
+    ).toThrow();
+    // cashReturn is required.
+    expect(() =>
+      refWalkForward({ points: pts, benchmark: pts } as unknown as Parameters<
+        typeof refWalkForward
+      >[0]),
+    ).toThrow();
+  });
+  it('nothing measured: no value with the first fold reason (strategy, else benchmark)', () => {
+    const noCash = () => undefined;
+    expect(reason(refWalkForward({ points: pts, benchmark: pts, cashReturn: noCash }))).toBe(
+      'cashRateMissing',
+    );
+    // A benchmark with no point at all: the strategy has values, the benchmark is tooShort.
+    expect(reason(refWalkForward({ points: pts, benchmark: [], cashReturn: cash }))).toBe(
+      'tooShort',
+    );
   });
 });
 
@@ -555,9 +642,15 @@ describe('reference crisis replays', () => {
     { date: '2020-03-01', equity: 30 },
     { date: '2020-03-23', equity: 40 },
   ];
+  const windows = JSON.parse(
+    readFileSync(new URL('../../../templates/crises/us-equity.json', import.meta.url), 'utf8'),
+  ) as RefCrisisWindow[];
+  const covidOnly = windows.filter((w) => w.id === 'covid');
+
   it('from the last point <= start to the last <= end; covered needs points on both sides', () => {
-    const r = refCrisisReplays({ strategy, benchmark });
-    expect(r.windows.map((w) => w.id)).toEqual(REF_CRISIS_WINDOWS.map((w) => w.id));
+    const r = value(refCrisisReplays({ strategy, benchmark, windows }));
+    expect(r.windows.map((w) => w.id)).toEqual(['dotCom', 'financialCrisis', 'covid', 'rates2022']);
+    expect(r.windows[2]!.source).toBe(windows[2]!.source);
     const covid = r.windows[2]!;
     // Strategy: 100, 110, 88, 99: 88/110 - 1 = -0.2; 99/100 - 1 = -0.01.
     close(value(covid.strategy).maxDrawdown, -0.2);
@@ -571,15 +664,32 @@ describe('reference crisis replays', () => {
     expect([r.covered, r.shallower]).toEqual([1, 1]);
   });
   it('a tie is not shallower; an equity <= 0 in the window is equityNotPositive', () => {
-    const same = refCrisisReplays({ strategy, benchmark: strategy });
+    const same = value(refCrisisReplays({ strategy, benchmark: strategy, windows }));
     expect(same.windows[2]!.shallower).toBe(false);
-    const wiped = benchmark.map((p, i) => (i === 1 ? { ...p, equity: 0 } : p));
-    const r = refCrisisReplays({ strategy, benchmark: wiped });
-    expect(reason(r.windows[2]!.benchmark)).toBe('equityNotPositive');
-    expect(r.covered).toBe(0);
     // A series ending on the trough date is covered (a point dated >= end).
-    const short = refCrisisReplays({ strategy: benchmark, benchmark });
+    const short = value(refCrisisReplays({ strategy: benchmark, benchmark, windows }));
     expect(short.windows[2]!.strategy.ok).toBe(true);
+    // Nothing covered: the first window's reason, the strategy's before the benchmark's.
+    const wiped = benchmark.map((p, i) => (i === 1 ? { ...p, equity: 0 } : p));
+    const r = refCrisisReplays({ strategy, benchmark: wiped, windows: covidOnly });
+    expect(reason(r)).toBe('equityNotPositive');
+    expect(reason(refCrisisReplays({ strategy, benchmark: wiped, windows }))).toBe('notCovered');
+    expect(reason(refCrisisReplays({ strategy, benchmark, windows: [] }))).toBe('notCovered');
+  });
+  it('windows are required input: real dates, start before end, unique ids, a source', () => {
+    const w = covidOnly[0]!;
+    const bad: unknown[] = [
+      undefined,
+      [w, w],
+      [{ ...w, end: w.start }],
+      [{ ...w, start: '2020-02-30' }],
+      [{ ...w, source: undefined }],
+    ];
+    for (const b of bad) {
+      expect(() =>
+        refCrisisReplays({ strategy, benchmark, windows: b as RefCrisisWindow[] }),
+      ).toThrow();
+    }
   });
 });
 
@@ -641,7 +751,7 @@ describe('reference goal projection', () => {
       }),
     );
     expect(W).toBeGreaterThan(1200);
-    for (const q of Object.values(r.percentiles)) close(q, W, 1e-12);
+    for (const q of Object.values(r.endValues)) close(q, W, 1e-12);
     expect([r.reached, r.probability]).toEqual([20, 1]);
     // p = 1: the Wilson interval is [1 / (1 + z^2 / P), 1].
     close(r.low, 1 / (1 + REF_WILSON_Z ** 2 / 20), 1e-14);
@@ -744,7 +854,41 @@ describe('reference goal projection', () => {
     });
     const reached = ends.filter((w) => w >= 101).length;
     expect(r.reached).toBe(reached);
-    close(r.percentiles.p50, [...ends].sort((a, b) => a - b)[1]!, 1e-12);
+    close(r.endValues.p50, [...ends].sort((a, b) => a - b)[1]!, 1e-12);
+    expect(Object.keys(r)).toEqual([
+      'reached',
+      'paths',
+      'probability',
+      'low',
+      'high',
+      'endValues',
+      'sampleDays',
+      'sampleStart',
+      'sampleEnd',
+      'meanBlock',
+      'seed',
+      'currency',
+    ]);
+    // Look-ahead guard: a run whose output up to h changes with the simulated future throws.
+    const peeking = (b: Record<string, RefBar[]>) => {
+      const out = runB(b);
+      return [{ date: dates[398]!, equity: b.B![b.B!.length - 1]!.close }, ...out];
+    };
+    const base = {
+      history: { B: bars },
+      future: fut,
+      initial: 100,
+      monthly: 0,
+      goal: 101,
+      currency: 'XYZ',
+      paths: 3,
+      seed: 99,
+      meanBlock: 2,
+    };
+    expect(() => refGoalProjection({ ...base, run: peeking })).toThrow(/look-ahead/);
+    // The same past on every path passes.
+    const steady = (b: Record<string, RefBar[]>) => [{ date: dates[398]!, equity: 1 }, ...runB(b)];
+    expect(refGoalProjection({ ...base, run: steady }).ok).toBe(true);
   });
   it('sample days need the previous common date as every series previous bar', () => {
     const b = growing(300).filter((x) => x.date !== '2024-03-01');
@@ -793,7 +937,28 @@ describe('reference goal projection', () => {
     const wiped = (bars: Record<string, RefBar[]>) =>
       runA(bars).map((p, i) => (i === 3 ? { ...p, equity: 0 } : p));
     const r = value(refGoalProjection({ ...base, history, run: wiped }));
-    expect([r.reached, r.percentiles.p95]).toEqual([0, 0]);
+    expect([r.reached, r.endValues.p95]).toEqual([0, 0]);
+  });
+  it('a run dropping a past date on a later path is look-ahead too', () => {
+    let calls = 0;
+    const flaky = (bars: Record<string, RefBar[]>) => {
+      calls++;
+      const out = runA(bars);
+      return calls === 1 ? [{ date: '2024-10-01', equity: 1 }, ...out] : out;
+    };
+    expect(() =>
+      refGoalProjection({
+        history,
+        future,
+        run: flaky,
+        initial: 1,
+        monthly: 0,
+        goal: 1,
+        currency: 'XYZ',
+        paths: 2,
+        seed: 1,
+      }),
+    ).toThrow(/look-ahead/);
   });
   it('refuses malformed input', () => {
     const base = {
@@ -831,8 +996,7 @@ describe('reference goal projection', () => {
   it('Wilson: p = 0 gives [0, z^2/P / (1 + z^2/P)]; a middle value by hand', () => {
     const z2 = REF_WILSON_Z ** 2;
     const zero = refWilson(0, 100);
-    // Exactly 0 in exact arithmetic; center - half rounds to a few 1e-18 (not clamped).
-    expect(Math.abs(zero.low)).toBeLessThan(1e-16);
+    expect(zero.low).toBe(0); // exact at the end, not left to rounding
     close(zero.high, z2 / 100 / (1 + z2 / 100), 1e-14);
     // 50 of 100: center 0.5; half = z / (1 + z^2/100) sqrt(0.0025 + z^2 / 40000).
     const mid = refWilson(50, 100);

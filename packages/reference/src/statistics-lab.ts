@@ -5,6 +5,7 @@
 import type { RefBar } from './index';
 import { refDays, refMetrics, type RefEquitySample, type RefMetric } from './metrics';
 import {
+  REF_DEFAULT_MEAN_BLOCK,
   RefRandom,
   refCheckEquity,
   refIsRealDate,
@@ -69,9 +70,13 @@ function cutFold(
 export function refWalkForward(input: {
   points: readonly RefEquitySample[];
   benchmark: readonly RefEquitySample[];
-  cashReturn?: (date: string) => number | undefined;
+  /** Required: the Sharpe ratio is excess over the cash return. */
+  cashReturn: (date: string) => number | undefined;
   folds?: number;
 }): RefStatistic<RefWalkForward> {
+  if (typeof input.cashReturn !== 'function') {
+    throw new Error('reference walk-forward: cashReturn is required');
+  }
   refCheckEquity('points', input.points);
   refCheckEquity('benchmark', input.benchmark);
   const wanted = input.folds ?? 10;
@@ -105,6 +110,13 @@ export function refWalkForward(input: {
     }
     const end = mine.own.length > 0 ? mine.own[mine.own.length - 1]!.date : undefined;
     folds.push({ start: B[q]!, end, strategy, benchmark, beat });
+  }
+  // Nothing measured: no value, with the first fold's reason (its strategy's, else its
+  // benchmark's).
+  if (measured === 0) {
+    const f = folds[0]!;
+    if (!f.strategy.ok) return not(f.strategy.reason);
+    if (!f.benchmark.ok) return not(f.benchmark.reason);
   }
   return yes({ folds, won, measured });
 }
@@ -167,6 +179,21 @@ export function refSweepVariants(
       }
     }
     if (param.values.length === 0) throw new Error(`reference sweep: parameter ${g} has no value`);
+    // A path equal to, or a prefix of, a path of another parameter is refused.
+    for (let other = 0; other < grid.length; other++) {
+      if (other === g) continue;
+      for (const a of param.paths) {
+        for (const b of grid[other]!.paths) {
+          let prefix = a.length <= b.length;
+          for (let i = 0; prefix && i < a.length; i++) if (a[i] !== b[i]) prefix = false;
+          if (prefix) {
+            throw new Error(
+              `reference sweep: path ${JSON.stringify(a)} overlaps ${JSON.stringify(b)}`,
+            );
+          }
+        }
+      }
+    }
     const seen = new Set<string>();
     for (const v of param.values) {
       const key = JSON.stringify(v);
@@ -245,15 +272,9 @@ export interface RefCrisisWindow {
   start: string;
   /** Trough close. */
   end: string;
+  /** Where the dates come from (shown from the data). */
+  source: string;
 }
-
-/** S&P 500 price index peak-to-trough closes (S&P Dow Jones Indices daily closing levels). */
-export const REF_CRISIS_WINDOWS: readonly RefCrisisWindow[] = [
-  { id: 'dotCom', start: '2000-03-24', end: '2002-10-09' },
-  { id: 'financialCrisis', start: '2007-10-09', end: '2009-03-09' },
-  { id: 'covid', start: '2020-02-19', end: '2020-03-23' },
-  { id: 'rates2022', start: '2022-01-03', end: '2022-10-12' },
-];
 
 export interface RefReplay {
   maxDrawdown: number;
@@ -298,14 +319,24 @@ function replay(list: readonly RefEquitySample[], w: RefCrisisWindow): RefStatis
 export function refCrisisReplays(input: {
   strategy: readonly RefEquitySample[];
   benchmark: readonly RefEquitySample[];
-  windows?: readonly RefCrisisWindow[];
-}): RefCrisisResult {
+  /** Required input data; there is no built-in list. */
+  windows: readonly RefCrisisWindow[];
+}): RefStatistic<RefCrisisResult> {
   refCheckEquity('strategy', input.strategy);
   refCheckEquity('benchmark', input.benchmark);
-  const windows = input.windows ?? REF_CRISIS_WINDOWS;
+  const windows = input.windows;
+  if (!Array.isArray(windows)) throw new Error('reference crisis: windows are required');
+  const ids = new Set<string>();
   for (const w of windows) {
+    if (typeof w.id !== 'string' || w.id === '' || ids.has(w.id)) {
+      throw new Error(`reference crisis: window id ${JSON.stringify(w.id)} is empty or repeated`);
+    }
+    ids.add(w.id);
     if (!refIsRealDate(w.start) || !refIsRealDate(w.end) || !(w.start < w.end)) {
       throw new Error(`reference crisis: window ${w.id} has no real start before its end`);
+    }
+    if (typeof w.source !== 'string') {
+      throw new Error(`reference crisis: window ${w.id} has no source`);
     }
   }
   let covered = 0;
@@ -324,7 +355,15 @@ export function refCrisisReplays(input: {
     }
     out.push({ ...w, strategy: s, benchmark: b, shallower });
   }
-  return { windows: out, covered, shallower: shallowerCount };
+  // Nothing covered: no value, the first window's reason (its strategy's, else its
+  // benchmark's), `notCovered` for an empty list.
+  if (covered === 0) {
+    if (out.length === 0) return not('notCovered');
+    const w = out[0]!;
+    if (!w.strategy.ok) return not(w.strategy.reason);
+    if (!w.benchmark.ok) return not(w.benchmark.reason);
+  }
+  return yes({ windows: out, covered, shallower: shallowerCount });
 }
 
 // ---- Monte Carlo goal projection ----
@@ -347,14 +386,14 @@ export interface RefProjectionInput {
 }
 
 export interface RefProjection {
-  probability: number;
   reached: number;
+  paths: number;
+  probability: number;
   /** Wilson score interval at 95%. */
   low: number;
   high: number;
   /** End values at the 5th .. 95th percentiles (nearest rank). */
-  percentiles: { p5: number; p25: number; p50: number; p75: number; p95: number };
-  paths: number;
+  endValues: { p5: number; p25: number; p50: number; p75: number; p95: number };
   sampleDays: number;
   sampleStart: string;
   sampleEnd: string;
@@ -371,7 +410,11 @@ export function refWilson(reached: number, P: number): { low: number; high: numb
   const p = reached / P;
   const center = (p + (z * z) / (2 * P)) / (1 + (z * z) / P);
   const half = (z / (1 + (z * z) / P)) * Math.sqrt((p * (1 - p)) / P + (z * z) / (4 * P * P));
-  return { low: Math.max(0, center - half), high: Math.min(1, center + half) };
+  // Exact at the ends: low = 0 when none reached, high = 1 when all did (not left to rounding).
+  return {
+    low: reached === 0 ? 0 : Math.max(0, center - half),
+    high: reached === P ? 1 : Math.min(1, center + half),
+  };
 }
 
 interface Relative {
@@ -430,7 +473,7 @@ function checkProjection(input: RefProjectionInput): string {
   if (!finite(input.goal) || input.goal <= 0) throw new Error('reference projection: goal');
   const paths = input.paths ?? 10000;
   if (!Number.isInteger(paths) || paths < 1) throw new Error('reference projection: paths');
-  const meanBlock = input.meanBlock ?? 20;
+  const meanBlock = input.meanBlock ?? REF_DEFAULT_MEAN_BLOCK;
   if (!finite(meanBlock) || meanBlock < 1) throw new Error('reference projection: meanBlock');
   if (!Number.isInteger(input.seed) || input.seed < 0 || input.seed > 4294967295) {
     throw new Error('reference projection: seed is not an integer in 0 .. 2^32 - 1');
@@ -448,7 +491,7 @@ function checkProjection(input: RefProjectionInput): string {
 export function refGoalProjection(input: RefProjectionInput): RefStatistic<RefProjection> {
   const h = checkProjection(input);
   const paths = input.paths ?? 10000;
-  const meanBlock = input.meanBlock ?? 20;
+  const meanBlock = input.meanBlock ?? REF_DEFAULT_MEAN_BLOCK;
   const ids = Object.keys(input.history);
 
   // Sample days: common dates d >= sampleFrom whose every series' previous bar is dated the
@@ -491,6 +534,7 @@ export function refGoalProjection(input: RefProjectionInput): RefStatistic<RefPr
   const L = input.future.length;
   const ends: number[] = [];
   let reached = 0;
+  let pastOfPath0: (readonly [string, number])[] = [];
   for (let path = 0; path < paths; path++) {
     const rng = new RefRandom(input.seed, path);
     const draws = refStationaryBootstrap(rng, sampleDates.length, L, meanBlock);
@@ -519,6 +563,19 @@ export function refGoalProjection(input: RefProjectionInput): RefStatistic<RefPr
     }
 
     const out = input.run(bars);
+    // Look-ahead guard: the output up to h (the real history) is path 0's on every path.
+    const past = out.filter((x) => x.date <= h).map((x) => [x.date, x.equity] as const);
+    if (path === 0) pastOfPath0 = past;
+    else {
+      const same =
+        past.length === pastOfPath0.length &&
+        past.every((x, i) => x[0] === pastOfPath0[i]![0] && x[1] === pastOfPath0[i]![1]);
+      if (!same) {
+        throw new Error(
+          `reference projection: the run's output up to ${h} differs on path ${path} (look-ahead)`,
+        );
+      }
+    }
     const equityOn = new Map<string, number>();
     for (const s of out) equityOn.set(s.date, s.equity);
     const sessions = [h, ...input.future];
@@ -552,18 +609,18 @@ export function refGoalProjection(input: RefProjectionInput): RefStatistic<RefPr
   const nearestRank = (q: number) => sorted[Math.floor((q * paths + 99) / 100) - 1]!;
   const { low, high } = refWilson(reached, paths);
   return yes({
-    probability: reached / paths,
     reached,
+    paths,
+    probability: reached / paths,
     low,
     high,
-    percentiles: {
+    endValues: {
       p5: nearestRank(5),
       p25: nearestRank(25),
       p50: nearestRank(50),
       p75: nearestRank(75),
       p95: nearestRank(95),
     },
-    paths,
     sampleDays: sampleDates.length,
     sampleStart: sampleDates[0]!,
     sampleEnd: sampleDates[sampleDates.length - 1]!,
