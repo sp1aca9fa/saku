@@ -41,8 +41,12 @@ const strategy = (o: { execution?: string; ticker?: string; safe?: string } = {}
     execution: o.execution ?? 'next_open',
     safeState: { holdings: [{ ticker: o.safe ?? 'AAA', weight: 100 }] },
     evaluation: { frequency: 'daily' },
+    // Every cost stated: these tests do not depend on the install's broker_costs (tested below).
+    costs: { slippageBps: 5, feePct: 0.1, fxSpreadPct: 0.2 },
     allocations: [{ name: 'All', holdings: [{ ticker: o.ticker ?? 'AAA', weight: 100 }] }],
   });
+/** What the report says about a strategy stating every cost: registered as it is. */
+const ownCosts = () => ({ strategy: strategy(), fromInstall: [] });
 
 const rawBar = (date: string): RawBar => ({
   date,
@@ -362,6 +366,7 @@ describe('registrationProblems', () => {
     });
     expect(await registrationReport(db, strategy(), { through: LAST, sessions })).toEqual({
       problems: [],
+      costs: ownCosts(),
       notes: [
         'AAA: 2 bars on days the market was closed, excluded (no signal reads them): ' +
           '2026-01-04, 2026-01-10.',
@@ -520,6 +525,7 @@ describe('registrationProblems on what verify stores', () => {
     expect(health.find((h) => h.symbolId !== null)).toMatchObject({ status: 'red' });
     expect(await registrationReport(db, strategy(), { through: LAST, sessions })).toEqual({
       problems: [],
+      costs: ownCosts(),
       notes: [
         'AAA: 1 bar on days the market was closed, excluded (no signal reads them): 2026-01-03.',
       ],
@@ -572,6 +578,7 @@ describe('registrationProblems on what verify stores', () => {
     await finishRun(db, id, { ok: true, datesProcessed: [LAST] });
     expect(await registrationReport(db, strategy(), { through: LAST, sessions })).toEqual({
       problems: [],
+      costs: ownCosts(),
       notes: [
         'AAA: 1 bar on days the market was closed, excluded (no signal reads them): 2026-01-03.',
       ],
@@ -611,5 +618,63 @@ describe('registrationProblems on what verify stores', () => {
         /^AAA: 1 red day in its history .*: 2026-01-03 \(A\.bar_valid@p, stand_in_refused/,
       ),
     ]);
+  });
+});
+
+// Requirements 05 "Costs": a cost the strategy omits is the install's broker_costs; with none set,
+// registration refuses (never 0). Spec 2026-11-02 c2-settings.
+describe('registration costs', () => {
+  const omitting = (costs: object) => Strategy.parse({ ...strategy(), costs });
+
+  it('refuses a strategy omitting a cost when the install has no broker costs', async () => {
+    const { db, pass } = await setup();
+    await pass();
+    const report = await registrationReport(db, omitting({ slippageBps: 5 }), {
+      through: LAST,
+      sessions,
+    });
+    expect(report.problems).toEqual([
+      expect.stringMatching(
+        /^The strategy leaves out costs\.feePct, costs\.fxSpreadPct and the install has no broker costs set \(never read as 0\)/,
+      ),
+    ]);
+    expect(report.costs).toBeUndefined();
+    // Listed with every other reason at once.
+    const same = await check(db, Strategy.parse({ ...omitting({}), execution: 'same_close' }));
+    expect(same).toEqual([
+      expect.stringMatching(/leaves out costs\.slippageBps/),
+      SAME_CLOSE_REFUSAL,
+    ]);
+  });
+
+  it("takes each omitted cost from the install's broker costs, and names them", async () => {
+    const { db, pass } = await setup();
+    await pass();
+    await setSetting(
+      db,
+      'broker_costs',
+      '{"slippageBps":"2","feePct":"0.05","fxSpreadPct":"0.25"}',
+    );
+    const report = await registrationReport(db, omitting({ feePct: 0 }), {
+      through: LAST,
+      sessions,
+    });
+    expect(report.problems).toEqual([]);
+    // The strategy's own 0 is its own: stated, not omitted.
+    expect(report.costs).toEqual({
+      strategy: { ...strategy(), costs: { slippageBps: 2, feePct: 0, fxSpreadPct: 0.25 } },
+      fromInstall: ['slippageBps', 'fxSpreadPct'],
+    });
+  });
+
+  it('refuses when the stored broker costs no longer parse (a hand edit), never reading 0', async () => {
+    const { db, pass } = await setup();
+    await pass();
+    await db.insert(schema.appSettings).values({ key: 'broker_costs', value: '{"feePct":"x"}' });
+    expect(await check(db, omitting({}))).toEqual([
+      expect.stringMatching(/^The strategy leaves out .* broker_costs does not parse \(/),
+    ]);
+    // A strategy stating every cost does not read the setting.
+    expect(await check(db)).toEqual([]);
   });
 });

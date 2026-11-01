@@ -1,0 +1,29 @@
+[
+  {
+    "id": "us_stocks",
+    "holdings": [{ "ticker": "SPY", "weight": 100 }],
+    "feePctPerYear": "0.1",
+    "account": "taxable"
+  },
+  {
+    "id": "global_stocks",
+    "holdings": [{ "ticker": "VT", "weight": 100 }],
+    "feePctPerYear": "0.1",
+    "account": "taxable"
+  },
+  {
+    "id": "stocks_bonds_60_40",
+    "holdings": [
+      { "ticker": "VTI", "weight": 60 },
+      { "ticker": "AGG", "weight": 40 }
+    ],
+    "feePctPerYear": "0.2",
+    "account": "taxable"
+  },
+  {
+    "id": "deposits",
+    "holdings": [{ "ticker": "DEPOSIT", "weight": 100 }],
+    "feePctPerYear": "0",
+    "account": "taxable"
+  }
+]

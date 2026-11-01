@@ -120,6 +120,13 @@
       "when": 1793544299670,
       "tag": "0016_symbols_domicile",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1793546701422,
+      "tag": "0017_user_tax_accounts",
+      "breakpoints": true
     }
   ]
 }

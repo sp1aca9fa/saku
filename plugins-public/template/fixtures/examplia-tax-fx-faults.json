@@ -1,0 +1,47 @@
+{
+  "about": "Faults injected one at a time into the Example Bank answer (fixtures/rates-usdxts.json); each must be refused, by the plug-in's shape check or by core's checks (taxFxProblems), with the message given (a regular expression). `remove: true` deletes the field instead of setting it.",
+  "faults": [
+    {
+      "name": "a rate of 0",
+      "path": ["rates", 1, "mid"],
+      "value": 0,
+      "message": "rate 0 is not a finite number above 0"
+    },
+    {
+      "name": "a negative rate",
+      "path": ["rates", 0, "bid"],
+      "value": -149.25,
+      "message": "rate -149.25 is not a finite number above 0"
+    },
+    {
+      "name": "buy below mid",
+      "path": ["rates", 1, "ask"],
+      "value": 151.0,
+      "message": "2026-01-05: tax_buy 151 is below tax_mid 151.1"
+    },
+    {
+      "name": "mid below sell",
+      "path": ["rates", 0, "bid"],
+      "value": 150.5,
+      "message": "2026-01-02: tax_mid 150.25 is below tax_sell 150.5"
+    },
+    {
+      "name": "a missing date",
+      "path": ["rates", 2, "date"],
+      "remove": true,
+      "message": "\"date\"[\\s\\S]*expected string"
+    },
+    {
+      "name": "an impossible date",
+      "path": ["rates", 2, "date"],
+      "value": "2026-02-30",
+      "message": "no valid date"
+    },
+    {
+      "name": "another pair",
+      "path": ["quote"],
+      "value": "XXX",
+      "message": "answered for USDXXX, not USDXTS"
+    }
+  ]
+}

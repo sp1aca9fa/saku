@@ -15,7 +15,8 @@
     "sources": "tsx src/cli/sources.ts",
     "health": "tsx src/cli/health.ts",
     "audit-report": "tsx src/cli/audit.ts",
-    "drill": "tsx src/cli/drill.ts"
+    "drill": "tsx src/cli/drill.ts",
+    "tax-accounts": "tsx src/cli/tax-accounts.ts"
   },
   "dependencies": {
     "@saku/content": "workspace:*",

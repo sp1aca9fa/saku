@@ -3,7 +3,9 @@
 //   pnpm strategy check <file.yaml> [--registration [--user <username> | --library]]
 //                                                          validate a definition (no record); with
 //                                                          --registration also every reason register
-//                                                          would refuse (writes nothing)
+//                                                          would refuse (writes nothing); prints the
+//                                                          costs it would use (the install's
+//                                                          broker_costs for any the file omits)
 //   pnpm strategy register <file.yaml> --user <username>   register: an immutable version whose
 //   pnpm strategy register <file.yaml> --library           forward record starts with the next close;
 //                                                          refused for same_close or a ticker whose
@@ -48,6 +50,7 @@ import { createInterface } from 'node:readline/promises';
 import { sendUpdateFailed } from '../jobs/alerts';
 import { SYSTEM_CA } from '../jobs/anchor';
 import { chainLines, chainProblems, verifyChains } from '../jobs/chain-verify';
+import { costsLine, effectiveCosts } from '../jobs/costs';
 import { openRecheckNote, recheckTimeZone } from '../jobs/recheck';
 import {
   type CommandOutput,
@@ -127,6 +130,9 @@ if (tool === 'strategy' && command === 'check') {
   const s = load(a.file);
   // What the file says, as read: a misread value shows here, before anything is registered.
   for (const line of strategySummary(s)) console.log(line);
+  // The costs a backtest or registration would use now (the install's for those the file omits).
+  const costs = await effectiveCosts(db, s);
+  console.log('problem' in costs ? `Costs not known: ${costs.problem}` : costsLine(costs));
   console.log(`${s.name}: valid; depends on ${dependencies(s).join(', ')}.`);
   if (a.registration) {
     // The same account lookup as register; without either flag the account is not checked.

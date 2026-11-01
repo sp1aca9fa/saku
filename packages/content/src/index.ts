@@ -68,3 +68,13 @@ export function missingKeys(language: string): string[] {
   const own = messages(language);
   return keys(messages(BASE_LANGUAGE)).filter((k) => lookup(own, k) === undefined);
 }
+
+/**
+ * A benchmark's name (requirements 01 "Benchmark set", the `benchmarks` setting): the text
+ * `benchmarks.<id>` when the content has one, else the id itself (an install's own benchmark
+ * named by its admin; no hardcoded text).
+ */
+export function benchmarkName(t: Translate, id: string): string {
+  const key = `benchmarks.${id}`;
+  return hasText(key) ? t(key) : id;
+}

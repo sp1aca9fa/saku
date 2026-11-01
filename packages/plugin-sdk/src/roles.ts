@@ -5,7 +5,13 @@ import type { LoadedPlugins } from './registry';
 import type { PluginInfo } from './types';
 
 /** The data kind a plug-in kind's roles are kept under. */
-export const DATA_KIND = { bar: 'bars', series: 'series', fx: 'fx', issuer: 'issuer' } as const;
+export const DATA_KIND = {
+  bar: 'bars',
+  series: 'series',
+  fx: 'fx',
+  tax_fx: 'tax_fx',
+  issuer: 'issuer',
+} as const;
 export type DataKind = (typeof DATA_KIND)[keyof typeof DATA_KIND];
 
 export const dataKindOf = (info: Pick<PluginInfo, 'kind'>): DataKind | undefined =>
@@ -29,6 +35,7 @@ export function assignedOnly(plugins: LoadedPlugins, roles: Role[]): LoadedPlugi
     bars: keep(plugins.bars),
     series: keep(plugins.series),
     fx: keep(plugins.fx),
+    taxFx: keep(plugins.taxFx),
     issuers: keep(plugins.issuers),
   };
 }

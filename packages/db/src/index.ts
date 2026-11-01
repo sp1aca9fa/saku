@@ -9,5 +9,6 @@ export * from './settings';
 export * from './stand-ins';
 export * as schema from './schema';
 export * from './strategies';
+export * from './tax-accounts';
 export * from './usage';
 export * from './users';

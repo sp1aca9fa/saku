@@ -2,7 +2,7 @@
 // declaration when the plug-ins load, the regime's texts, and the install's `tax_regime` setting.
 // A regime only declares; the tax engine computes. Nothing here does tax arithmetic: amounts and
 // rates stay decimal text, only checked for form, range and consistency (no float ever holds one).
-import { canonicalJson, type Json } from '@saku/core';
+import { DECIMAL_TEXT, canonicalJson, compareDecimalText, type Json } from '@saku/core';
 import {
   type Db,
   type TaxRegimeDeclaration,
@@ -82,26 +82,9 @@ const RATE_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,19}$/;
 const LANGUAGE = /^[a-z]{2,3}(-[A-Z]{2})?$/;
 const VERSION = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,39}$/;
 const PLACEHOLDER = /\{(\w+)\}/g;
-/** Non-negative, plain notation; 40 characters is far beyond any real amount or rate. */
-const DECIMAL = /^(0|[1-9][0-9]*)(\.[0-9]+)?$/;
-
-/** A decimal text as integer and fraction digits without padding zeros (`"012.50"` never passes DECIMAL). */
-function parts(d: string): [string, string] {
-  const [int, frac = ''] = d.split('.');
-  return [int!, frac.replace(/0+$/, '')];
-}
-
-/** Compares two DECIMAL texts exactly (no float): -1, 0 or 1. */
-export function compareDecimalText(a: string, b: string): -1 | 0 | 1 {
-  const [ai, af] = parts(a);
-  const [bi, bf] = parts(b);
-  if (ai.length !== bi.length) return ai.length < bi.length ? -1 : 1;
-  if (ai !== bi) return ai < bi ? -1 : 1;
-  const n = Math.max(af.length, bf.length);
-  const ap = af.padEnd(n, '0');
-  const bp = bf.padEnd(n, '0');
-  return ap === bp ? 0 : ap < bp ? -1 : 1;
-}
+/** Non-negative, plain notation; one rule with the admin settings (core `decimal-text`). */
+const DECIMAL = DECIMAL_TEXT;
+export { compareDecimalText };
 
 /** Looks up a dotted key in a text tree: the text, or undefined. */
 function lookup(tree: RegimeTexts, key: string): string | undefined {

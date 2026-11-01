@@ -5,6 +5,9 @@
 //
 // The rules:
 // - `forward_records_from` must be set (the record opens after the A1 gate, stage-a A2).
+// - Every cost is known: the strategy's own, or the install's `broker_costs` for one it omits
+//   (`effectiveCosts`, requirements 05 "Costs"); omitted with no usable setting refuses, never 0.
+//   The effective costs are what gets registered (`RegistrationReport.costs`).
 // - `same_close` execution is refused: it trades at a close not yet known when the signal is
 //   computed; it exists only for testfol parity tests (05 "Execution model").
 // - A range volatility (parkinson, garman_klass, yang_zhang) is refused: it reads opens, highs
@@ -62,6 +65,7 @@ import {
   schema,
 } from '@saku/db';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { type EffectiveCosts, effectiveCosts } from './costs';
 import { roles } from './verify';
 
 /** Full-history passes (they store `health_coverage`). */
@@ -107,6 +111,8 @@ export function registrationTickers(strategy: Strategy): string[] {
 export interface RegistrationReport {
   problems: string[];
   notes: string[];
+  /** The strategy as it would be registered, with its effective costs; undefined when unknown. */
+  costs?: Exclude<EffectiveCosts, { problem: string }>;
 }
 
 /** The reasons to refuse only (`registrationReport`). */
@@ -136,6 +142,8 @@ export async function registrationReport(
         'pnpm settings set forward_records_from <date> first.',
     );
   }
+  const costs = await effectiveCosts(db, strategy);
+  if ('problem' in costs) problems.push(costs.problem);
   if (strategy.execution === 'same_close') problems.push(SAME_CLOSE_REFUSAL);
   if (readsRangeVolatility(strategy)) problems.push(RANGE_VOLATILITY_REFUSAL);
 
@@ -172,7 +180,7 @@ export async function registrationReport(
     problems.push(...r.problems);
     notes.push(...r.notes);
   }
-  return { problems, notes };
+  return { problems, notes, ...('problem' in costs ? {} : { costs }) };
 }
 
 interface Pass {

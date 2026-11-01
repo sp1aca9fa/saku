@@ -2,8 +2,20 @@
 // script runs it to check a new version starts; it takes no lock (the update holds the jobs lock).
 // `pnpm plugins tax-regime <key>`: sets the install's tax regime to a loaded regime (requirements
 // 07, 12; refused for an unknown key, or for a change once users have tax data).
-import { createDb } from '@saku/db';
-import { dbConfigFromEnv, loadRootEnv } from '@saku/db/env';
+// `pnpm plugins benchmarks <file.json>`: sets the benchmark set (requirements 01, 12) from a JSON
+// file (`templates/benchmarks/`), each benchmark's account checked against the install's regime
+// as loaded (refused when no regime is set or it is not loaded).
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import {
+  benchmarkAccountProblems,
+  benchmarkSet,
+  createDb,
+  getSetting,
+  parseBenchmarks,
+  setSetting,
+} from '@saku/db';
+import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { allInfos, loadPlugins, savePluginInfos } from '../registry';
 import { assertServerOnly } from '../server-only';
@@ -31,8 +43,48 @@ if (command === 'tax-regime') {
     console.error((e as Error).message);
     process.exit(1);
   }
+  // Benchmarks set under another regime may name an account type this one does not define.
+  const set = await benchmarkSet(db);
+  const regime = plugins.taxRegimes.find((r) => r.info.key === key)!;
+  if ('benchmarks' in set) {
+    const wrong = benchmarkAccountProblems(
+      set.benchmarks,
+      regime.accountTypes.map((a) => a.key),
+    );
+    for (const w of wrong) console.log(`Warning: benchmark ${w}; set them again.`);
+  }
+} else if (command === 'benchmarks') {
+  try {
+    if (!key)
+      throw new Error('Usage: pnpm plugins benchmarks <file.json> (see templates/benchmarks/)');
+    const regimeKey = await getSetting(db, 'tax_regime');
+    if (regimeKey === undefined) {
+      throw new Error(
+        "Set the tax regime first (pnpm plugins tax-regime <key>): each benchmark's account is one of its account types.",
+      );
+    }
+    const regime = plugins.taxRegimes.find((r) => r.info.key === regimeKey);
+    if (!regime) throw new Error(`The install's tax regime ${regimeKey} is not loaded.`);
+    const text = readFileSync(resolve(process.env.INIT_CWD ?? findRepoRoot(), key), 'utf8');
+    // Read strictly from the file's own text (a key given twice is refused), stored compact.
+    const parsed = parseBenchmarks(text);
+    if ('problems' in parsed) {
+      throw new Error(
+        `Not a valid benchmarks:\n${parsed.problems.map((p) => `- ${p}`).join('\n')}`,
+      );
+    }
+    await setSetting(db, 'benchmarks', JSON.stringify(parsed.benchmarks), 'cli', {
+      accountTypes: regime.accountTypes.map((a) => a.key),
+    });
+    console.log(`benchmarks = ${parsed.benchmarks.map((b) => b.id).join(', ')}`);
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
 } else if (command !== undefined) {
-  console.error('Usage: pnpm plugins | pnpm plugins tax-regime <key>');
+  console.error(
+    'Usage: pnpm plugins | pnpm plugins tax-regime <key> | pnpm plugins benchmarks <file.json>',
+  );
   process.exit(1);
 } else {
   const infos = allInfos(plugins);

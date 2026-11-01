@@ -882,3 +882,42 @@ export const alertsSent = sqliteTable(
   },
   (t) => [uniqueIndex('alerts_sent_key_idx').on(t.channelId, t.subject, t.date, t.type)],
 );
+
+// ---------------------------------------------------------------------------------------------
+// Tax (requirements 07 "Model": accounts are per person; the install's regime defines the
+// account types). Listed in `USER_TAX_TABLES` (settings.ts): while a row exists, `tax_regime`
+// cannot change.
+
+/**
+ * A user's tax-advantaged accounts under the install's regime (e.g. a savings account opened by
+ * choice). The regime's `taxable` type is never stored: every user holds it implicitly. A row is
+ * never deleted and only its `closed_on` is ever set, once (triggers in migration 0017); a
+ * reopened account is a new row. At most one open row per user and type.
+ */
+export const userTaxAccounts = sqliteTable(
+  'user_tax_accounts',
+  {
+    id: id(),
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id),
+    /** A key of the install regime's account types, never `taxable`. */
+    accountType: text('account_type').notNull(),
+    /** The date the account opened (`YYYY-MM-DD`), when the user gave one. */
+    openedOn: text('opened_on'),
+    createdAt: createdAt(),
+    /** The date the account closed (`YYYY-MM-DD`); null while open. */
+    closedOn: text('closed_on'),
+  },
+  (t) => [
+    uniqueIndex('user_tax_accounts_open_uq')
+      .on(t.ownerId, t.accountType)
+      .where(sql`${t.closedOn} IS NULL`),
+    index('user_tax_accounts_owner_idx').on(t.ownerId),
+    check('user_tax_accounts_type_check', sql`${t.accountType} <> 'taxable'`),
+    check(
+      'user_tax_accounts_dates_check',
+      sql`${t.openedOn} IS NULL OR ${t.closedOn} IS NULL OR ${t.closedOn} >= ${t.openedOn}`,
+    ),
+  ],
+);

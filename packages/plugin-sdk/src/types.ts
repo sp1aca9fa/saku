@@ -201,6 +201,46 @@ export interface FxSource {
   ): Promise<FxRate[]>;
 }
 
+/**
+ * One broker-style tax rate (requirements 07 "FX for tax", 15 `TaxFxSource`) for one date and
+ * vintage, or a withdrawal of one. `pair` is base then quote currency as in `FxValue` (`USDXTS`
+ * = units of XTS per USD) and `rate` is quote units per one unit of the base currency.
+ *
+ * `kind` is the stored kind (`FX_KINDS` in core), from the customer's view of the pair's base
+ * currency (the foreign currency the customer trades):
+ * - `tax_buy`: the rate at which the customer buys the base currency from the bank (the bank's
+ *   selling rate, e.g. TTS); the highest of the three.
+ * - `tax_sell`: the rate at which the customer sells the base currency to the bank (the bank's
+ *   buying rate, e.g. TTB); the lowest.
+ * - `tax_mid`: the middle rate (e.g. TTM).
+ * So on one date and publication time `tax_buy >= tax_mid >= tax_sell` (checked on ingest).
+ *
+ * `name` is the rate's name as the install's regime declares it (a key of `TaxRegime.fx.rates`,
+ * e.g. `TTS`); on ingest it must map onto the same `kind`, so a source that labels a rate under
+ * the wrong kind is refused.
+ */
+export type TaxFxRate = (FxValue | FxWithdrawal) & { kind: TaxFxKind; name: string };
+
+/**
+ * Broker-style rates for tax (TTM/TTS/TTB or the regime's equivalent; requirements 15, C1),
+ * stored in `fx_rates` under their kind, apart from valuation rates. Requests only through
+ * `ctx.http` (never `fetch`). Core checks each response before storing anything
+ * (`taxFxProblems`): a response with any problem is refused whole.
+ */
+export interface TaxFxSource {
+  /** `kind: 'tax_fx'`. */
+  info: PluginInfo;
+  /** Whether the source can provide this pair. */
+  supports(pair: string): boolean;
+  /** Rates per date, kind and vintage; a withdrawn rate as a withdrawal (see `FxSource`). */
+  fetchRates(
+    pair: string,
+    from: TradingDate,
+    to: TradingDate,
+    ctx: PluginContext,
+  ): Promise<TaxFxRate[]>;
+}
+
 /** A fund issuer's published data (layer D, best effort): checks only, never a value used. */
 export interface IssuerSource {
   info: PluginInfo;
@@ -489,6 +529,7 @@ export interface PluginModule {
   bars?: BarSource[];
   series?: SeriesSource[];
   fx?: FxSource[];
+  taxFx?: TaxFxSource[];
   issuers?: IssuerSource[];
   calendars?: CalendarSource[];
   notifiers?: Notifier[];

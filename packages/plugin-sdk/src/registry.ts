@@ -54,6 +54,7 @@ export function emptyPlugins(): LoadedPlugins {
     bars: [],
     series: [],
     fx: [],
+    taxFx: [],
     issuers: [],
     calendars: [],
     notifiers: [],
@@ -74,11 +75,13 @@ export async function loadPlugins(root: string = findRepoRoot()): Promise<Loaded
     loaded.bars.push(...(mod.bars ?? []));
     loaded.series.push(...(mod.series ?? []));
     loaded.fx.push(...(mod.fx ?? []));
+    loaded.taxFx.push(...(mod.taxFx ?? []));
     loaded.issuers.push(...(mod.issuers ?? []));
     loaded.calendars.push(...(mod.calendars ?? []));
     loaded.notifiers.push(...(mod.notifiers ?? []));
     loaded.taxRegimes.push(...(mod.taxRegimes ?? []));
   }
+  checkKinds(loaded);
   validateInfos([...allInfos(loaded), ...loaded.notifiers.map((n) => n.info)]);
   // Tax regimes send no requests and store no rows: checked on their own (`validateTaxRegime`).
   validateTaxRegimes(loaded.taxRegimes);
@@ -90,9 +93,37 @@ export function allInfos(plugins: PluginModule): PluginInfo[] {
     ...(plugins.bars ?? []),
     ...(plugins.series ?? []),
     ...(plugins.fx ?? []),
+    ...(plugins.taxFx ?? []),
     ...(plugins.issuers ?? []),
     ...(plugins.calendars ?? []),
   ].map((p) => p.info);
+}
+
+/** The `info.kind` each exported array's plug-ins must declare. */
+const KIND_OF_LIST = {
+  bars: 'bar',
+  series: 'series',
+  fx: 'fx',
+  taxFx: 'tax_fx',
+  issuers: 'issuer',
+  calendars: 'calendar',
+} as const;
+
+/**
+ * Every data plug-in declares the kind of the array it is exported in: roles, stored rows and
+ * checks go by `info.kind`, so a tax rate source declared as `fx` would be fetched and stored as
+ * valuation rates (or the reverse). Refused at load.
+ */
+export function checkKinds(plugins: PluginModule): void {
+  for (const [list, kind] of Object.entries(KIND_OF_LIST)) {
+    for (const p of plugins[list as keyof typeof KIND_OF_LIST] ?? []) {
+      if (p.info.kind !== kind) {
+        throw new Error(
+          `Plug-in "${p.info.key}" is exported in ${list} but declares kind ${p.info.kind}, not ${kind}.`,
+        );
+      }
+    }
+  }
 }
 
 /**

@@ -490,5 +490,11 @@
       "notCovered": "Not covered: the data does not span this period.",
       "datesDiffer": "No value: the variants do not share the dates they are compared on."
     }
+  },
+  "benchmarks": {
+    "us_stocks": "US stocks (S&P 500 index fund)",
+    "global_stocks": "Global stocks (all-world index fund)",
+    "stocks_bonds_60_40": "Stocks and bonds 60/40",
+    "deposits": "Bank deposits"
   }
 }

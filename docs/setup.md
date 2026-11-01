@@ -73,6 +73,42 @@ open (09:30 New York, daylight saving followed), then its final instruction is s
 corrected source more time but leaves you less time to read the final message before the open.
 A re-check already open keeps the deadline it opened with.
 
+### Settings
+
+`pnpm settings list` shows every setting. Rates are decimal text in quotes (`"0.1"`, never `0.1`,
+no sign, exponent or comma; at most 15 significant digits); JSON values are checked strictly: an
+unknown or missing key, or a key given twice, is refused with every reason.
+
+| Setting | Value | Notes |
+|---|---|---|
+| `base_currency` | ISO 4217 code | Once, before any data; never changed |
+| `time_zone` | IANA zone | Display only; trading dates stay America/New_York |
+| `primary_language` | language code | Default for users who chose none |
+| `red_recheck_minutes_before_open` | 0 to 600 | Default 60 (above) |
+| `issuer_nav_tolerance` | JSON map | `docs/data-pipeline.md` |
+| `forward_records_from` | date | Set when the A1 gate passes |
+| `tax_regime` | regime key | `pnpm plugins tax-regime <key>` |
+| `broker_costs` | `{"slippageBps":"5","feePct":"0.1","fxSpreadPct":"0.2"}` | Your broker's costs: slippage in basis points (at most 1000), fee and FX spread in percent of the amount traded (each below 100). All three required (write `"0"` for none) |
+| `deposit_rate` | `{"ratePct":"0.2","asOf":"2026-10-01","currency":"<base currency>"}` | The base currency's deposit rate, percent a year (below 1000), the date you read it, and the base currency (set `base_currency` first) |
+| `benchmarks` | JSON list | `pnpm plugins benchmarks <file>` (below) |
+
+**Costs.** A strategy's `costs` may leave out any of `slippageBps`, `feePct`, `fxSpreadPct`; each
+left out is the install's `broker_costs` value. When one is left out and `broker_costs` is not set
+(or no longer parses), registration is refused with the reason: a cost is never read as 0.
+Registration writes the effective costs into the registered version, so a later change of
+`broker_costs` never changes a registered version's results; `pnpm strategy check` and
+`register` print the costs used and name those taken from the install. A version registered before
+this setting existed keeps the meaning it was registered with (an omitted cost as 0).
+
+**Benchmarks.** A JSON list; each benchmark has exactly `id` (unique; lowercase letters, digits and
+`_`, starting with a letter), `holdings` (`[{ "ticker": "SPY", "weight": 100 }]`: tickers as in a
+strategy, or `DEPOSIT` for the deposit rate; weights add up to 100), `feePctPerYear` (decimal text,
+the fee of the fund the benchmark models, percent a year) and `account` (an account type key of
+the install's tax regime: requirements 01 assume index benchmarks in the regime's best
+tax-advantaged account). Start from `templates/benchmarks/example.json` (made-up compositions,
+all in `taxable`), then `pnpm plugins benchmarks <your file>`. A benchmark's name is the text
+`benchmarks.<id>` in `packages/content` when there is one; otherwise its id is shown.
+
 ## 3. First data
 
 ```bash

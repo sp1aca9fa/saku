@@ -7,6 +7,7 @@ import type { Strategy, TradingDate } from '@saku/core';
 import type { Sessions } from '@saku/data';
 import { type Db, registerVersion } from '@saku/db';
 import { annotateStandInCorrections, recompute } from './forward';
+import { costsLine } from './costs';
 import { lock } from './lock';
 import { registrationReport } from './registration';
 
@@ -60,21 +61,29 @@ const noteLines = (notes: string[]) =>
  */
 export function previewRegistration(db: Db, o: RegistrationInput): Promise<CommandOutput> {
   return withJobsLock(o.lockDir, async () => {
-    const { problems, notes } = await registrationReport(db, o.strategy, {
+    const { problems, notes, costs } = await registrationReport(db, o.strategy, {
       through: o.through,
       sessions: o.sessions,
     });
-    if (problems.length > 0) {
+    if (problems.length > 0 || !costs) {
       return {
         ...refused(`Would not register:\n${problemList(problems)}`),
         stdout: noteLines(notes),
       };
     }
-    return { exitCode: 0, stdout: ['Ready to register.', ...noteLines(notes)], stderr: [] };
+    return {
+      exitCode: 0,
+      stdout: ['Ready to register.', costsLine(costs), ...noteLines(notes)],
+      stderr: [],
+    };
   });
 }
 
-/** Registers the strategy when nothing refuses it (registration.ts); otherwise every reason. */
+/**
+ * Registers the strategy when nothing refuses it (registration.ts); otherwise every reason. The
+ * version stores the effective costs (the install's `broker_costs` for each the file omits), so a
+ * later settings change never changes it.
+ */
 export function registerStrategy(
   db: Db,
   o: {
@@ -89,23 +98,25 @@ export function registerStrategy(
   },
 ): Promise<CommandOutput> {
   return withJobsLock(o.lockDir, async () => {
-    const { problems, notes } = await registrationReport(db, o.strategy, {
+    const { problems, notes, costs } = await registrationReport(db, o.strategy, {
       through: o.through,
       sessions: o.sessions,
     });
-    if (problems.length > 0) {
+    // `costs` is there whenever nothing refuses (an unknown cost is a problem); checked anyway.
+    if (problems.length > 0 || !costs) {
       return { ...refused(`Not registered:\n${problemList(problems)}`), stdout: noteLines(notes) };
     }
     const v = await registerVersion(db, {
       ownerId: o.ownerId,
-      name: o.strategy.name,
-      strategy: o.strategy,
+      name: costs.strategy.name,
+      strategy: costs.strategy,
     });
     return {
       exitCode: 0,
       stdout: [
         `Registered ${o.strategy.name}: version ${v.id}, hash ${v.hash}.`,
         'Its forward record starts with the first close after now.',
+        costsLine(costs),
         ...noteLines(notes),
       ],
       stderr: [],

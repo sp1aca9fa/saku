@@ -18,13 +18,16 @@ responses go only in the private repo; public fixtures are synthetic.
 ## Kinds and methods
 
 Types are in `packages/plugin-sdk/src/types.ts`. A package exports `bars`, `series`, `fx`,
-`issuers`, `calendars`, `notifiers` and `taxRegimes` (any subset).
+`taxFx`, `issuers`, `calendars`, `notifiers` and `taxRegimes` (any subset). Each plug-in's
+`info.kind` matches its array (`bar`, `series`, `fx`, `tax_fx`, `issuer`, `calendar`); another
+kind is refused at load.
 
 | Export | Interface | Methods |
 |---|---|---|
 | `bars` | `BarSource` | `fetchBars(ticker, from, to, ctx)` returns raw daily bars (`RawBar[]`); optional `fetchMeta(ticker, ctx)` returns `TickerMeta` |
 | `series` | `SeriesSource` | `fetchSeries(id, from, to, ctx)` returns dated points (`SeriesPoint[]`, or `SeriesFetch` `{ points, completeSpan }`): cash rates, index levels |
 | `fx` | `FxSource` | `supports(pair)`; `fetchRates(pair, from, to, ctx)` returns `FxRate[]` |
+| `taxFx` | `TaxFxSource` | `supports(pair)`; `fetchRates(pair, from, to, ctx)` returns `TaxFxRate[]`: broker-style rates for tax, each an `FxRate` with its stored `kind` (`tax_mid`, `tax_buy`, `tax_sell`) and `name`, the rate's name as the install's regime declares it (a key of `TaxRegime.fx.rates`, mapping onto the same kind). See "Tax FX sources" |
 | `issuers` | `IssuerSource` | `supports(ticker)`; `fetchRecords(ticker, from, to, ctx)` returns NAV, distributions and splits, each record with the currency (ISO 4217) of its NAV and distribution (required with a NAV and with a nonzero distribution; a response with a record lacking it is refused whole) (checks only, never a value used) |
 | `calendars` | `CalendarSource` | a `calendars` array of exchange or series holiday tables |
 | `notifiers` | `Notifier` | `validTarget(target)`; `send(target, text, ctx)`. Errors must not contain the target or the key |
@@ -137,10 +140,30 @@ data within the asked range; a later run's window covers the date.
   notifier's channels share their service's count, but a refusal stops only the channel it was
   answered to.
 
+### Tax FX sources
+
+A `TaxFxSource` (C1) returns a bank's published daily rates for tax, as published: never compute
+one (a mid from buy and sell, say); a rate not published that day is left out. For a pair
+`USDXTS` (XTS per USD), from the customer's view of the dollar:
+
+| Kind | The rate at which | Example name |
+|---|---|---|
+| `tax_buy` | the customer buys the base currency (the bank's selling rate; the highest) | TTS |
+| `tax_mid` | the middle rate | TTM |
+| `tax_sell` | the customer sells the base currency (the bank's buying rate; the lowest) | TTB |
+
+Core fetches the dollar against the install regime's currency, only while the regime is set and
+unchanged, and checks each response whole before storing it (`taxFxProblems`): the pair, a real
+date, a tax kind, a `name` the regime declares on that kind, values finite and above 0, one
+statement per vintage, and on one date and publication time `tax_buy >= tax_mid >= tax_sell`.
+A response with any problem stores nothing (see "Tax FX" in `docs/data-pipeline.md`). The
+template has one: `plugins-public/template/src/example-tax-fx.ts`.
+
 ## Start from the template
 
-`plugins-public/template/` holds a runnable bar source for a made-up provider and a tax regime for
-a made-up country, each with fixtures and a test (see its `README.md`). The template is not loaded
+`plugins-public/template/` holds a runnable bar source for a made-up provider, a tax regime for a
+made-up country and a tax FX source for a made-up bank there, each with fixtures and a test (see
+its `README.md`). The template is not loaded
 by the jobs.
 
 1. Copy `plugins-public/template/` to a new folder (in `plugins/` for a private plug-in, with

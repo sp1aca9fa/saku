@@ -317,7 +317,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         Object.entries(byItem).map(([item, dates]) => ({
           ticker: item,
           source: r.source,
-          field: r.kind === 'fx' ? 'rate' : 'value',
+          field: r.kind === 'fx' || r.kind === 'tax_fx' ? 'rate' : 'value',
           count: dates.length,
           from: dates.reduce((a, b) => (b < a ? b : a)),
           to: dates.reduce((a, b) => (b > a ? b : a)),

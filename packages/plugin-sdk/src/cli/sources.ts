@@ -3,7 +3,7 @@
 //
 //   pnpm sources list                                     roles per data kind, and loaded
 //                                                         plug-ins that have none (not used)
-//   pnpm sources set <bars|series|fx|issuer> <key> <primary|secondary|check>
+//   pnpm sources set <bars|series|fx|tax_fx|issuer> <key> <primary|secondary|check>
 //   pnpm sources remove <kind> <key>                      stop using it (its data stays; the
 //                                                         primary stays until another is set)
 //   pnpm sources issuer-stats [--years N]                 per fund and issuer source, the
