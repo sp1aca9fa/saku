@@ -57,6 +57,7 @@ import {
 } from '../jobs/strategy-commands';
 import { dailyAfterOf, dailyTarget } from '../jobs/target';
 import { parseCheckArgs } from './check-args';
+import { refusalNote } from './version-refusal';
 import { readStrategyFile, strategySummary } from './strategy-file';
 import { codeVersion } from '../code-version';
 import { loadPlugins, notifierContexts, providerUsageStore } from '../registry';
@@ -153,7 +154,8 @@ if (tool === 'strategy' && command === 'check') {
     console.log(
       `${v.id}  ${v.name}  ${v.ownerId ? 'user' : 'library'}  registered ${v.registeredAt}  ` +
         `${record.length} days${last ? `, last ${last.date}: ${last.allocation} (${last.dataStatus})` : ''}` +
-        open.join(''),
+        open.join('') +
+        (refusalNote(v) ?? ''),
     );
   }
 } else if (tool === 'strategy' && command === 'show') {

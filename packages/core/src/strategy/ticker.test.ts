@@ -1,6 +1,7 @@
 // The one ticker grammar (spec 2026-11-01 ticker-grammar; docs/indicators.md "Synthetic
 // leverage"): the schema, the backtest and the metrics read a ticker the same way, and a
 // malformed one is refused everywhere (never a silent 0 or NaN).
+import { refParseTicker } from '@saku/reference';
 import { describe, expect, it } from 'vitest';
 import { metrics } from '../analytics/metrics';
 import type { RawBar } from '../domain';
@@ -179,5 +180,66 @@ describe('the backtest and the metrics read the same grammar', () => {
       { date: '2024-01-03', equity: 1, traded: false, weights: { SPY: 1 } },
     ];
     expect(metrics({ points }).averageExposure).toEqual({ ok: false, reason: 'holdingsMissing' });
+  });
+});
+
+describe('core and the independent reference read the grammar alike (seeded)', () => {
+  it('accept the same tickers, and read the same base, L and E', () => {
+    // mulberry32: a fixed seed, so a failure replays.
+    let a = 20261101;
+    const rand = () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const parts = [
+      'X',
+      'SPY',
+      'CASH_USD',
+      '?',
+      'L',
+      'E',
+      'e',
+      'x',
+      'l',
+      '=',
+      '&',
+      '-',
+      '+',
+      '.',
+      '0',
+      '1',
+      '2',
+      '3',
+      '5',
+      ' ',
+      '%',
+      'a',
+      'Z',
+      '^',
+      '_',
+    ];
+    let accepted = 0;
+    for (let i = 0; i < 4000; i++) {
+      let t = '';
+      const len = 1 + Math.floor(rand() * 9);
+      for (let j = 0; j < len; j++) t += parts[Math.floor(rand() * parts.length)];
+      // Seeded random strings rarely form a valid query; bias a share towards `X?L=..&E=..`.
+      if (i % 4 === 0) t = `X?L=${t.slice(0, 4)}&E=${t.slice(4)}`;
+      if (i % 4 === 1) t = `X?${t}`;
+      const core = tickerProblem(t) === undefined;
+      const ref = refParseTicker(t);
+      expect(core, JSON.stringify(t)).toBe(ref !== undefined);
+      if (core && ref) {
+        accepted++;
+        const p = parseTicker(t);
+        expect(p.base, JSON.stringify(t)).toBe(ref.base);
+        expect(p.leverage, JSON.stringify(t)).toBe(ref.L);
+        // + 0 folds a negative zero.
+        expect(p.expensePct + 0, JSON.stringify(t)).toBe(ref.E + 0);
+      }
+    }
+    expect(accepted).toBeGreaterThan(100);
   });
 });
