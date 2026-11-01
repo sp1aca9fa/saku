@@ -825,3 +825,245 @@ describe('reference: one ticker grammar', () => {
     expect(refBacktest({}, ok, bars, () => 0).equity).toEqual([1, 1]);
   });
 });
+
+describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
+  const D = ['2026-07-01', '2026-07-02', '2026-07-06', '2026-07-07'];
+  type B = Partial<RefBar> & { close: number };
+  const mk = (list: B[]): RefBar[] =>
+    list.map((b, i) => ({
+      date: D[i]!,
+      divCash: 0,
+      splitFactor: 1,
+      closeIsSplitAdjusted: false,
+      ...b,
+    }));
+  const hold = (...h: [string, number][]) => h.map(([ticker, weight]) => ({ ticker, weight }));
+  const decide = (list: RefDay['holdings'][]): RefDay[] =>
+    list.map((holdings, i) => ({ date: D[i]!, signals: {}, allocation: `a${i}`, holdings }));
+  const usd = (initialAmount: string) => ({ wholeShares: { initialAmount, currency: 'USD' } });
+  const near = (xs: number[], ys: number[]) => {
+    expect(xs.length).toBe(ys.length);
+    xs.forEach((x, i) => expect(x).toBeCloseTo(ys[i]!, 9));
+  };
+
+  it('buys floor(B / p) shares and keeps the rest as USD cash (next_close, no costs)', () => {
+    const bars = { X: mk([{ close: 100 }, { close: 110 }, { close: 121 }]) };
+    const X = hold(['X', 100]);
+    const r = refBacktest(
+      { execution: 'next_close' },
+      decide([X, X, X]),
+      bars,
+      () => 0,
+      usd('1000'),
+    );
+    // Day 1 at the close 110: n = floor(1000 / 110) = 9, residual 1000 - 990 = 10.
+    // Day 2: 10 + 9 x 121 = 1099.
+    near(r.value!, [1000, 1000, 1099]);
+    near(r.equity, [1, 1, 1.099]);
+    expect(r.weights![0]).toEqual({});
+    expect(r.weights![2]!.X).toBeCloseTo(1089 / 1099, 12);
+    expect(r.weights![2]!.CASH_USD).toBeCloseTo(10 / 1099, 12);
+    expect(r.trades).toEqual([
+      {
+        date: D[1],
+        time: 'close',
+        V: { amount: 1000, currency: 'USD' },
+        shares: { X: 9 },
+        zeroShares: [],
+        residual: { amount: 10, currency: 'USD' },
+        costs: { amount: 0, currency: 'USD' },
+      },
+    ]);
+    expect(r.switches).toBe(0);
+    expect(r.costs).toBe(0);
+  });
+
+  it('a switch with costs sets the sale cost aside first: cash never below 0', () => {
+    // c = 25% (hand-friendly). Day 1: X at 100: B = 1250, n = floor(1250 / 125) = 10,
+    // costs 0.25 x 1000 = 250, residual 0. Day 2 switch to Y at 60, X still 100: V = 1000,
+    // H = 1000, B = 1000 - 250 = 750, n = floor(750 / 75) = 10, costs 0.25 x (1000 + 600) = 400,
+    // residual 1000 - 600 - 400 = 0. (Sized on V: 13 shares and a residual of -225.)
+    const bars = {
+      X: mk([{ close: 100 }, { close: 100 }, { close: 100 }, { close: 100 }]),
+      Y: mk([{ close: 60 }, { close: 60 }, { close: 60 }, { close: 66 }]),
+    };
+    const X = hold(['X', 100]);
+    const Y = hold(['Y', 100]);
+    const r = refBacktest(
+      { execution: 'next_close', costs: { feePct: 25 } },
+      decide([X, Y, Y, Y]),
+      bars,
+      () => 0,
+      usd('1250'),
+    );
+    expect(r.trades!.map((t) => [t.V.amount, t.shares, t.residual.amount, t.costs.amount])).toEqual(
+      [
+        [1250, { X: 10 }, 0, 250],
+        [1000, { Y: 10 }, 0, 400],
+      ],
+    );
+    near(r.value!, [1250, 1000, 600, 660]);
+    expect(r.switches).toBe(1);
+    expect(r.costs).toBeCloseTo(250 / 1250 + 400 / 1000, 12);
+  });
+
+  it('a target ticker with 0 shares is listed, not an error', () => {
+    const bars = { X: mk([{ close: 100 }, { close: 100 }]) };
+    const X = hold(['X', 100]);
+    const r = refBacktest({ execution: 'next_close' }, decide([X, X]), bars, () => 0, usd('50'));
+    expect(r.trades![0]!.shares).toEqual({ X: 0 });
+    expect(r.trades![0]!.zeroShares).toEqual(['X']);
+    expect(r.trades![0]!.residual.amount).toBe(50);
+    expect(r.weights![1]).toEqual({ CASH_USD: 1 });
+  });
+
+  it("the target's own CASH_USD weight stays in the residual", () => {
+    const bars = { X: mk([{ close: 100 }, { close: 100 }]) };
+    const T = hold(['X', 50], ['CASH_USD', 50]);
+    const r = refBacktest({ execution: 'next_close' }, decide([T, T]), bars, () => 0, usd('1000'));
+    // n = floor(0.5 x 1000 / 100) = 5; residual 500.
+    expect(r.trades![0]!.shares).toEqual({ X: 5 });
+    expect(r.trades![0]!.residual.amount).toBe(500);
+  });
+
+  it('a split leaving a fraction pays it as cash at the close; a dividend goes to cash', () => {
+    // Day 1 buy 9 at 100 (residual 50). Day 2: 3-for-2 split (x 1.5), close 70: 13.5 shares,
+    // 13 kept, 0.5 x 70 = 35 to cash: 85 + 13 x 70 = 995. Day 3: dividend 1 per share, close 69:
+    // cash 85 + 13 = 98, value 98 + 13 x 69 = 995.
+    const bars = {
+      X: mk([
+        { close: 100 },
+        { close: 100 },
+        { close: 70, splitFactor: 1.5 },
+        { close: 69, divCash: 1 },
+      ]),
+    };
+    const X = hold(['X', 100]);
+    const r = refBacktest(
+      { execution: 'next_close' },
+      decide([X, X, X, X]),
+      bars,
+      () => 0,
+      usd('950'),
+    );
+    near(r.value!, [950, 950, 995, 995]);
+    expect(r.weights![3]!.CASH_USD).toBeCloseTo(98 / 995, 12);
+  });
+
+  it('a split product within 1e-9 of a whole number is that number', () => {
+    // 100 shares x 0.57 = 56.99999999999999 in float64: 57 shares, no cash in lieu.
+    expect(100 * 0.57).toBeLessThan(57);
+    const bars = {
+      X: mk([{ close: 10 }, { close: 10 }, { close: 20, splitFactor: 0.57 }]),
+    };
+    const X = hold(['X', 100]);
+    const r = refBacktest(
+      { execution: 'next_close' },
+      decide([X, X, X]),
+      bars,
+      () => 0,
+      usd('1000'),
+    );
+    expect(r.value![2]).toBe(57 * 20);
+    expect(r.weights![2]).toEqual({ X: 1 });
+  });
+
+  it('a synthetic ticker has its own series from the base close, compounded before it is held', () => {
+    // Rate 25.2% a year = 0.001 a night. X?L=2: day 0 at 100; day 1: 100 x (1 + 2 x 0.1 - 0.001)
+    // = 119.9; buy floor(1000 / 119.9) = 8, residual 1000 - 959.2 = 40.8.
+    // Day 2: 119.9 x (1 - 0.2 - 0.001) = 95.8001; residual 40.8 x 1.001 = 40.8408.
+    const bars = { X: mk([{ close: 100 }, { close: 110 }, { close: 99 }]) };
+    const S = hold(['X?L=2', 100]);
+    const r = refBacktest(
+      { execution: 'next_close' },
+      decide([S, S, S]),
+      bars,
+      () => 25.2,
+      usd('1000'),
+    );
+    expect(r.trades![0]!.shares).toEqual({ 'X?L=2': 8 });
+    expect(r.trades![0]!.residual.amount).toBeCloseTo(40.8, 9);
+    near(r.value!, [1000, 40.8 + 8 * 119.9, 40.8408 + 8 * 95.8001]);
+  });
+
+  it('with next_open a trade session splits the synthetic step into night and day', () => {
+    // X: day 0 close 100; day 1 open 105, close 110; day 2 open 100, close 99. Rate 0.
+    // X?L=2: day 1 night 100 x (1 + 2 x 0.05) = 110, buy floor(1000 / 110) = 9 at the open,
+    // residual 10; day part x (1 + 2 x (110 / 105 - 1)). Day 2 (no trade): whole x (1 - 0.2).
+    const bars = {
+      X: mk([{ close: 100 }, { open: 105, close: 110 }, { open: 100, close: 99 }]),
+    };
+    const S = hold(['X?L=2', 100]);
+    const r = refBacktest(
+      { execution: 'next_open' },
+      decide([S, S, S]),
+      bars,
+      () => 0,
+      usd('1000'),
+    );
+    const p1 = 110 * (1 + 2 * (110 / 105 - 1));
+    expect(r.trades![0]!.time).toBe('open');
+    expect(r.trades![0]!.shares).toEqual({ 'X?L=2': 9 });
+    near(r.value!, [1000, 10 + 9 * p1, 10 + 9 * p1 * 0.8]);
+  });
+
+  it('next_open: a split in the night pays the fraction at the open', () => {
+    const bars = {
+      X: mk([{ close: 100 }, { open: 100, close: 100 }, { open: 50, close: 52, splitFactor: 2.5 }]),
+    };
+    const X = hold(['X', 100]);
+    // Buy floor(1010 / 100) = 10 at day 1 open (residual 10)... with next_open the day-0 decision
+    // trades at day 1 open. Day 2 (no trade, whole day): 25 shares, no fraction: 10 + 25 x 52.
+    const r = refBacktest(
+      { execution: 'next_open' },
+      decide([X, X, X]),
+      bars,
+      () => 0,
+      usd('1010'),
+    );
+    near(r.value!, [1010, 1010, 10 + 25 * 52]);
+    // An odd count leaves a fraction: 3 shares x 2.5 = 7.5 -> 7 kept, 0.5 x 52 at the close.
+    const r2 = refBacktest(
+      { execution: 'next_open' },
+      decide([X, X, X]),
+      bars,
+      () => 0,
+      usd('300'),
+    );
+    near(r2.value!, [300, 300, 0.5 * 52 + 7 * 52]);
+  });
+
+  it('refuses malformed input, another currency, duplicates, adjusted bars, bad prices, unknown rate', () => {
+    const bars = { X: mk([{ close: 100 }, { close: 100 }, { close: 100 }]) };
+    const X = hold(['X', 100]);
+    const run = (o: unknown, b = bars, h = X, rate = () => 0) =>
+      refBacktest({ execution: 'next_close' }, decide([h, h, h]), b, rate, o as never);
+    for (const amount of ['0', '-5', '1e3', ' 10', '1,000', '10.', '.5', '+10', '']) {
+      expect(() => run(usd(amount)), amount).toThrow(/initial amount/);
+    }
+    expect(() => run({ wholeShares: { initialAmount: '1000', currency: 'JPY' } })).toThrow(
+      /USD only/,
+    );
+    expect(() => run(usd('1000'), bars, hold(['X', 50], ['X', 50]))).toThrow(/twice/);
+    const adjusted = { X: bars.X.map((b) => ({ ...b, closeIsSplitAdjusted: true })) };
+    expect(() => run(usd('1000'), adjusted)).toThrow(/split-adjusted/);
+    const synthOnAdjusted = { X: adjusted.X };
+    expect(() => run(usd('1000'), synthOnAdjusted, hold(['X?L=2', 100]))).toThrow(/split-adjusted/);
+    const zero = { X: mk([{ close: 100 }, { close: 0 }, { close: 100 }]) };
+    expect(() => run(usd('1000'), zero)).toThrow(/price 0/);
+    // Unknown rate while the residual is above 0 (buy 9 at 110, residual 10).
+    const up = { X: mk([{ close: 100 }, { close: 110 }, { close: 100 }]) };
+    expect(() => run(usd('1000'), up, X, () => NaN)).toThrow(/unknown cash rate/);
+    // No residual (10 x 100 exactly): the rate is not read.
+    expect(() => run(usd('1000'), bars, X, () => NaN)).not.toThrow();
+  });
+
+  it('without the option the result is exactly the fractional one', () => {
+    const bars = { X: mk([{ close: 100 }, { close: 110 }, { close: 99 }]) };
+    const S = hold(['X?L=2', 100]);
+    const a = refBacktest({ execution: 'next_close' }, decide([S, S, S]), bars, () => 1);
+    const b = refBacktest({ execution: 'next_close' }, decide([S, S, S]), bars, () => 1, {});
+    expect(b).toEqual(a);
+    expect(Object.keys(a).sort()).toEqual(['dates', 'equity', 'switches']);
+  });
+});

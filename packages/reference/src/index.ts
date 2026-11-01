@@ -511,6 +511,10 @@ export function refEvaluate(s: RefStrategy, bars: Record<string, RefBar[]>): Ref
  * session without a decision. Each session's returns are compounded; a session without an
  * evaluated day takes the safe state as its decision, traded like any other decision. One equity
  * point per session (`dates` names them).
+ *
+ * Whole shares (docs/indicators.md "Whole shares", an optional run setting): the same sessions,
+ * execution times and trade decisions; only the bookkeeping differs (share counts, residual USD
+ * cash). Without the option the result is exactly the fractional one.
  */
 export function refBacktest(
   s: Pick<RefStrategy, 'execution' | 'costs' | 'safeState'> & {
@@ -519,7 +523,8 @@ export function refBacktest(
   days: RefDay[],
   bars: Record<string, RefBar[]>,
   cashRate: (date: string) => number,
-): { equity: number[]; dates: string[]; switches: number } {
+  options?: RefBacktestOptions,
+): RefBacktestResult {
   const execution = s.execution ?? 'next_open';
   const costRate = (s.costs?.slippageBps ?? 0) / 1e4 + (s.costs?.feePct ?? 0) / 100;
   // One ticker grammar (./ticker); a ticker outside it throws, never a silent 0 or NaN.
@@ -611,6 +616,31 @@ export function refBacktest(
     return s.safeState.holdings;
   };
 
+  // Every target the strategy may trade (for the whole-share refusals and synthetic series).
+  const targets: RefDay['holdings'][] = [
+    ...(s.allocations ?? []).map((a) => a.holdings),
+    ...(s.safeState ? [s.safeState.holdings] : []),
+    ...days.map((d) => d.holdings),
+  ];
+  const ws = options?.wholeShares
+    ? refWholeShareBook(options.wholeShares, {
+        execution,
+        costRate,
+        bars,
+        cashRate,
+        sessions,
+        targets,
+        mayHold,
+      })
+    : undefined;
+  const doMove = (date: string, part: 'night' | 'day' | 'whole') =>
+    ws ? ws.move(date, part) : move(date, part);
+  const doTrade = (h: RefDay['holdings'], date: string, time: 'open' | 'close') => {
+    if (ws) {
+      if (ws.trade(h, date, time)) switches++;
+    } else rebalance(h);
+  };
+
   const equity: number[] = [];
   let current: string | undefined;
   let queued: RefDay['holdings'] | undefined;
@@ -618,15 +648,15 @@ export function refBacktest(
     const d = { date: sessions[i]!, holdings: decisionOn(sessions[i]!) };
     if (i > 0) {
       if (execution === 'next_open' && queued) {
-        move(d.date, 'night');
-        rebalance(queued);
+        doMove(d.date, 'night');
+        doTrade(queued, d.date, 'open');
         current = key(queued);
         queued = undefined;
-        move(d.date, 'day');
+        doMove(d.date, 'day');
       } else {
-        move(d.date, 'whole');
+        doMove(d.date, 'whole');
         if (execution === 'next_close' && queued) {
-          rebalance(queued);
+          doTrade(queued, d.date, 'close');
           current = key(queued);
           queued = undefined;
         }
@@ -635,15 +665,281 @@ export function refBacktest(
     const want = key(d.holdings);
     if (execution === 'same_close') {
       if (want !== current) {
-        rebalance(d.holdings);
+        doTrade(d.holdings, d.date, 'close');
         current = want;
       }
     } else if (want !== (queued ? key(queued) : current)) {
       queued = want === current ? undefined : d.holdings;
     }
-    equity.push(Object.keys(value).length === 0 ? 1 : total());
+    if (ws) ws.point(d.date);
+    else equity.push(Object.keys(value).length === 0 ? 1 : total());
   }
+  if (ws) return { ...ws.result(), dates: sessions, switches };
   return { equity, dates: sessions, switches };
+}
+
+export interface RefWholeShares {
+  /** Plain decimal text above 0 (digits, optionally a point and digits). */
+  initialAmount: string;
+  currency: string;
+}
+
+export interface RefBacktestOptions {
+  wholeShares?: RefWholeShares;
+}
+
+export interface RefMoney {
+  amount: number;
+  currency: 'USD';
+}
+
+export interface RefTrade {
+  date: string;
+  time: 'open' | 'close';
+  V: RefMoney;
+  /** Share counts of the target's non-cash tickers (0 included). */
+  shares: Record<string, number>;
+  zeroShares: string[];
+  residual: RefMoney;
+  costs: RefMoney;
+}
+
+export interface RefBacktestResult {
+  equity: number[];
+  dates: string[];
+  switches: number;
+  /** Whole shares only: USD value at each close. */
+  value?: number[];
+  /** Whole shares only: each holding's share of the value at each close. */
+  weights?: Record<string, number>[];
+  trades?: RefTrade[];
+  /** Whole shares only: the sum of cost / V per trade. */
+  costs?: number;
+}
+
+const USD = (amount: number): RefMoney => ({ amount, currency: 'USD' });
+
+/** Within 1e-9 (relative) of a whole number: that number; otherwise unchanged. */
+function snapWhole(x: number): number {
+  const r = Math.round(x);
+  return Math.abs(x - r) <= 1e-9 * Math.abs(x) ? r : x;
+}
+
+/**
+ * Whole-share bookkeeping (docs/indicators.md "Equity curves", "Whole shares"), written from the
+ * contract text. Share counts per non-cash ticker, a residual in USD, a price series per synthetic
+ * ticker. The caller drives the same sessions and parts as the fractional backtest.
+ */
+function refWholeShareBook(
+  opt: RefWholeShares,
+  ctx: {
+    execution: 'next_open' | 'next_close' | 'same_close';
+    costRate: number;
+    bars: Record<string, RefBar[]>;
+    cashRate: (date: string) => number;
+    sessions: string[];
+    targets: RefDay['holdings'][];
+    mayHold: Set<string>;
+  },
+) {
+  const { costRate: c, bars, cashRate, sessions } = ctx;
+  // Input refusals.
+  if (opt.currency !== 'USD') {
+    throw new Error(
+      `reference: whole shares: currency ${opt.currency} is not supported (USD only)`,
+    );
+  }
+  if (!/^\d+(\.\d+)?$/.test(opt.initialAmount) || !(Number(opt.initialAmount) > 0)) {
+    throw new Error(`reference: whole shares: initial amount ${JSON.stringify(opt.initialAmount)}`);
+  }
+  const initial = Number(opt.initialAmount);
+  for (const t of ctx.targets) {
+    const names = t.map((h) => h.ticker);
+    if (new Set(names).size !== names.length) {
+      throw new Error(
+        `reference: whole shares: a target lists a ticker twice (${names.join(', ')})`,
+      );
+    }
+  }
+  // Every ticker it may hold (synthetic bases included) must have bars as traded.
+  for (const base of ctx.mayHold) {
+    if (bars[base]!.some((b) => b.closeIsSplitAdjusted)) {
+      throw new Error(`reference: whole shares: ${base} has split-adjusted bars`);
+    }
+  }
+  const parse = (ticker: string) => {
+    const t = refParseTicker(ticker);
+    if (t === undefined) throw new Error(`reference: malformed ticker ${JSON.stringify(ticker)}`);
+    return t;
+  };
+  const indexes = new Map<string, Map<string, number>>();
+  const barAt = (base: string, date: string, offset: 0 | -1): RefBar => {
+    let ix = indexes.get(base);
+    if (!ix) {
+      ix = new Map(bars[base]!.map((b, i) => [b.date, i]));
+      indexes.set(base, ix);
+    }
+    const i = ix.get(date);
+    const b = i === undefined ? undefined : bars[base]![i + offset];
+    if (!b) throw new Error(`reference: whole shares: no bar for ${base} at ${date} (${offset})`);
+    return b;
+  };
+  const rateOn = (date: string): number => {
+    const r = cashRate(date);
+    if (!Number.isFinite(r))
+      throw new Error(`reference: whole shares: unknown cash rate on ${date}`);
+    return r;
+  };
+
+  // Synthetic tickers (with parameters): their own price series, from the base's close on the
+  // first session, compounded over every session whether held or not.
+  const synthetic = new Set<string>();
+  for (const t of ctx.targets)
+    for (const h of t) if (h.ticker.includes('?')) synthetic.add(h.ticker);
+  const synth: Record<string, number> = {};
+  if (sessions.length > 0) {
+    for (const t of synthetic) synth[t] = barAt(parse(t).base, sessions[0]!, 0).close;
+  }
+  const synthReturn = (ticker: string, date: string, part: 'night' | 'day' | 'whole') => {
+    const { base, L, E } = parse(ticker);
+    const b = barAt(base, date, 0);
+    const prev = barAt(base, date, -1);
+    const k = b.splitFactor; // bars are as traded (refused otherwise)
+    let r: number;
+    if (part === 'whole') r = ((b.close + b.divCash) * k) / prev.close - 1;
+    else if (part === 'night') r = ((b.open! + b.divCash) * k) / prev.close - 1;
+    else r = b.close / b.open! - 1;
+    if (part === 'day') return L * r;
+    // The cash rate is read only where the series needs financing.
+    const financing = L === 1 ? 0 : ((L - 1) * rateOn(date)) / 100 / 252;
+    return L * r - financing - E / 100 / 252;
+  };
+
+  /** A ticker's price at a time on a date: the bar as traded, or the synthetic series. */
+  const priceOf = (ticker: string, date: string, time: 'open' | 'close'): number => {
+    if (synthetic.has(ticker)) return synth[ticker]!;
+    const b = barAt(parse(ticker).base, date, 0);
+    const p = time === 'open' ? b.open : b.close;
+    if (p === undefined)
+      throw new Error(`reference: whole shares: no ${time} for ${ticker} on ${date}`);
+    return p;
+  };
+
+  let started = false;
+  let residual = 0;
+  let shares: Record<string, number> = {}; // non-cash tickers held, n > 0
+  let costSum = 0;
+  const value: number[] = [];
+  const equity: number[] = [];
+  const weights: Record<string, number>[] = [];
+  const trades: RefTrade[] = [];
+
+  return {
+    move(date: string, part: 'night' | 'day' | 'whole') {
+      for (const t of synthetic) synth[t] = synth[t]! * (1 + synthReturn(t, date, part));
+      if (!started || part === 'day') return; // events and interest belong to the night / whole day
+      // Residual cash earns the USD rate / 252 per night; the rate is read only while it is > 0.
+      let add = 0;
+      if (residual > 0) residual = residual * (1 + rateOn(date) / 100 / 252);
+      for (const t of Object.keys(shares)) {
+        if (synthetic.has(t)) continue; // a synthetic series has no splits or dividends
+        const b = barAt(parse(t).base, date, 0);
+        const afterSplit = snapWhole(shares[t]! * b.splitFactor);
+        const kept = Math.floor(afterSplit);
+        const endPrice = part === 'night' ? b.open : b.close;
+        if (afterSplit !== kept) {
+          if (endPrice === undefined)
+            throw new Error(`reference: whole shares: no open for ${t} on ${date}`);
+          add += (afterSplit - kept) * endPrice; // cash in lieu of the fraction
+        }
+        add += afterSplit * b.divCash; // dividend on the shares after the split, to cash
+        shares[t] = kept;
+        if (kept === 0) delete shares[t];
+      }
+      residual += add; // at the end of the part
+    },
+
+    /** Executes a trade; returns true when it was not the first one (a switch). */
+    trade(target: RefDay['holdings'], date: string, time: 'open' | 'close'): boolean {
+      const tickers = new Set([
+        ...Object.keys(shares),
+        ...target.filter((h) => h.ticker !== 'CASH_USD').map((h) => h.ticker),
+      ]);
+      const p: Record<string, number> = {};
+      for (const t of tickers) {
+        p[t] = priceOf(t, date, time);
+        if (!(p[t] > 0) || !Number.isFinite(p[t])) {
+          throw new Error(`reference: whole shares: price ${p[t]} for ${t} on ${date} at a trade`);
+        }
+      }
+      let H = 0;
+      for (const [t, n] of Object.entries(shares)) H += n * p[t]!;
+      const V = (started ? residual : initial) + H;
+      const B = V - c * H;
+      const next: Record<string, number> = {};
+      const counts: Record<string, number> = {};
+      const zero: string[] = [];
+      for (const h of target) {
+        if (h.ticker === 'CASH_USD') continue;
+        const n = Math.floor(((h.weight / 100) * B) / (p[h.ticker]! * (1 + c)));
+        if (!(n >= 0)) throw new Error(`reference: whole shares: share count ${n} for ${h.ticker}`);
+        counts[h.ticker] = n;
+        if (n === 0) zero.push(h.ticker);
+        else next[h.ticker] = n;
+      }
+      let traded = 0;
+      for (const t of tickers) traded += Math.abs((next[t] ?? 0) - (shares[t] ?? 0)) * p[t]!;
+      const costs = c * traded;
+      let bought = 0;
+      for (const [t, n] of Object.entries(next)) bought += n * p[t]!;
+      let rest = V - bought - costs;
+      if (rest < 0) {
+        if (rest >= -1e-9 * V) rest = 0;
+        else throw new Error(`reference: whole shares: residual ${rest} below 0 on ${date}`);
+      }
+      const wasStarted = started;
+      started = true;
+      shares = next;
+      residual = rest;
+      costSum += costs / V;
+      trades.push({
+        date,
+        time,
+        V: USD(V),
+        shares: counts,
+        zeroShares: zero,
+        residual: USD(rest),
+        costs: USD(costs),
+      });
+      return wasStarted;
+    },
+
+    /** The point at the session's close. */
+    point(date: string) {
+      if (!started) {
+        value.push(initial);
+        equity.push(1);
+        weights.push({});
+        return;
+      }
+      const at: Record<string, number> = {};
+      let v = residual;
+      for (const [t, n] of Object.entries(shares)) {
+        at[t] = n * priceOf(t, date, 'close');
+        v += at[t];
+      }
+      const w: Record<string, number> = {};
+      for (const [t, x] of Object.entries(at)) w[t] = x / v;
+      if (residual > 0) w.CASH_USD = residual / v;
+      value.push(v);
+      equity.push(v / initial);
+      weights.push(w);
+    },
+
+    result() {
+      return { equity, value, weights, trades, costs: costSum };
+    },
+  };
 }
 
 export * from './metrics';
