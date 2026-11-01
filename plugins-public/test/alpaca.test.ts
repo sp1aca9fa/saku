@@ -1,6 +1,12 @@
 import { fixtureContext } from '@saku/plugin-sdk/testing';
 import { describe, expect, it } from 'vitest';
-import { ALPACA_RECENT_MS, alpaca, alpacaBarsEnd } from '../src/alpaca';
+import {
+  ALPACA_ACTIONS_LOOKAHEAD_DAYS,
+  ALPACA_RECENT_MS,
+  alpaca,
+  alpacaActionsEnd,
+  alpacaBarsEnd,
+} from '../src/alpaca';
 import { fixture } from './fixture';
 
 const keys = { ALPACA_API_KEY_ID: 'id', ALPACA_API_SECRET_KEY: 'secret' };
@@ -44,6 +50,102 @@ describe('Alpaca', () => {
     );
   });
 
+  describe('corporate actions are filtered on the process date, not the ex-date', () => {
+    // A dividend processed inside the asked span whose ex-date is before it (as SPY's 2026-09-18
+    // ex-date, processed about 2026-10-30, in a daily window ending 2026-10-30).
+    const action = (exDate: string, processDate: string) => ({
+      corporate_actions: {
+        cash_dividends: [
+          {
+            id: 'd9',
+            symbol: 'AAA',
+            cusip: '000000000',
+            rate: 0.75,
+            special: false,
+            foreign: false,
+            process_date: processDate,
+            ex_date: exDate,
+            record_date: exDate,
+            payable_date: processDate,
+          },
+        ],
+        forward_splits: [
+          {
+            id: 's9',
+            symbol: 'AAA',
+            cusip: '000000000',
+            old_rate: 1,
+            new_rate: 3,
+            process_date: processDate,
+            ex_date: exDate,
+          },
+        ],
+      },
+      next_page_token: null,
+    });
+
+    it('ignores an action whose ex-date is before the span', async () => {
+      const ctx = fixtureContext(answers(action('2025-11-21', '2026-01-05')), { keys });
+      const bars = await alpaca.fetchBars('AAA', '2026-01-02', '2026-01-06', ctx);
+      expect(bars.map((b) => [b.date, b.divCash, b.splitFactor])).toEqual([
+        ['2026-01-02', 0, 1],
+        ['2026-01-05', 0, 1],
+        ['2026-01-06', 0, 1],
+      ]);
+    });
+
+    it('ignores an action whose ex-date is after the span', async () => {
+      const ctx = fixtureContext(answers(action('2026-01-09', '2026-02-20')), { keys });
+      const bars = await alpaca.fetchBars('AAA', '2026-01-02', '2026-01-06', ctx);
+      expect(bars.every((b) => b.divCash === 0 && b.splitFactor === 1)).toBe(true);
+    });
+
+    it('applies an action whose ex-date is in the span and process date after it', async () => {
+      const ctx = fixtureContext(answers(action('2026-01-05', '2026-02-20')), { keys });
+      const bars = await alpaca.fetchBars('AAA', '2026-01-02', '2026-01-06', ctx);
+      expect(bars.map((b) => [b.date, b.divCash, b.splitFactor])).toEqual([
+        ['2026-01-02', 0, 1],
+        ['2026-01-05', 0.75, 3],
+        ['2026-01-06', 0, 1],
+      ]);
+    });
+
+    it('still refuses an action in the span without its bar, on the span edges too', async () => {
+      // 2026-01-03 is a Saturday (no bar) inside the span.
+      for (const [from, to, exDate] of [
+        ['2026-01-02', '2026-01-06', '2026-01-03'],
+        ['2026-01-03', '2026-01-06', '2026-01-03'],
+        ['2026-01-02', '2026-01-03', '2026-01-03'],
+      ] as const) {
+        const ctx = fixtureContext(answers(action(exDate, '2026-02-20')), { keys });
+        await expect(alpaca.fetchBars('AAA', from, to, ctx)).rejects.toThrow(
+          /^Alpaca: dividend for AAA on 2026-01-03 has no bar$/,
+        );
+      }
+    });
+
+    it('refuses an unreadable ex-date rather than reading it as outside the span', async () => {
+      const ctx = fixtureContext(answers(action('', '2026-01-05')), { keys });
+      await expect(alpaca.fetchBars('AAA', '2026-01-02', '2026-01-06', ctx)).rejects.toThrow(
+        /unreadable ex_date/,
+      );
+    });
+
+    it('asks corporate actions up to the look-ahead past the span', async () => {
+      expect(ALPACA_ACTIONS_LOOKAHEAD_DAYS).toBe(120);
+      expect(alpacaActionsEnd('2026-01-06')).toBe('2026-05-06');
+      // Across a year end and a leap day (2028-02-29).
+      expect(alpacaActionsEnd('2027-12-31')).toBe('2028-04-29');
+      expect(() => alpacaActionsEnd('2026-02-30')).toThrow(/unreadable date/);
+      const ctx = fixtureContext(answers(), { keys });
+      await alpaca.fetchBars('AAA', '2026-01-02', '2026-01-06', ctx);
+      const actions = new URL(ctx.requested.at(-1)!);
+      expect(actions.pathname).toBe('/v1/corporate-actions');
+      expect(actions.searchParams.get('start')).toBe('2026-01-02');
+      expect(actions.searchParams.get('end')).toBe('2026-05-06');
+    });
+  });
+
   describe('the free plan refuses SIP data of the last 15 minutes', () => {
     // 2026-10-29 20:35 New York (EDT), as on the second bootstrap.
     const now = new Date('2026-10-30T00:35:00Z');
@@ -73,7 +175,7 @@ describe('Alpaca', () => {
       expect(alpacaBarsEnd('2026-03-08', now)).toBe('2026-03-09T03:59:59Z');
     });
 
-    it('asks for bars up to the cap and corporate actions up to the date', async () => {
+    it('asks for bars up to the cap and corporate actions past the date', async () => {
       const ctx = fixtureContext(answers(), { keys, now });
       await alpaca.fetchBars('AAA', '2026-01-02', '2026-10-29', ctx);
       const bars = new URL(ctx.requested[0]!);
@@ -81,7 +183,8 @@ describe('Alpaca', () => {
       expect(bars.searchParams.get('start')).toBe('2026-01-02');
       const actions = new URL(ctx.requested.at(-1)!);
       expect(actions.pathname).toBe('/v1/corporate-actions');
-      expect(actions.searchParams.get('end')).toBe('2026-10-29');
+      // 2026-10-29 plus the 120-day look-ahead (process dates), not capped by the clock.
+      expect(actions.searchParams.get('end')).toBe('2027-02-26');
     });
 
     it('asks nothing when the cap falls before the range starts', async () => {

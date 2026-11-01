@@ -1,6 +1,6 @@
 // Alpaca market data (official API): raw daily bars from 2016, with dividends and splits from
 // the corporate actions endpoint. https://docs.alpaca.markets/docs/about-market-data-api
-import { tradingDateOf, zonedInstant } from '@saku/core';
+import { isTradingDate, tradingDateOf, zonedInstant } from '@saku/core';
 import type { BarSource, PluginContext, RawBar } from '@saku/plugin-sdk';
 import { z } from 'zod';
 
@@ -20,10 +20,12 @@ const BarsPage = z.object({
   bars: z.record(z.string(), z.array(Bar)).nullable(),
   next_page_token: z.string().nullable(),
 });
-const Split = z.object({ ex_date: z.string(), old_rate: z.number(), new_rate: z.number() });
+// A readable ex-date is required: an unreadable one must never pass as "outside the span".
+const ExDate = z.string().refine(isTradingDate, { message: 'unreadable ex_date' });
+const Split = z.object({ ex_date: ExDate, old_rate: z.number(), new_rate: z.number() });
 const ActionsPage = z.object({
   corporate_actions: z.object({
-    cash_dividends: z.array(z.object({ ex_date: z.string(), rate: z.number() })).optional(),
+    cash_dividends: z.array(z.object({ ex_date: ExDate, rate: z.number() })).optional(),
     forward_splits: z.array(Split).optional(),
     reverse_splits: z.array(Split).optional(),
   }),
@@ -50,6 +52,25 @@ export function alpacaBarsEnd(to: string, now: Date): string {
   const endOfDay = Date.parse(zonedInstant(to, '23:59', 'America/New_York')) + 59_000;
   const cap = now.getTime() - ALPACA_RECENT_MS;
   return new Date(Math.min(endOfDay, cap)).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+/**
+ * How many calendar days past `to` the corporate actions request reaches. Alpaca's
+ * `/v1/corporate-actions` filters `start`/`end` on an action's `process_date`, not its `ex_date`
+ * (https://docs.alpaca.markets/reference/corporateactions-1); for a cash dividend the process date
+ * is about the payable date, weeks after the ex-date (SPY's 2026-09-18 ex-date was processed about
+ * 2026-10-30). Reaching past `to` finds a dividend whose ex-date is in the span and whose process
+ * date is later, once Alpaca lists it. 120 days covers payable dates up to about four months after
+ * the ex-date; one processed later still is missed here. Alpaca may list a dividend only once it
+ * is processed, so a recent ex-date can still read 0 (no dividend) when fetched before then.
+ */
+export const ALPACA_ACTIONS_LOOKAHEAD_DAYS = 120;
+
+/** The corporate actions query's `end` (a date): `to` plus ALPACA_ACTIONS_LOOKAHEAD_DAYS. */
+export function alpacaActionsEnd(to: string): string {
+  if (!isTradingDate(to)) throw new Error(`Alpaca: unreadable date "${to}"`);
+  const ms = Date.parse(`${to}T00:00:00Z`);
+  return new Date(ms + ALPACA_ACTIONS_LOOKAHEAD_DAYS * 86_400_000).toISOString().slice(0, 10);
 }
 
 const auth = (ctx: PluginContext) => ({
@@ -122,23 +143,33 @@ export const alpaca: BarSource = {
     }
 
     // Corporate actions are not SIP market data (no 15-minute limit) and take dates only
-    // (`YYYY-MM-DD`, per the corporate actions reference): `to` as asked.
+    // (`YYYY-MM-DD`, per the corporate actions reference). `start`/`end` filter on the process
+    // date, so `end` reaches past `to` (ALPACA_ACTIONS_LOOKAHEAD_DAYS) and the answer may hold
+    // actions whose ex-date is outside the span.
     const actions = await pages(
-      `${BASE}/v1/corporate-actions?symbols=${symbol}&types=cash_dividend,forward_split,reverse_split&start=${from}&end=${to}&limit=1000`,
+      `${BASE}/v1/corporate-actions?symbols=${symbol}&types=cash_dividend,forward_split,reverse_split&start=${from}&end=${alpacaActionsEnd(to)}&limit=1000`,
       ActionsPage,
       ctx,
     );
     const onDate = (date: string, what: string) => {
       const bar = bars.get(date);
-      // An event without its bar means the answer is incomplete: never drop it silently.
-      if (!bar) throw new Error(`Alpaca: ${what} for ${ticker} on ${date} has no bar`);
-      return bar;
+      if (bar) return bar;
+      // Ex-date outside [from, to] and no bar: the action belongs to another span (its bar is
+      // fetched, and the action applied, by the run whose span holds the ex-date).
+      if (date < from || date > to) return undefined;
+      // An event in the span without its bar means the answer is incomplete: never drop it
+      // silently.
+      throw new Error(`Alpaca: ${what} for ${ticker} on ${date} has no bar`);
     };
     for (const page of actions) {
       const ca = page.corporate_actions;
-      for (const d of ca.cash_dividends ?? []) onDate(d.ex_date, 'dividend').divCash += d.rate;
+      for (const d of ca.cash_dividends ?? []) {
+        const bar = onDate(d.ex_date, 'dividend');
+        if (bar) bar.divCash += d.rate;
+      }
       for (const s of [...(ca.forward_splits ?? []), ...(ca.reverse_splits ?? [])]) {
-        onDate(s.ex_date, 'split').splitFactor *= s.new_rate / s.old_rate;
+        const bar = onDate(s.ex_date, 'split');
+        if (bar) bar.splitFactor *= s.new_rate / s.old_rate;
       }
     }
     return [...bars.values()].sort((a, b) => a.date.localeCompare(b.date));
