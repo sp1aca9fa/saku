@@ -154,7 +154,7 @@ describe('registerStrategy costs', () => {
     const out = await registerStrategy(db, { ...o, strategy: strategy(), lockDir: lockDir() });
     expect(out.exitCode).toBe(0);
     expect(out.stdout).toContain(
-      "Costs: slippageBps 5, feePct 0.1, fxSpreadPct 0.2 (from the install's broker_costs: slippageBps, feePct, fxSpreadPct)",
+      "Costs: slippageBps 5, feePct 0.1, fxSpreadPct 0.2 (not applied yet: backtests are in USD until the base-currency layer) (from the install's broker_costs: slippageBps, feePct, fxSpreadPct)",
     );
     const v = await stored(db);
     const costs = { slippageBps: 5, feePct: 0.1, fxSpreadPct: 0.2 };
@@ -174,7 +174,7 @@ describe('registerStrategy costs', () => {
     const own = Strategy.parse({ ...strategy(), costs: { slippageBps: 0, fxSpreadPct: 0.5 } });
     const out = await registerStrategy(db, { ...o, strategy: own, lockDir: lockDir() });
     expect(out.stdout).toContain(
-      "Costs: slippageBps 0, feePct 0.1, fxSpreadPct 0.5 (from the install's broker_costs: feePct)",
+      "Costs: slippageBps 0, feePct 0.1, fxSpreadPct 0.5 (not applied yet: backtests are in USD until the base-currency layer) (from the install's broker_costs: feePct)",
     );
     expect(JSON.parse((await stored(db)).canonicalJson).strategy.costs).toEqual({
       slippageBps: 0,
@@ -199,7 +199,9 @@ describe('registerStrategy costs', () => {
     });
     const ok = await registerStrategy(db, { ...o, strategy: full, lockDir: lockDir() });
     expect(ok.exitCode).toBe(0);
-    expect(ok.stdout).toContain('Costs: slippageBps 1, feePct 0, fxSpreadPct 0');
+    expect(ok.stdout).toContain(
+      'Costs: slippageBps 1, feePct 0, fxSpreadPct 0 (not applied yet: backtests are in USD until the base-currency layer)',
+    );
   });
 });
 
@@ -227,7 +229,7 @@ describe('previewRegistration', () => {
       exitCode: 0,
       stdout: [
         'Ready to register.',
-        "Costs: slippageBps 5, feePct 0.1, fxSpreadPct 0.2 (from the install's broker_costs: slippageBps, feePct, fxSpreadPct)",
+        "Costs: slippageBps 5, feePct 0.1, fxSpreadPct 0.2 (not applied yet: backtests are in USD until the base-currency layer) (from the install's broker_costs: slippageBps, feePct, fxSpreadPct)",
       ],
       stderr: [],
     });

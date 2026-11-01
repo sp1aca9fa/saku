@@ -693,3 +693,127 @@ describe('core vs reference: whole strategies with every B1 operand (random OHLC
     expect(allocations.size).toBe(3);
   });
 });
+
+// docs/indicators.md "Equity curves", "Returns" (covered days): a held ticker's bars on dates
+// that are no session (another ticker it may hold, and the signal ticker, have no bar there) are
+// compounded day by day: cash, synthetic leverage, financing and expense per covered day. Runs of
+// up to 4 such dates in a row; both price bases; all three execution modes.
+// Review of 16f0131 (gap bars, per-day rules): `.fails` until the reference follows the
+// contract; remove it then.
+describe('core vs reference: bars between sessions (covered days)', () => {
+  /** On today's split basis: prices and dividends divided by the later splits. */
+  const toAdjusted = (bars: RawBar[]): RawBar[] => {
+    let after = 1;
+    const out = new Array<RawBar>(bars.length);
+    for (let i = bars.length - 1; i >= 0; i--) {
+      const b = bars[i]!;
+      const f = (v: number | undefined) => (v === undefined ? undefined : v / after);
+      out[i] = {
+        ...b,
+        open: f(b.open),
+        close: b.close / after,
+        divCash: b.divCash / after,
+        closeIsSplitAdjusted: true,
+      };
+      after *= b.splitFactor;
+    }
+    return out;
+  };
+  const gapped = (seed: number) => {
+    const n = 300;
+    const rnd = random(seed * 7 + 1);
+    const x = walk(seed, n, 0.04);
+    const y = walk(seed + 50, n, 0.02);
+    const s = walk(seed + 90, n, 0.03);
+    const dropX = new Set<string>();
+    const dropY = new Set<string>();
+    for (let i = 40; i < n - 1;) {
+      if (rnd() < 0.1) {
+        const which = rnd() < 0.6 ? dropY : dropX;
+        const len = 1 + Math.floor(rnd() * 4);
+        // Keep the split bars (a dropped split would be a fake crash, not a gap).
+        for (let k = 0; k < len && i < n - 1; k++, i++) {
+          if (i !== Math.floor(n / 2)) which.add(x[i]!.date);
+        }
+      } else i++;
+    }
+    const keep = (drop: Set<string>) => (b: RawBar) => !drop.has(b.date);
+    const both = new Set([...dropX, ...dropY]);
+    return {
+      X: x.filter(keep(dropX)),
+      Y: y.filter(keep(dropY)),
+      S: s.filter(keep(both)),
+      dropped: both.size,
+    };
+  };
+  const strategyFor = (execution: string) =>
+    Strategy.parse({
+      name: 'Gaps',
+      account: 'taxable',
+      execution,
+      safeState: { holdings: [{ ticker: 'Y', weight: 100 }] },
+      evaluation: { frequency: 'daily' },
+      costs: { slippageBps: 5, feePct: 0.1 },
+      signals: [
+        {
+          id: 'A',
+          type: 'compare',
+          left: { indicator: 'price', ticker: 'S', totalReturn: true },
+          op: '>',
+          right: { indicator: 'sma', ticker: 'S', length: 10, totalReturn: true },
+          tolerancePct: 0.5,
+        },
+        {
+          id: 'B',
+          type: 'compare',
+          left: { indicator: 'price', ticker: 'S', totalReturn: true },
+          op: '>',
+          right: { indicator: 'sma', ticker: 'S', length: 30, totalReturn: true },
+        },
+      ],
+      allocations: [
+        {
+          name: 'Lever',
+          when: { all: ['A', 'B'] },
+          holdings: [{ ticker: 'X?L=3&E=0.9', weight: 100 }],
+        },
+        {
+          name: 'Mix',
+          when: { all: ['A'] },
+          holdings: [
+            { ticker: 'X', weight: 40 },
+            { ticker: 'CASH_USD', weight: 20 },
+            { ticker: 'Y', weight: 40 },
+          ],
+        },
+        { name: 'Cash', when: { all: ['B'] }, holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        { name: 'Y', holdings: [{ ticker: 'Y', weight: 100 }] },
+      ],
+    });
+
+  for (const seed of [11, 12, 13]) {
+    for (const execution of ['next_open', 'next_close', 'same_close']) {
+      for (const adjusted of [false, true]) {
+        it(`agrees on seed ${seed}, ${execution}, ${adjusted ? 'split-adjusted' : 'raw'} bars`, () => {
+          const g = gapped(seed);
+          const bars = adjusted
+            ? { X: toAdjusted(g.X), Y: toAdjusted(g.Y), S: toAdjusted(g.S) }
+            : { X: g.X, Y: g.Y, S: g.S };
+          const strategy = strategyFor(execution);
+          const cashRate = (date: string) => 1 + (Date.parse(date) % 7) / 10;
+          const core = evaluate(strategy, bars);
+          const ref = refEvaluate(strategy, bars);
+          expect(core.map((d) => d.allocation)).toEqual(ref.map((d) => d.allocation));
+          expect(new Set(core.map((d) => d.allocation)).size).toBeGreaterThan(2);
+          const a = backtest({ strategy, days: core, bars, cashRate });
+          // Gaps inside the run: sessions fewer than X's and Y's dates together.
+          expect(g.dropped).toBeGreaterThan(10);
+          expect(a.points.length).toBeLessThan(new Set([...g.X, ...g.Y].map((b) => b.date)).size);
+          const b = refBacktest(strategy, ref, bars, cashRate);
+          expect(a.switches).toBe(b.switches);
+          expectSameEquity(a, b);
+        });
+      }
+    }
+  }
+});

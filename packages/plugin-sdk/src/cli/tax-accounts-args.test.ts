@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dateIn, parseTaxAccountsArgs } from './tax-accounts-args';
+import { parseTaxAccountsArgs } from './tax-accounts-args';
 
 describe('pnpm tax-accounts arguments', () => {
   it('reads list, open and close', () => {
@@ -37,11 +37,5 @@ describe('pnpm tax-accounts arguments', () => {
       /Unknown argument --opened-on/,
     );
     expect(error(['close', 'saver', '--user', 'a', '--user', 'b'])).toMatch(/given twice/);
-  });
-
-  it("gives today's date in a time zone", () => {
-    const now = new Date('2026-01-05T20:00:00Z');
-    expect(dateIn('Asia/Tokyo', now)).toBe('2026-01-06');
-    expect(dateIn('America/New_York', now)).toBe('2026-01-05');
   });
 });

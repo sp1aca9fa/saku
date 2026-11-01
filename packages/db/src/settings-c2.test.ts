@@ -1,4 +1,4 @@
-// The C2 settings: broker cost defaults, the deposit rate and the benchmark set (requirements 01
+// The C2 settings: broker cost defaults and the benchmark set (requirements 01
 // "Benchmark set", 05 "Costs", 09 "Cost model before C1", 12; spec 2026-11-02 c2-settings).
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,12 +9,10 @@ import {
   benchmarkAccountProblems,
   benchmarkSet,
   brokerCosts,
-  depositRate,
   duplicateJsonKeys,
   getSetting,
   parseBenchmarks,
   parseBrokerCosts,
-  parseDepositRate,
   setSetting,
 } from './settings';
 import { testDb } from './testing';
@@ -129,50 +127,6 @@ describe('broker_costs', () => {
     await db.insert(appSettings).values({ key: 'broker_costs', value: '{"feePct":"0.1"}' });
     expect(await brokerCosts(db)).toEqual({
       invalid: ['"slippageBps" is required', '"fxSpreadPct" is required'],
-    });
-  });
-});
-
-describe('deposit_rate', () => {
-  const rate = (o: object = {}) =>
-    JSON.stringify({ ratePct: '0.2', asOf: '2026-10-01', currency: 'XXX', ...o });
-
-  it("reads the base currency's dated rate", async () => {
-    const db = await testDb();
-    expect(await depositRate(db)).toEqual({ unset: true });
-    // The base currency first: the rate is that currency's.
-    await expect(setSetting(db, 'deposit_rate', rate())).rejects.toThrow(/base_currency first/);
-    await setSetting(db, 'base_currency', 'XXX');
-    await expect(setSetting(db, 'deposit_rate', rate({ currency: 'YYY' }))).rejects.toThrow(
-      /its currency must be XXX \(got YYY\)/,
-    );
-    await setSetting(db, 'deposit_rate', rate());
-    expect(await depositRate(db)).toEqual({
-      rate: { ratePct: '0.2', asOf: '2026-10-01', currency: 'XXX' },
-    });
-    await setSetting(db, 'deposit_rate', rate({ ratePct: '0' }));
-    expect(await depositRate(db)).toMatchObject({ rate: { ratePct: '0' } });
-  });
-
-  it.each([
-    ['a rate as a number', { ratePct: 0.2 }, /ratePct must be a decimal written as text/],
-    ['a negative rate', { ratePct: '-0.1' }, /ratePct must be a decimal/],
-    ['a rate of 1000%', { ratePct: '1000' }, /ratePct must be below 1000/],
-    ['no date', { asOf: undefined }, /"asOf" is required/],
-    ['a date that does not exist', { asOf: '2026-02-30' }, /asOf must be a date/],
-    ['a date with a time', { asOf: '2026-10-01T00:00' }, /asOf must be a date/],
-    ['a currency in lower case', { currency: 'xxx' }, /currency must be an ISO 4217 code/],
-    ['an unknown key', { bank: 'x' }, /unknown key "bank"/],
-  ])('refuses %s', (_, o, reason) => {
-    expect(problemsOf(parseDepositRate(rate(o))).join('\n')).toMatch(reason);
-  });
-
-  it('reports a stored rate in another currency than the base (a hand edit) as invalid', async () => {
-    const db = await testDb();
-    await setSetting(db, 'base_currency', 'XXX');
-    await db.insert(appSettings).values({ key: 'deposit_rate', value: rate({ currency: 'YYY' }) });
-    expect(await depositRate(db)).toEqual({
-      invalid: ['currency YYY is not the base currency XXX'],
     });
   });
 });
@@ -315,18 +269,52 @@ describe('benchmarks', () => {
     ).rejects.toThrow(
       /"free": the install's tax regime has no account type "tax_free" \(it has: taxable\)/,
     );
-    expect(await benchmarkSet(db)).toEqual({ unset: true });
+    expect(await benchmarkSet(db, ['taxable'])).toEqual({ unset: true });
     await setSetting(db, 'benchmarks', value, 'cli', { accountTypes: ['taxable', 'tax_free'] });
-    expect(await benchmarkSet(db)).toEqual({ benchmarks: JSON.parse(value) });
-    // A regime set later without that account type: the reader that loads it says so.
-    const set = await benchmarkSet(db);
-    expect(
-      benchmarkAccountProblems('benchmarks' in set ? set.benchmarks : [], ['taxable']),
-    ).toEqual([
-      `"free": the install's tax regime has no account type "tax_free" (it has: taxable)`,
-    ]);
+    expect(await benchmarkSet(db, ['taxable', 'tax_free'])).toEqual({
+      benchmarks: JSON.parse(value),
+    });
+    // Read under a regime without that account type: invalid, never used with it.
+    expect(await benchmarkSet(db, ['taxable'])).toEqual({
+      invalid: [
+        `"free": the install's tax regime has no account type "tax_free" (it has: taxable)`,
+      ],
+    });
+    expect(benchmarkAccountProblems(JSON.parse(value), ['taxable', 'tax_free'])).toEqual([]);
     // A stored value that no longer parses (a hand edit) is reported, never read as unset.
     await db.update(appSettings).set({ value: '[]' });
-    expect(await benchmarkSet(db)).toMatchObject({ invalid: [expect.stringMatching(/non-empty/)] });
+    expect(await benchmarkSet(db, ['taxable', 'tax_free'])).toMatchObject({
+      invalid: [expect.stringMatching(/non-empty/)],
+    });
+  });
+
+  it('refuses a regime change while stored benchmarks name an account type the new regime lacks', async () => {
+    const db = await testDb();
+    const ex = { key: 'examplia', version: '1', fingerprint: 'e1' };
+    const other = { key: 'other', version: '1', fingerprint: 'o1' };
+    const regimes = { taxRegimes: [ex, other] };
+    await setSetting(db, 'tax_regime', 'examplia', 'cli', {
+      ...regimes,
+      accountTypes: ['taxable', 'tax_free'],
+    });
+    await setSetting(db, 'benchmarks', text(one({ account: 'tax_free' })), 'cli', {
+      accountTypes: ['taxable', 'tax_free'],
+    });
+    await expect(
+      setSetting(db, 'tax_regime', 'other', 'cli', { ...regimes, accountTypes: ['taxable'] }),
+    ).rejects.toThrow(
+      /The stored benchmarks name account types the other regime does not define[\s\S]*"mix": the install's tax regime has no account type "tax_free"/,
+    );
+    // Without the new regime's account types it cannot be checked: refused too.
+    await expect(setSetting(db, 'tax_regime', 'other', 'cli', regimes)).rejects.toThrow(
+      /account types are needed to check them/,
+    );
+    expect(await getSetting(db, 'tax_regime')).toBe('examplia');
+    // Benchmarks both regimes define (taxable): the change goes through.
+    await setSetting(db, 'benchmarks', text(one()), 'cli', {
+      accountTypes: ['taxable', 'tax_free'],
+    });
+    await setSetting(db, 'tax_regime', 'other', 'cli', { ...regimes, accountTypes: ['taxable'] });
+    expect(await getSetting(db, 'tax_regime')).toBe('other');
   });
 });

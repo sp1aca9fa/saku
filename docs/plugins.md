@@ -155,8 +155,10 @@ one (a mid from buy and sell, say); a rate not published that day is left out. F
 Core fetches the dollar against the install regime's currency, only while the regime is set and
 unchanged, and checks each response whole before storing it (`taxFxProblems`): the pair, a real
 date, a tax kind, a `name` the regime declares on that kind, values finite and above 0, one
-statement per vintage, and on one date and publication time `tax_buy >= tax_mid >= tax_sell`.
-A response with any problem stores nothing (see "Tax FX" in `docs/data-pipeline.md`). The
+statement per vintage, a publication time with a time of day and a zone (or none: known from
+the fetch), and per date, on the latest vintage of each kind as a point-in-time read returns it,
+`tax_buy >= tax_mid >= tax_sell` (again when storing, against the stored rates too, so a
+republished TTS below the stored TTM is refused). A response with any problem stores nothing (see "Tax FX" in `docs/data-pipeline.md`). The
 template has one: `plugins-public/template/src/example-tax-fx.ts`.
 
 ## Start from the template
@@ -193,7 +195,7 @@ in core computes with them. It has no methods and makes no requests. Start from
 | `foreignDividendBase` | Per account type: whether the dividend tax on a foreign dividend is charged on the `gross` dividend or `net_of_withholding` |
 | `foreignWithholding` | Withholding at source per paying country (`{ country, rate }`), matched against `symbols.domicile`; an account type may override it for some countries (its own `foreignWithholding`). A country not listed, or a symbol without a domicile, has an unknown withholding (never read as 0) |
 | `costBasis` | `method` (`moving_average`, `fifo`) and `sameDayOrder` (how one day's trades of a product meet the method: `execution`, `purchases_first`, `sales_first`) |
-| `fx` | The regime's own rate names, each mapped onto a stored kind (`tax_mid`, `tax_buy`, `tax_sell`; e.g. `TTM`, `TTS`, `TTB`), and which name converts `purchases`, `sales` and `dividends` |
+| `fx` | The regime's own rate names, each mapped onto a stored kind (`tax_mid`, `tax_buy`, `tax_sell`; e.g. `TTM`, `TTS`, `TTB`; one name per kind, since rates are stored by kind), and which name converts `purchases`, `sales` and `dividends` |
 | `transfers` | Moves allowed without a sale (`{ from, to }`); any other move is a sale and a new purchase, both costs shown |
 | `texts` | Per language code a tree of texts; `en` is required and complete, others may be partial |
 

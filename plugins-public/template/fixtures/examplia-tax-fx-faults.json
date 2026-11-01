@@ -38,6 +38,12 @@
       "message": "no valid date"
     },
     {
+      "name": "a publication stamp without a time of day",
+      "path": ["rates", 1, "published"],
+      "value": "2026-01-05",
+      "message": "publishedAt must be an instant with a time of day and a zone"
+    },
+    {
       "name": "another pair",
       "path": ["quote"],
       "value": "XXX",

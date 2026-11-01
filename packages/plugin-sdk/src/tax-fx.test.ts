@@ -17,7 +17,8 @@ const day = (date: string, mid: number, buy: number, sell: number): TaxFxRate[] 
   { pair, date, rate: buy, kind: 'tax_buy', name: 'ASK' },
   { pair, date, rate: sell, kind: 'tax_sell', name: 'BID' },
 ];
-const check = (rates: unknown) => taxFxProblems(rates, { pair, fx });
+const fetchedAt = '2026-01-06T00:00:00Z';
+const check = (rates: unknown) => taxFxProblems(rates, { pair, fx, fetchedAt });
 
 describe('taxFxProblems', () => {
   it('passes ordered, positive rates under the declared names; equal rates pass', () => {
@@ -49,7 +50,7 @@ describe('taxFxProblems', () => {
     expect(check([buy, sell])).toEqual(['2026-01-05: tax_buy 149 is below tax_sell 151']);
   });
 
-  it('orders within one publication time; a later vintage is ordered on its own', () => {
+  it('orders the latest vintage of each kind, as a point-in-time read returns it', () => {
     const at = (r: TaxFxRate, publishedAt: string) => ({ ...r, publishedAt });
     const [mid1, buy1, sell1] = day('2026-01-05', 150, 151, 149);
     const [mid2, buy2, sell2] = day('2026-01-05', 152, 153, 151);
@@ -65,10 +66,38 @@ describe('taxFxProblems', () => {
         at(sell2!, t2),
       ]),
     ).toEqual([]);
+    // An earlier vintage out of order no longer counts once a later one is published.
+    expect(
+      check([at({ ...buy1!, rate: 100 } as TaxFxRate, t1), at(mid2!, t2), at(buy2!, t2)]),
+    ).toEqual([]);
+    // Only the TTS republished later, below the TTM that still holds: refused.
+    expect(
+      check([at(mid1!, t1), at(buy1!, t1), at({ ...buy2!, rate: 149.5 } as TaxFxRate, t2)]),
+    ).toEqual(['2026-01-05: tax_buy 149.5 is below tax_mid 150']);
     // The same instant in another spelling is one publication time.
     expect(check([at(mid2!, t1), at(buy1!, '2026-01-05T10:00:00+09:00')])).toEqual([
       '2026-01-05: tax_buy 151 is below tax_mid 152',
     ]);
+  });
+
+  it('fault: a missing stamp is read as known at the fetch, so it is ordered with the rest', () => {
+    const [mid, buy] = day('2026-01-05', 150, 149, 148);
+    // Without a publication time the buy rate is the latest vintage (known at the fetch).
+    expect(check([{ ...mid!, publishedAt: '2026-01-05T01:00:00Z' }, buy])).toEqual([
+      '2026-01-05: tax_buy 149 is below tax_mid 150',
+    ]);
+  });
+
+  it('refuses a stamp without a time of day or a zone (the rule storing applies)', () => {
+    const [mid] = day('2026-01-05', 150, 151, 149);
+    for (const publishedAt of ['2026-01-05', '2026-01-05T10:00:00', 'soon', 5]) {
+      expect(check([{ ...mid, publishedAt }])).toEqual([
+        expect.stringMatching(
+          /publishedAt (must be an instant with a time of day and a zone|is not text)/,
+        ),
+      ]);
+    }
+    expect(check([{ ...mid, publishedAt: '2026-01-05T10:00:00+09:00' }])).toEqual([]);
   });
 
   it('refuses a missing or invalid date, another pair, an unknown kind or name', () => {

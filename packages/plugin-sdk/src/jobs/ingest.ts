@@ -22,6 +22,7 @@ import {
   fillSymbolMeta,
   getSetting,
   storeFx,
+  storeTaxFx,
   storeIssuerRecords,
   storeRawBars,
   storeSeries,
@@ -366,21 +367,31 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
 
   // Tax FX (requirements 07 "FX for tax", 15 `TaxFxSource`; C1): the broker-style rates of the
   // install's regime, for its pairs (`taxFxPairs`). Each response is checked whole before
-  // anything is stored (`taxFxProblems`: positive finite values, the regime's rate names on their
-  // kinds, tax_buy >= tax_mid >= tax_sell); any problem fails the pair and stores nothing. Each
-  // kind is stored in `fx_rates` under its own kind (never as a valuation rate). Without a usable
-  // regime (unset, not loaded, or changed since set) nothing is fetched: the rate names cannot be
-  // checked, and no tax result is computed then either.
+  // anything is stored (`taxFxProblems`: the regime's rate names on their kinds, stamps, positive
+  // finite values, the order tax_buy >= tax_mid >= tax_sell), then stored in one transaction
+  // (`storeTaxFx`), which checks the order again on the response merged with the stored rates;
+  // any problem fails the pair and stores nothing. Each kind is stored in `fx_rates` under its
+  // own kind (never as a valuation rate). Without a usable regime nothing is fetched (the rate
+  // names cannot be checked, and no tax result is computed then either): unset, a warning only
+  // (no tax yet); not loaded or changed since set, each tax FX source with a role is reported as
+  // stopped, so the run is incomplete (no heartbeat) until the admin resolves it.
   if (plugins.taxFx.length > 0) {
     const install = await installTaxRegime(db, plugins.taxRegimes);
     const regime = 'regime' in install ? install.regime : undefined;
+    let unusable: string | undefined;
     if ('unset' in install) o.log.warn('No tax FX fetched: tax_regime is not set');
     else if ('unknown' in install) {
-      o.log.warn(`No tax FX fetched: no loaded tax regime has the key ${install.unknown}`);
+      unusable = `no loaded tax regime has the key ${install.unknown}`;
     } else if ('changed' in install) {
-      o.log.warn(
-        `No tax FX fetched: the ${install.changed.key} regime's rules changed since it was set`,
-      );
+      unusable = `the ${install.changed.key} regime's rules changed since it was set`;
+    }
+    if (unusable !== undefined) {
+      o.log.warn(`No tax FX fetched: ${unusable}`);
+      for (const source of plugins.taxFx) {
+        const r = report(source.info.key, 'tax_fx');
+        r.stopped = `no tax FX fetched: ${unusable}`;
+        reports.push(r);
+      }
     }
     const taxPairs = regime ? taxFxPairs(regime) : [];
     for (const source of regime ? plugins.taxFx : []) {
@@ -393,31 +404,26 @@ export async function ingest(db: Db, plugins: LoadedPlugins, o: IngestOptions) {
       await perItem(r, supported, o.log, async (pair) => {
         const from = windowStart(source.info, wanted(), o.to);
         const rates = await source.fetchRates(pair, from, o.to, ctx);
-        const problems = taxFxProblems(rates, { pair, fx: regime!.fx });
+        const fetchedAt = now().toISOString();
+        const problems = taxFxProblems(rates, { pair, fx: regime!.fx, fetchedAt });
         if (problems.length > 0) {
           const shown = problems.slice(0, 5).join('; ');
           const more = problems.length > 5 ? `; and ${problems.length - 5} more` : '';
           throw new Error(`tax rates refused, nothing stored: ${shown}${more}`);
         }
-        const fetchedAt = now().toISOString();
-        for (const kind of TAX_FX_KINDS) {
-          const stored = await storeFx(db, {
+        let stored: Awaited<ReturnType<typeof storeTaxFx>>;
+        try {
+          stored = await storeTaxFx(db, {
             source: source.info.key,
-            kind,
-            rates: rates.filter((x) => x.kind === kind).map(({ kind: _, name: __, ...x }) => x),
+            rates: rates.map(({ name: _, ...x }) => x),
             fetchedAt,
           });
-          // Reported per pair and kind, so a changed TTS is never told as a changed TTM.
-          const tag = (v: { item: string; date: TradingDate }) => ({
-            ...v,
-            item: `${v.item} ${kind}`,
-          });
-          noteValues(
-            r,
-            { ...stored, revised: stored.revised.map(tag), withdrawn: stored.withdrawn.map(tag) },
-            o.log,
-          );
+        } catch (e) {
+          throw new Error(`tax rates refused, nothing stored: ${message(e)}`);
         }
+        // Reported per pair and kind (`<pair> <kind>`), so a changed TTS is never told as a
+        // changed TTM.
+        for (const kind of TAX_FX_KINDS) noteValues(r, stored[kind], o.log);
       });
     }
   }

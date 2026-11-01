@@ -11,6 +11,7 @@ import {
   type StrategyDay,
   type TradingDate,
   Strategy,
+  StoredStrategy,
   backtest,
   evaluate,
   strategyTickers,
@@ -59,12 +60,15 @@ export async function integrity(
     /** Core's equity per session, by date. */
     let equity: Map<TradingDate, number>;
     try {
-      strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
+      // Read as registered (`StoredStrategy`, as forward.ts `parseVersion`).
+      strategy = StoredStrategy.parse(JSON.parse(version.canonicalJson).strategy);
       // Every ticker it may hold, the safe state's included (backtest sessions).
       bars = barsOf(await loadRows(strategyTickers(strategy), o.to));
       core = evaluate(strategy, bars);
       equity = new Map(
-        backtest({ strategy, days: core, bars, cashRate }).points.map((p) => [p.date, p.equity]),
+        backtest({ strategy, days: core, bars, cashRate, omittedCostsAsZero: true }).points.map(
+          (p) => [p.date, p.equity],
+        ),
       );
     } catch (e) {
       // Neither check can run: both are red, and the other versions are still checked.
@@ -109,7 +113,7 @@ function compareReference(
       // Core succeeded, so no day it valued needed an unknown rate; the reference reads the rate
       // on every day (times a zero weight where unused), so an unknown one is passed as 0 there.
       // Matched by date: both value every session, those without a decision included.
-      const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? 0);
+      const b = refBacktest(s, ref, bars, (d) => cashRate(d) ?? 0, { omittedCostsAsZero: true });
       const theirs = new Map(b.dates.map((d, i) => [d, b.equity[i]!]));
       const ours = [...equity.keys()];
       if (ours.length !== b.dates.length || ours.some((d) => !theirs.has(d))) {
@@ -159,7 +163,13 @@ function compareIncremental(
       }
       const signals = signalsDiffer(last.signals, core[i]!.signals);
       if (signals.length) problems.push(`${date}: signals ${signals.join(', ')}`);
-      const point = backtest({ strategy, days, bars: upTo, cashRate }).points.at(-1)!;
+      const point = backtest({
+        strategy,
+        days,
+        bars: upTo,
+        cashRate,
+        omittedCostsAsZero: true,
+      }).points.at(-1)!;
       const full = equity.get(date);
       if (point.date !== date || full === undefined) {
         problems.push(`${date}: no equity on that day (${point.date})`);

@@ -3,11 +3,12 @@
 import { fxPointInTime, schema } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { Sessions } from '@saku/data';
+import { sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { emptyPlugins } from '../registry';
 import { setTaxRegime } from '../tax-regime';
 import type { PluginInfo, TaxFxRate, TaxFxSource, TaxRegime } from '../types';
-import { ingest } from './ingest';
+import { countsForRun, ingest } from './ingest';
 
 const sessions = new Sessions({
   id: 'test',
@@ -17,7 +18,7 @@ const sessions = new Sessions({
   holidays: [],
 });
 
-/** Only what ingest reads of a regime (its key, currency and rate names). */
+/** Only what ingest and setting the regime read (its key, currency, account types, rate names). */
 const regime = {
   info: {
     key: 'examplia',
@@ -28,6 +29,7 @@ const regime = {
     currency: 'XTS',
     sources: ['https://tax.example.test'],
   },
+  accountTypes: [{ key: 'taxable' }],
   fx: {
     rates: {
       MID: { kind: 'tax_mid', nameKey: 'm' },
@@ -159,14 +161,29 @@ describe('ingest: tax FX', () => {
     // Not set.
     const db = await setup(false);
     expect(await run(db, s)).toEqual([]);
-    // Set, then the loaded declaration changed (a rule edited by a plug-in update).
+    // Set, then the loaded declaration changed (a rule edited by a plug-in update): the source
+    // with a role is reported stopped, so the run is incomplete (no heartbeat).
     const db2 = await setup();
     const changed = { ...regime, info: { ...regime.info, version: '2' } } as TaxRegime;
-    expect(
-      await ingest(db2, { ...emptyPlugins(), taxFx: [s], taxRegimes: [changed] }, options),
-    ).toEqual([]);
+    const stopped = (why: string) => [
+      expect.objectContaining({
+        source: 'example-bank',
+        kind: 'tax_fx',
+        ok: [],
+        stopped: `no tax FX fetched: ${why}`,
+      }),
+    ];
+    const reports = await ingest(
+      db2,
+      { ...emptyPlugins(), taxFx: [s], taxRegimes: [changed] },
+      options,
+    );
+    expect(reports).toEqual(stopped("the examplia regime's rules changed since it was set"));
+    expect(reports.filter(countsForRun)).toHaveLength(1);
     // Set, then no loaded regime has the key.
-    expect(await ingest(db2, { ...emptyPlugins(), taxFx: [s] }, options)).toEqual([]);
+    expect(await ingest(db2, { ...emptyPlugins(), taxFx: [s] }, options)).toEqual(
+      stopped('no loaded tax regime has the key examplia'),
+    );
     expect(s.asked).toEqual([]);
     expect(warnings.filter((w) => w.startsWith('No tax FX'))).toEqual([
       'No tax FX fetched: tax_regime is not set',
@@ -174,6 +191,83 @@ describe('ingest: tax FX', () => {
       'No tax FX fetched: no loaded tax regime has the key examplia',
     ]);
     expect(await db2.select().from(schema.fxRates)).toEqual([]);
+  });
+
+  it('fault: a partial revision (only the TTS republished, below the stored TTM) stores nothing', async () => {
+    const db = await setup();
+    const t1 = '2026-01-16T01:00:00Z';
+    const stamped = (r: TaxFxRate) => ({ ...r, publishedAt: t1 });
+    await run(
+      db,
+      source(() => day('2026-01-16', 150, 151, 149).map(stamped)),
+    );
+    const later = () => new Date('2026-01-18T01:00:00Z');
+    const tts = { ...day('2026-01-16', 0, 149.5, 0)[1]!, publishedAt: '2026-01-17T01:00:00Z' };
+    const [r] = await run(
+      db,
+      source(() => [tts]),
+      later,
+    );
+    expect(r!.failed).toEqual([
+      {
+        item: 'USDXTS',
+        error:
+          'tax rates refused, nothing stored: tax rates out of order as they would be read: ' +
+          'USDXTS 2026-01-16: tax_buy 149.5 is below tax_mid 150',
+      },
+    ]);
+    expect(await db.select().from(schema.fxRates)).toHaveLength(3);
+    // A later TTS still above the stored TTM is stored.
+    const [ok] = await run(
+      db,
+      source(() => [{ ...tts, rate: 151.5 } as TaxFxRate]),
+      later,
+    );
+    expect(ok).toMatchObject({ ok: ['USDXTS'], inserted: 1 });
+  });
+
+  it('fault: a missing stamp is known at the fetch and ordered against the stored rates', async () => {
+    const db = await setup();
+    const t1 = '2026-01-16T01:00:00Z';
+    await run(
+      db,
+      source(() => day('2026-01-16', 150, 151, 149).map((r) => ({ ...r, publishedAt: t1 }))),
+    );
+    const later = () => new Date('2026-01-18T01:00:00Z');
+    const unstamped = day('2026-01-16', 0, 0, 150.5)[2]!;
+    const [r] = await run(
+      db,
+      source(() => [unstamped]),
+      later,
+    );
+    expect(r!.failed[0]!.error).toMatch(/tax_mid 150 is below tax_sell 150.5/);
+    expect(await db.select().from(schema.fxRates)).toHaveLength(3);
+  });
+
+  it('fault: the last write failing at store time stores nothing of the other kinds', async () => {
+    const db = await setup();
+    // Values of all three kinds go in first; the tax_buy withdrawal is the last statement of the
+    // transaction, and fails (a storage error).
+    await db.run(
+      sql.raw(`CREATE TRIGGER test_fail_last BEFORE INSERT ON fx_withdrawals WHEN NEW.kind = 'tax_buy'
+        BEGIN SELECT RAISE(ABORT, 'disk full (test)'); END`),
+    );
+    const withdrawn: TaxFxRate = {
+      pair: 'USDXTS',
+      date: '2026-01-16',
+      withdrawn: true,
+      kind: 'tax_buy',
+      name: 'ASK',
+    };
+    const [r] = await run(
+      db,
+      source(() => [...day('2026-01-15', 150, 151, 149), withdrawn]),
+    );
+    expect(r!.failed[0]!.error).toMatch(
+      /^tax rates refused, nothing stored: Failed query: insert into "fx_withdrawals"/,
+    );
+    expect(await db.select().from(schema.fxRates)).toEqual([]);
+    expect(await db.select().from(schema.fxWithdrawals)).toEqual([]);
   });
 
   it('asks nothing of a source that does not support the pair', async () => {

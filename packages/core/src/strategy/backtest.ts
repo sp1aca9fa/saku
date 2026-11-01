@@ -2,6 +2,7 @@
 // next open (default), the next close, or the same close (testfol parity only, not achievable).
 // float64 analytics; the whole-share option (docs/indicators.md "Whole shares") gives USD amounts
 // as float64 estimates.
+import { totalReturn } from '../adjusted';
 import type { RawBar, TradingDate } from '../domain';
 import type { StrategyDay } from './engine';
 import type { Holding, Strategy } from './schema';
@@ -43,6 +44,13 @@ export interface BacktestInput {
    * results are unchanged.
    */
   wholeShares?: WholeShares;
+  /**
+   * Reads an omitted slippage or fee as 0 (docs/indicators.md "Equity curves", "Costs"). Only for
+   * versions registered before C2 froze the effective costs into them (run as recorded) and
+   * testfol parity cases; without it an omitted cost fails ("costs not resolved"). Never for
+   * drafts or analytics: resolve with the install's `broker_costs` first.
+   */
+  omittedCostsAsZero?: boolean;
 }
 
 /** Where a trade executes: the session's open (`next_open`) or its close. */
@@ -116,9 +124,9 @@ function assetReturn(prev: RawBar, bar: RawBar, segment: Segment, ticker: string
 
 /**
  * A ticker's bars from the previous session to this one (docs/indicators.md "Equity curves",
- * "Returns"): `base` is its last bar on or before the previous session, `gap` its bars dated
- * between the two sessions (dates that are not sessions because another ticker the strategy may
- * hold has no bar), `bar` its bar on this session.
+ * "Returns"): `base` is its bar on the previous session (required: a move before it is unknown),
+ * `gap` its bars dated between the two sessions (each on a covered day), `bar` its bar on this
+ * session.
  */
 interface Span {
   base: RawBar;
@@ -127,22 +135,17 @@ interface Span {
 }
 
 /**
- * A ticker's return over part of a session (`assetReturn`), with the bars of a gap compounded
- * into the night part or the whole day, in date order (their closes, splits and dividends). With
- * no gap it is `assetReturn` itself, to the bit.
+ * One day's growth of a holding (1 + its return that day), refused when not finite or not above
+ * 0: an equity at or below 0 cannot be compounded (docs/indicators.md "Returns").
  */
-function spanReturn(span: Span, segment: Segment, ticker: string): number {
-  const { base, gap, bar } = span;
-  if (gap.length === 0 || segment === 'intraday') {
-    return assetReturn(gap.at(-1) ?? base, bar, segment, ticker);
+function growthOf(ticker: string, date: TradingDate, r: number): number {
+  const g = 1 + r;
+  if (!Number.isFinite(g) || g <= 0) {
+    throw new Error(
+      `${ticker} on ${date}: growth ${g} (a return of ${r}) leaves nothing to compound; the backtest stops rather than carry a value at or below 0.`,
+    );
   }
-  let growth = 1;
-  let prev = base;
-  for (const m of gap) {
-    growth *= ((m.close + m.divCash) * (m.closeIsSplitAdjusted ? 1 : m.splitFactor)) / prev.close;
-    prev = m;
-  }
-  return growth * (1 + assetReturn(prev, bar, segment, ticker)) - 1;
+  return g;
 }
 
 const targetWeights = (holdings: Holding[]) =>
@@ -234,7 +237,7 @@ function fractionalBook(
       let total = 0;
       const next: Record<string, number> = {};
       for (const [ticker, w] of entries) {
-        next[ticker] = w * (1 + holdingReturn(ticker, prev, date, segment));
+        next[ticker] = w * growthOf(ticker, date, holdingReturn(ticker, prev, date, segment));
         total += next[ticker];
       }
       equity *= total;
@@ -305,6 +308,7 @@ function wholeBook(deps: {
   cashDay: (date: TradingDate) => number;
   barOn: (ticker: string, date: TradingDate) => RawBar;
   span: (ticker: string, prev: TradingDate, date: TradingDate) => Span;
+  covered: (prev: TradingDate, date: TradingDate) => TradingDate[];
 }): Book & { trades: WholeShareTrade[] } {
   const { initial, costRate: c } = deps;
   let shares = new Map<string, number>();
@@ -324,33 +328,44 @@ function wholeBook(deps: {
     trades,
     grow(prev, date, segment) {
       if (!entered || segment === 'intraday') return;
-      // The residual earns the cash rate per night, like CASH_USD; read only while the cash at
-      // the start of the part is above 0 (before this part's dividend or fraction arrives).
-      if (cash > 0) cash *= 1 + deps.cashDay(date);
-      const next = new Map<string, number>();
-      for (const [ticker, held] of shares) {
-        // Ex-dates (night part or whole day), the bars of a gap first, in date order: split
-        // first, then the dividend on the whole shares kept goes to cash; a split's fraction is
-        // paid as cash at that bar's close (a gap bar) or at the part's end price.
+      // Each held ticker's bars over the step, by date: its gap bars at their close, the
+      // session's bar at the part's end price (the open for the night, the close for the day).
+      const byDay = new Map<TradingDate, [string, RawBar, number][]>();
+      for (const ticker of shares.keys()) {
         const { gap, bar } = deps.span(ticker, prev, date);
         const end = segment === 'overnight' ? bar.open : bar.close;
         if (end === undefined) throw new Error(`${ticker} has no open on ${date}.`);
-        let n = held;
-        for (const [b, price] of [...gap.map((m) => [m, m.close] as const), [bar, end] as const]) {
+        for (const [b, p] of [...gap.map((m) => [m, m.close] as const), [bar, end] as const]) {
+          byDay.set(b.date, [...(byDay.get(b.date) ?? []), [ticker, b, p]]);
+        }
+      }
+      for (const day of deps.covered(prev, date)) {
+        // The residual earns the day's cash rate, like CASH_USD; read only while the cash at the
+        // start of the day is above 0 (before that day's dividend or fraction arrives).
+        if (cash > 0) cash *= 1 + deps.cashDay(day);
+        // Ex-date: split first (a fraction paid as cash), then the dividend on the shares kept.
+        for (const [ticker, b, p] of byDay.get(day) ?? []) {
+          const n = shares.get(ticker)!;
           const split = n * b.splitFactor;
           const whole = Math.round(split);
           const snapped = Math.abs(split - whole) <= NEAR_WHOLE * Math.abs(split);
-          n = snapped ? whole : Math.floor(split);
-          if (!snapped) cash += (split - n) * price;
-          cash += n * b.divCash;
+          const kept = snapped ? whole : Math.floor(split);
+          if (!snapped) cash += (split - kept) * p;
+          cash += kept * b.divCash;
+          shares.set(ticker, kept);
         }
-        if (n > 0) next.set(ticker, n);
+        byDay.delete(day);
       }
-      shares = next;
+      if (byDay.size > 0) {
+        throw new Error(`Bars on ${[...byDay.keys()].join(', ')} fall on no covered day.`);
+      }
+      shares = new Map([...shares].filter(([, n]) => n > 0));
     },
     trade(to, date, at) {
       const target = new Map<string, number>();
       for (const h of to) {
+        // An assertion: a ticker listed twice is refused up front (backtest); a Map would
+        // otherwise keep one of its weights silently.
         if (target.has(h.ticker)) {
           throw new Error(`${h.ticker} is listed twice in the holdings traded on ${date}.`);
         }
@@ -441,6 +456,16 @@ function wholeBook(deps: {
 
 export function backtest(input: BacktestInput): BacktestResult {
   const { strategy } = input;
+  // An omitted cost is unknown, not 0, unless the caller says so (stored pre-C2 versions, parity).
+  if (input.omittedCostsAsZero !== true) {
+    for (const field of ['slippageBps', 'feePct'] as const) {
+      if (strategy.costs[field] === undefined) {
+        throw new Error(
+          `costs not resolved: ${field}; resolve with the install's broker_costs first`,
+        );
+      }
+    }
+  }
   const decided = new Map(input.days.map((d) => [d.date, d]));
   // What it may hold: every allocation and the safe state (the strategy's own lists), and what
   // the days hold (for a caller passing days only).
@@ -472,12 +497,34 @@ export function backtest(input: BacktestInput): BacktestResult {
   };
   const span = (ticker: string, prev: TradingDate, date: TradingDate): Span => {
     const [list, i] = positionOf(ticker, date);
-    if (i === undefined || i === 0) throw new Error(`${ticker} has no bar on ${date} or before.`);
-    // Its last bar on or before the previous session (normally the bar just before).
-    let k = i - 1;
-    while (k > 0 && list[k]!.date > prev) k--;
-    if (list[k]!.date > prev) throw new Error(`${ticker} has no bar on ${prev} or before.`);
+    if (i === undefined) throw new Error(`${ticker} has no bar on ${date}.`);
+    const [, k] = positionOf(ticker, prev);
+    if (k === undefined || k >= i) {
+      throw new Error(
+        `${ticker} has no bar on ${prev}, the session before ${date}: its move from there is unknown.`,
+      );
+    }
     return { base: list[k]!, gap: list.slice(k + 1, i), bar: list[i]! };
+  };
+  // Covered days (docs/indicators.md "Returns"): the dates strictly between two sessions on which
+  // any ticker the strategy may hold has a bar, then the session itself.
+  const holdableDates = [
+    ...new Set(holdable.flatMap((t) => (input.bars[t] ?? []).map((b) => b.date))),
+  ].sort();
+  const covered = (prev: TradingDate, date: TradingDate): TradingDate[] => {
+    let lo = 0;
+    let hi = holdableDates.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (holdableDates[mid]! <= prev) lo = mid + 1;
+      else hi = mid;
+    }
+    const out: TradingDate[] = [];
+    for (let j = lo; j < holdableDates.length && holdableDates[j]! < date; j++) {
+      out.push(holdableDates[j]!);
+    }
+    out.push(date);
+    return out;
   };
   const barOn = (ticker: string, date: TradingDate): RawBar => {
     const [list, i] = positionOf(ticker, date);
@@ -489,19 +536,64 @@ export function backtest(input: BacktestInput): BacktestResult {
     if (rate === undefined) throw new Error(`No cash rate known for ${date}.`);
     return rate / 100 / 252;
   };
+  // One covered day of a holding (requirements 05: synthetic leverage is daily): L x the base's
+  // return that day, minus (L - 1) x that day's cash rate / 252 and E / 100 / 252.
+  const dayReturn = (
+    ticker: string,
+    t: ReturnType<typeof parseTicker>,
+    r: number,
+    date: TradingDate,
+  ): number => {
+    const lr = t.leverage * r;
+    const financing = readsCashRate(ticker) ? (t.leverage - 1) * cashDay(date) : 0;
+    return lr - financing - t.expensePct / 100 / 252;
+  };
+  /**
+   * A holding's return over part of the session `date`, `prev` the session before. Without a
+   * gap, one day as before (to the bit); over a gap, the covered days compound in date order,
+   * each with its own rate; a ticker without a bar on a covered day has a 0 return there.
+   */
   const holdingReturn = (
     ticker: string,
     prev: TradingDate,
     date: TradingDate,
     segment: Segment,
   ): number => {
-    const financed = segment !== 'intraday';
-    if (ticker === CASH_USD) return financed ? cashDay(date) : 0;
+    if (segment === 'intraday') {
+      if (ticker === CASH_USD) return 0;
+      const t = parseTicker(ticker);
+      const bar = barOn(t.base, date);
+      return t.leverage * assetReturn(bar, bar, 'intraday', t.base);
+    }
+    const days = covered(prev, date);
+    if (ticker === CASH_USD) {
+      if (days.length === 1) return cashDay(date);
+      let growth = 1;
+      for (const d of days) growth *= growthOf(ticker, d, cashDay(d));
+      return growth - 1;
+    }
     const t = parseTicker(ticker);
-    const r = t.leverage * spanReturn(span(t.base, prev, date), segment, t.base);
-    if (!financed) return r;
-    const financing = readsCashRate(ticker) ? (t.leverage - 1) * cashDay(date) : 0;
-    return r - financing - t.expensePct / 100 / 252;
+    const s = span(t.base, prev, date);
+    if (days.length === 1) {
+      if (s.gap.length > 0)
+        throw new Error(`${t.base} has a bar on no covered day before ${date}.`);
+      return dayReturn(ticker, t, assetReturn(s.base, s.bar, segment, t.base), date);
+    }
+    let growth = 1;
+    let last = s.base;
+    let g = 0;
+    for (const d of days) {
+      let r = 0;
+      if (d === date) r = assetReturn(last, s.bar, segment, t.base);
+      else if (s.gap[g]?.date === d) {
+        r = totalReturn(last, s.gap[g]!);
+        last = s.gap[g++]!;
+      }
+      growth *= growthOf(ticker, d, dayReturn(ticker, t, r, d));
+    }
+    if (g !== s.gap.length)
+      throw new Error(`${t.base} has a bar on no covered day before ${date}.`);
+    return growth - 1;
   };
 
   let whole: ReturnType<typeof wholeBook> | undefined;
@@ -538,7 +630,7 @@ export function backtest(input: BacktestInput): BacktestResult {
       throw new Error(`Whole shares need a cost rate from 0 to below 100% (${costRate}).`);
     }
     if (days.length > 0) {
-      whole = wholeBook({ initial, costRate, cashDay, barOn, span });
+      whole = wholeBook({ initial, costRate, cashDay, barOn, span, covered });
     }
   }
   const book: Book = whole ?? fractionalBook(costRate, holdingReturn);

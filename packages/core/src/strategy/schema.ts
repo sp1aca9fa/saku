@@ -292,91 +292,129 @@ export const Allocation = z.strictObject({
   holdings,
 });
 
-export const Strategy = z
+/**
+ * The highest slippage a strategy (or the install's `broker_costs`) states, in basis points (10%):
+ * more is a typo, not a cost. Fees and FX spreads are below COST_PCT_BELOW percent: 100% or more
+ * would take the whole amount traded (spec 2026-11-02 c2-settings, the same limits as the setting).
+ */
+export const MAX_SLIPPAGE_BPS = 1000;
+export const COST_PCT_BELOW = 100;
+
+/** A strategy's costs, each optional (the install's `broker_costs` fills an omitted one). */
+const limitedCosts = z
   .strictObject({
-    name: z.string().min(1),
-    account: z.string().min(1),
-    execution: z.enum(['next_open', 'next_close', 'same_close']).default('next_open'),
-    safeState: z.strictObject({ holdings }),
-    evaluation: z.strictObject({ frequency: z.enum(['daily', 'weekly', 'monthly']) }),
-    costs: z
-      .strictObject({
-        slippageBps: z.number().min(0),
-        feePct: z.number().min(0),
-        fxSpreadPct: z.number().min(0),
-      })
-      .partial()
-      .default({}),
-    signals: z.array(Signal).default([]),
-    allocations: z.array(Allocation).min(1),
+    slippageBps: z.number().min(0).max(MAX_SLIPPAGE_BPS),
+    feePct: z.number().min(0).lt(COST_PCT_BELOW),
+    fxSpreadPct: z.number().min(0).lt(COST_PCT_BELOW),
   })
-  .superRefine((s, ctx) => {
-    const ids = s.signals.map((x) => x.id);
-    if (new Set(ids).size !== ids.length) {
-      ctx.addIssue({ code: 'custom', message: 'signal ids must be unique', path: ['signals'] });
+  .partial()
+  .default({});
+
+/**
+ * Costs as versions registered before the limits stored them (any value >= 0): a registered
+ * version is immutable and is read as registered (`StoredStrategy`), never refused by a limit
+ * added after it.
+ */
+const storedCosts = z
+  .strictObject({
+    slippageBps: z.number().min(0),
+    feePct: z.number().min(0),
+    fxSpreadPct: z.number().min(0),
+  })
+  .partial()
+  .default({});
+
+/** A strategy's fields; the rules across them are `refineStrategy`. */
+const StrategyObject = z.strictObject({
+  name: z.string().min(1),
+  account: z.string().min(1),
+  execution: z.enum(['next_open', 'next_close', 'same_close']).default('next_open'),
+  safeState: z.strictObject({ holdings }),
+  evaluation: z.strictObject({ frequency: z.enum(['daily', 'weekly', 'monthly']) }),
+  costs: limitedCosts,
+  signals: z.array(Signal).default([]),
+  allocations: z.array(Allocation).min(1),
+});
+
+type StrategyShape = z.output<typeof StrategyObject>;
+
+function refineStrategy(s: StrategyShape, ctx: z.RefinementCtx): void {
+  const ids = s.signals.map((x) => x.id);
+  if (new Set(ids).size !== ids.length) {
+    ctx.addIssue({ code: 'custom', message: 'signal ids must be unique', path: ['signals'] });
+  }
+  s.signals.forEach((x, i) => {
+    const comparisons =
+      x.type === 'compare'
+        ? [{ c: x, path: ['signals', i] }]
+        : comparisonsOf(x).map((c, j) => ({ c, path: ['signals', i, 'members', j] }));
+    for (const { c, path } of comparisons) {
+      if (plainPriceAgainstLevel(c)) {
+        ctx.addIssue({ code: 'custom', message: PLAIN_PRICE_AGAINST_LEVEL, path });
+      }
+      if (plainPriceAgainstPercentage(c)) {
+        ctx.addIssue({ code: 'custom', message: PLAIN_PRICE_AGAINST_PERCENTAGE, path });
+      }
     }
-    s.signals.forEach((x, i) => {
-      const comparisons =
-        x.type === 'compare'
-          ? [{ c: x, path: ['signals', i] }]
-          : comparisonsOf(x).map((c, j) => ({ c, path: ['signals', i, 'members', j] }));
-      for (const { c, path } of comparisons) {
-        if (plainPriceAgainstLevel(c)) {
-          ctx.addIssue({ code: 'custom', message: PLAIN_PRICE_AGAINST_LEVEL, path });
-        }
-        if (plainPriceAgainstPercentage(c)) {
-          ctx.addIssue({ code: 'custom', message: PLAIN_PRICE_AGAINST_PERCENTAGE, path });
-        }
+  });
+  // Derived signals: every id they read exists, is not their own, and they form no cycle.
+  s.signals.forEach((x, i) => {
+    for (const id of new Set(inputsOf(x))) {
+      const path = ['signals', i, 'of'];
+      if (id === x.id) {
+        ctx.addIssue({ code: 'custom', message: `signal "${id}" reads itself`, path });
+      } else if (!ids.includes(id)) {
+        ctx.addIssue({ code: 'custom', message: `unknown signal "${id}"`, path });
       }
+    }
+  });
+  for (const ring of cyclesOf(s.signals)) {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        'signals read each other in a cycle (' +
+        [...ring, ring[0]!].map((id) => `"${id}"`).join(' -> ') +
+        '), so none of them has a value; break the cycle',
+      path: ['signals', s.signals.findIndex((x) => isDerived(x) && x.id === ring[0]), 'of'],
     });
-    // Derived signals: every id they read exists, is not their own, and they form no cycle.
-    s.signals.forEach((x, i) => {
-      for (const id of new Set(inputsOf(x))) {
-        const path = ['signals', i, 'of'];
-        if (id === x.id) {
-          ctx.addIssue({ code: 'custom', message: `signal "${id}" reads itself`, path });
-        } else if (!ids.includes(id)) {
-          ctx.addIssue({ code: 'custom', message: `unknown signal "${id}"`, path });
-        }
-      }
-    });
-    for (const ring of cyclesOf(s.signals)) {
+  }
+  s.allocations.forEach((a, i) => {
+    const last = i === s.allocations.length - 1;
+    if (last && a.when) {
       ctx.addIssue({
         code: 'custom',
-        message:
-          'signals read each other in a cycle (' +
-          [...ring, ring[0]!].map((id) => `"${id}"`).join(' -> ') +
-          '), so none of them has a value; break the cycle',
-        path: ['signals', s.signals.findIndex((x) => isDerived(x) && x.id === ring[0]), 'of'],
+        message: 'the last allocation is the unconditional fallback (no `when`)',
+        path: ['allocations', i, 'when'],
       });
     }
-    s.allocations.forEach((a, i) => {
-      const last = i === s.allocations.length - 1;
-      if (last && a.when) {
+    if (!last && !a.when) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'only the last allocation may have no `when`',
+        path: ['allocations', i],
+      });
+    }
+    for (const id of [...(a.when?.all ?? []), ...(a.when?.any ?? []), ...(a.when?.none ?? [])]) {
+      if (!ids.includes(id)) {
         ctx.addIssue({
           code: 'custom',
-          message: 'the last allocation is the unconditional fallback (no `when`)',
+          message: `unknown signal "${id}"`,
           path: ['allocations', i, 'when'],
         });
       }
-      if (!last && !a.when) {
-        ctx.addIssue({
-          code: 'custom',
-          message: 'only the last allocation may have no `when`',
-          path: ['allocations', i],
-        });
-      }
-      for (const id of [...(a.when?.all ?? []), ...(a.when?.any ?? []), ...(a.when?.none ?? [])]) {
-        if (!ids.includes(id)) {
-          ctx.addIssue({
-            code: 'custom',
-            message: `unknown signal "${id}"`,
-            path: ['allocations', i, 'when'],
-          });
-        }
-      }
-    });
+    }
   });
+}
+
+/** A strategy as written (files, drafts, registration): costs within the limits. */
+export const Strategy = StrategyObject.superRefine(refineStrategy);
+/**
+ * A registered version's strategy as stored (forward.ts `parseVersion`, integrity, the version
+ * list): the same rules except the cost limits, which came after versions could be registered.
+ */
+export const StoredStrategy = StrategyObject.extend({ costs: storedCosts }).superRefine(
+  refineStrategy,
+);
 
 export type IndicatorOperand = z.infer<typeof IndicatorOperand>;
 export type Operand = z.infer<typeof Operand>;

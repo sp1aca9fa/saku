@@ -1,4 +1,4 @@
-import { Strategy } from '@saku/core';
+import { StoredStrategy } from '@saku/core';
 
 /**
  * For `pnpm strategy list`: a stored version whose content the current schema no longer parses
@@ -12,7 +12,8 @@ export function refusalNote(version: { canonicalJson: string }): string | undefi
   } catch (e) {
     return `  REFUSED by the current schema: ${e instanceof Error ? e.message : String(e)}`;
   }
-  const parsed = Strategy.safeParse(stored);
+  // As stored versions are read (forward.ts `parseVersion`): limits added later do not apply.
+  const parsed = StoredStrategy.safeParse(stored);
   if (parsed.success) return undefined;
   const issue = parsed.error.issues[0];
   const where = issue?.path.length ? `${issue.path.join('.')}: ` : '';

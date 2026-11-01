@@ -87,18 +87,27 @@ unknown or missing key, or a key given twice, is refused with every reason.
 | `red_recheck_minutes_before_open` | 0 to 600 | Default 60 (above) |
 | `issuer_nav_tolerance` | JSON map | `docs/data-pipeline.md` |
 | `forward_records_from` | date | Set when the A1 gate passes |
-| `tax_regime` | regime key | `pnpm plugins tax-regime <key>` |
-| `broker_costs` | `{"slippageBps":"5","feePct":"0.1","fxSpreadPct":"0.2"}` | Your broker's costs: slippage in basis points (at most 1000), fee and FX spread in percent of the amount traded (each below 100). All three required (write `"0"` for none) |
-| `deposit_rate` | `{"ratePct":"0.2","asOf":"2026-10-01","currency":"<base currency>"}` | The base currency's deposit rate, percent a year (below 1000), the date you read it, and the base currency (set `base_currency` first) |
+| `tax_regime` | regime key | `pnpm plugins tax-regime <key>`; refused while the stored benchmarks name an account type the regime does not define |
+| `broker_costs` | `{"slippageBps":"5","feePct":"0.1","fxSpreadPct":"0.2"}` | Your broker's costs: slippage in basis points (at most 1000), fee and FX spread in percent of the amount traded (each below 100; a strategy's own costs have the same limits). All three required (write `"0"` for none). The FX spread is stored but not applied yet: backtests are in USD until the base-currency layer |
 | `benchmarks` | JSON list | `pnpm plugins benchmarks <file>` (below) |
 
 **Costs.** A strategy's `costs` may leave out any of `slippageBps`, `feePct`, `fxSpreadPct`; each
 left out is the install's `broker_costs` value. When one is left out and `broker_costs` is not set
-(or no longer parses), registration is refused with the reason: a cost is never read as 0.
-Registration writes the effective costs into the registered version, so a later change of
-`broker_costs` never changes a registered version's results; `pnpm strategy check` and
-`register` print the costs used and name those taken from the install. A version registered before
-this setting existed keeps the meaning it was registered with (an omitted cost as 0).
+(or no longer parses), registration is refused with the reason and `pnpm strategy check` exits 1:
+a cost is never read as 0. Registration writes the effective costs into the registered version, so
+a later change of `broker_costs` never changes a registered version's results; `pnpm strategy
+check` and `register` print the costs used and name those taken from the install. A version
+registered before this existed is read as registered: an omitted cost is charged as 0, as when it
+was recorded, and a cost above today's limits still parses (stored versions are never re-validated
+by a limit added later).
+
+**Deposit rate.** The base currency's deposit rate (for `CASH_BASE` and a bank-deposits
+benchmark) is a dated series, not a single value: `pnpm settings deposit-rate add <ratePct>
+<from YYYY-MM-DD> <currency>` adds an entry (percent a year as decimal text, below 1000; the
+base currency, so set `base_currency` first), in force from that date until the next entry.
+Entries are append-only: never edited or removed, each starting after every earlier one and not
+after today's New York date. `pnpm settings deposit-rate list` shows them. A date before the first
+entry has no rate (unknown, never a guess).
 
 **Benchmarks.** A JSON list; each benchmark has exactly `id` (unique; lowercase letters, digits and
 `_`, starting with a letter), `holdings` (`[{ "ticker": "SPY", "weight": 100 }]`: tickers as in a
@@ -107,7 +116,10 @@ the fee of the fund the benchmark models, percent a year) and `account` (an acco
 the install's tax regime: requirements 01 assume index benchmarks in the regime's best
 tax-advantaged account). Start from `templates/benchmarks/example.json` (made-up compositions,
 all in `taxable`), then `pnpm plugins benchmarks <your file>`. A benchmark's name is the text
-`benchmarks.<id>` in `packages/content` when there is one; otherwise its id is shown.
+`benchmarks.<id>` in `packages/content` when there is one (a generic name such as "US stocks");
+otherwise its id is shown. Wherever a benchmark is shown, what it holds is shown next to its name
+(`US stocks (SPY 100%)`). A benchmark whose account type the install's regime does not define is
+not read (and the regime cannot be changed to one that lacks it).
 
 ## 3. First data
 

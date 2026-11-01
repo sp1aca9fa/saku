@@ -526,51 +526,77 @@ export function refBacktest(
   options?: RefBacktestOptions,
 ): RefBacktestResult {
   const execution = s.execution ?? 'next_open';
-  const costRate = (s.costs?.slippageBps ?? 0) / 1e4 + (s.costs?.feePct ?? 0) / 100;
+  // Costs (docs/indicators.md "Costs"): an omitted slippageBps or feePct throws, unless the
+  // caller passes omittedCostsAsZero: true (then 0, the pre-C2 reading).
+  const costOf = (name: 'slippageBps' | 'feePct'): number => {
+    const v = s.costs?.[name];
+    if (v !== undefined) return v;
+    if (options?.omittedCostsAsZero === true) return 0;
+    throw new Error(
+      `reference: costs.${name} is not given (pass omittedCostsAsZero to read it as 0)`,
+    );
+  };
+  const costRate = costOf('slippageBps') / 1e4 + costOf('feePct') / 100;
   // One ticker grammar (./ticker); a ticker outside it throws, never a silent 0 or NaN.
   const parse = (ticker: string) => {
     const t = refParseTicker(ticker);
     if (t === undefined) throw new Error(`reference: malformed ticker ${JSON.stringify(ticker)}`);
     return t;
   };
-  // A session's return (docs/indicators.md "Returns"): from the ticker's last bar on or before the
-  // previous session, every bar dated in between (a gap) is compounded, close to close with its
-  // split and dividend, into the night part or the whole day; then the session's own bar. A
-  // synthetic ticker takes L x that compounded base return; financing, expense and cash accrue
-  // once per session.
-  const ret = (
-    ticker: string,
-    prevDate: string,
-    date: string,
-    part: 'night' | 'day' | 'whole',
-  ): number => {
-    const daily = cashRate(date) / 100 / 252;
-    if (ticker === 'CASH_USD') return part === 'day' ? 0 : daily;
+  // Steps between sessions (docs/indicators.md "Returns"): the covered days are the dates strictly
+  // between two sessions on which any ticker the strategy may hold has a bar, then the session.
+  // Every daily rule applies once per covered day, in date order. `mayHold` is declared below and
+  // read only when a step runs.
+  let stepper: ReturnType<typeof refStepper> | undefined;
+  const steps = () => (stepper ??= refStepper(bars, mayHold));
+  const rate = (day: string) => cashRate(day) / 100 / 252;
+  /**
+   * A holding's return on one covered day. `kind` is 'whole' for a covered day before the session
+   * and the part for the session itself. On a day without its bar a ticker's own return is 0
+   * (its move counts on its next bar); cash, financing and expense still accrue.
+   */
+  const dailyReturn = (ticker: string, day: string, kind: 'night' | 'day' | 'whole'): number => {
+    if (ticker === 'CASH_USD') return kind === 'day' ? 0 : rate(day);
     const { base, L, E } = parse(ticker);
-    const { from, gap, bar: b } = refPartBars(bars[base]!, prevDate, date);
-    const factor = (x: RefBar) => (x.closeIsSplitAdjusted ? 1 : x.splitFactor);
-    let r: number;
-    if (part === 'day') {
-      r = b.close / b.open! - 1;
-      return L * r;
+    const b = steps().barOn(base, day);
+    let r = 0;
+    if (b) {
+      if (kind === 'day') r = b.close / b.open! - 1;
+      else {
+        const prev = steps().prevBar(base, day);
+        if (!prev) throw new Error(`reference: no bar for ${base} before ${day}`);
+        const k = b.closeIsSplitAdjusted ? 1 : b.splitFactor;
+        const end = kind === 'whole' ? b.close : b.open!;
+        r = ((end + b.divCash) * k) / prev.close - 1;
+      }
     }
-    let gross = 1;
-    let last = from.close;
-    for (const g of gap) {
-      gross *= ((g.close + g.divCash) * factor(g)) / last;
-      last = g.close;
-    }
-    const end = part === 'whole' ? b.close : b.open!;
-    gross *= ((end + b.divCash) * factor(b)) / last;
-    r = gross - 1;
-    return L * r - (L - 1) * daily - E / 100 / 252;
+    if (kind === 'day') return L * r;
+    const financing = L === 1 ? 0 : (L - 1) * rate(day);
+    return L * r - financing - E / 100 / 252;
   };
 
   let value: Record<string, number> = {}; // money per holding
   let switches = 0;
   const total = () => Object.values(value).reduce((a, b) => a + b, 0);
   const move = (prevDate: string, date: string, part: 'night' | 'day' | 'whole') => {
-    for (const t of Object.keys(value)) value[t] = value[t]! * (1 + ret(t, prevDate, date, part));
+    const covered = part === 'day' ? [date] : steps().covered(prevDate, date);
+    for (const t of Object.keys(value)) {
+      if (t !== 'CASH_USD') {
+        const base = parse(t).base;
+        // A step starts at the held ticker's bar on the previous session (never credited before).
+        if (part !== 'day' && !steps().barOn(base, prevDate)) {
+          throw new Error(`reference: ${t} is held from ${prevDate} without a bar that day`);
+        }
+        if (!steps().barOn(base, date)) throw new Error(`reference: no bar for ${base} on ${date}`);
+      }
+      for (const day of covered) {
+        const growth = 1 + dailyReturn(t, day, day === date ? part : 'whole');
+        if (!Number.isFinite(growth) || !(growth > 0)) {
+          throw new Error(`reference: growth ${growth} for ${t} on ${day} (equity at or below 0)`);
+        }
+        value[t] = value[t]! * growth;
+      }
+    }
   };
   const rebalance = (holdings: { ticker: string; weight: number }[]) => {
     const before = total();
@@ -695,6 +721,8 @@ export interface RefWholeShares {
 
 export interface RefBacktestOptions {
   wholeShares?: RefWholeShares;
+  /** Read an omitted slippageBps or feePct as 0 (otherwise the backtest throws). */
+  omittedCostsAsZero?: boolean;
 }
 
 export interface RefMoney {
@@ -729,21 +757,50 @@ export interface RefBacktestResult {
 const USD = (amount: number): RefMoney => ({ amount, currency: 'USD' });
 
 /**
- * The bars a session step reads for one ticker: `from`, its last bar on or before the previous
- * session; `gap`, its bars dated after that and before the session, in date order; `bar`, the
- * session's own bar. A missing `from` or session bar throws.
+ * Bar lookup and covered days (docs/indicators.md "Returns"). `covered(prev, date)`: every date
+ * strictly between the two sessions on which any ticker in `mayHold` has a bar, in date order,
+ * then `date`. `barOn` is the ticker's bar on a date; `prevBar` its bar before that one.
  */
-export function refPartBars(
-  list: RefBar[],
-  prevDate: string,
-  date: string,
-): { from: RefBar; gap: RefBar[]; bar: RefBar } {
-  let from: RefBar | undefined;
-  for (const b of list) if (b.date <= prevDate) from = b;
-  const bar = list.find((b) => b.date === date);
-  if (!from || !bar) throw new Error(`reference: no bar to step from ${prevDate} to ${date}`);
-  const gap = list.filter((b) => b.date > from.date && b.date < date);
-  return { from, gap, bar };
+export function refStepper(bars: Record<string, RefBar[]>, mayHold: Set<string>) {
+  const index = new Map<string, Map<string, number>>();
+  const indexOf = (ticker: string) => {
+    let ix = index.get(ticker);
+    if (!ix) {
+      ix = new Map((bars[ticker] ?? []).map((b, i) => [b.date, i]));
+      index.set(ticker, ix);
+    }
+    return ix;
+  };
+  const union = [
+    ...new Set([...mayHold].flatMap((t) => (bars[t] ?? []).map((b) => b.date))),
+  ].sort();
+  /** First position in `union` with a date above `d` (binary search). */
+  const after = (d: string) => {
+    let lo = 0;
+    let hi = union.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (union[mid]! <= d) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  return {
+    barOn(ticker: string, date: string): RefBar | undefined {
+      const i = indexOf(ticker).get(date);
+      return i === undefined ? undefined : bars[ticker]![i];
+    },
+    prevBar(ticker: string, date: string): RefBar | undefined {
+      const i = indexOf(ticker).get(date);
+      return i === undefined || i < 1 ? undefined : bars[ticker]![i - 1];
+    },
+    covered(prevDate: string, date: string): string[] {
+      const out: string[] = [];
+      for (let i = after(prevDate); i < union.length && union[i]! < date; i++) out.push(union[i]!);
+      out.push(date);
+      return out;
+    },
+  };
 }
 
 // Whole-number snaps (docs/indicators.md "Whole shares"), relative |x - k| <= tol x |x|. One
@@ -807,6 +864,7 @@ function refWholeShareBook(
       throw new Error(`reference: whole shares: ${base} has split-adjusted bars`);
     }
   }
+  const steps = refStepper(bars, ctx.mayHold);
   const indexes = new Map<string, Map<string, number>>();
   const barAt = (ticker: string, date: string): RefBar => {
     let ix = indexes.get(ticker);
@@ -846,34 +904,33 @@ function refWholeShareBook(
   return {
     move(prevDate: string, date: string, part: 'night' | 'day' | 'whole') {
       if (!started || part === 'day') return; // interest and events belong to the night / whole day
-      // 1. Interest on the cash at the start of the part; the rate is read only when it is > 0.
-      if (residual > 0) residual = residual * (1 + rateOn(date) / 100 / 252);
       for (const t of Object.keys(shares)) {
-        // 2. Each of the ticker's bars of the part in date order: the gap's, then the session's.
-        const { gap, bar } = refPartBars(bars[t]!, prevDate, date);
-        const sessionEnd = part === 'night' ? bar.open : bar.close;
-        const steps: [RefBar, number | undefined][] = [
-          ...gap.map((g): [RefBar, number] => [g, g.close]),
-          [bar, sessionEnd],
-        ];
-        let n = shares[t]!;
-        for (const [b, endPrice] of steps) {
-          // Split: the product, snapped within 1e-9; else the whole shares are kept and the
-          // fraction is paid as cash at that bar's close (gap) or the part's end price (session).
-          const product = snapWhole(n * b.splitFactor, SPLIT_SNAP);
+        if (!steps.barOn(t, prevDate)) {
+          throw new Error(`reference: ${t} is held from ${prevDate} without a bar that day`);
+        }
+        if (!steps.barOn(t, date)) throw new Error(`reference: no bar for ${t} on ${date}`);
+      }
+      for (const day of steps.covered(prevDate, date)) {
+        // 1. Interest for the day, read only when the cash at the start of the day is above 0.
+        if (residual > 0) residual = residual * (1 + rateOn(day) / 100 / 252);
+        // 2. Each held ticker with a bar that day: split (snapped within 1e-9, else the whole
+        //    shares are kept and the fraction is paid as cash), then the dividend on kept shares.
+        for (const t of Object.keys(shares)) {
+          const b = steps.barOn(t, day);
+          if (!b) continue;
+          const endPrice = day !== date ? b.close : part === 'night' ? b.open : b.close;
+          const product = snapWhole(shares[t]! * b.splitFactor, SPLIT_SNAP);
           const kept = Math.floor(product);
           if (product !== kept) {
             if (endPrice === undefined)
               throw new Error(`reference: whole shares: no open for ${t} on ${date}`);
             residual += (product - kept) * endPrice;
           }
-          // Then the dividend on the whole shares kept after that bar's split.
           residual += kept * b.divCash;
-          n = kept;
+          // A reverse split can leave 0 shares: the holding is then all cash.
+          if (kept === 0) delete shares[t];
+          else shares[t] = kept;
         }
-        // A reverse split can leave 0 shares: the holding is then all cash.
-        if (n === 0) delete shares[t];
-        else shares[t] = n;
       }
     },
 

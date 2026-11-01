@@ -528,9 +528,10 @@ function newVintages<T extends VintageRow>(
 
 /**
  * A publication time as UTC ISO text, so `known_at` values compare correctly as strings. A date
- * without a time is refused: read as midnight it would make a value known hours early.
+ * without a time is refused: read as midnight it would make a value known hours early. Shared
+ * with the plug-in checks (`taxFxProblems`), so a stamp they pass is one storing accepts.
  */
-function instant(text: string, what = 'publishedAt'): string {
+export function publicationInstant(text: string, what = 'publishedAt'): string {
   const ms = Date.parse(text);
   // A time without Z or an offset would be read in the server's own time zone.
   if (!/T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/.test(text) || Number.isNaN(ms)) {
@@ -538,6 +539,8 @@ function instant(text: string, what = 'publishedAt'): string {
   }
   return new Date(ms).toISOString();
 }
+
+const instant = publicationInstant;
 
 /**
  * The vintage a row belongs to: its date and publication moment, so the same moment spelled
@@ -758,50 +761,12 @@ export async function storeFx(
   const fetchedAt = instant(input.fetchedAt, 'fetchedAt');
   const rows: (typeof fxRates.$inferInsert)[] = [];
   const gone: (typeof fxWithdrawals.$inferInsert)[] = [];
-  const pairs = [...new Set(input.rates.map((r) => r.pair))];
-  for (const pair of pairs) {
+  for (const pair of [...new Set(input.rates.map((r) => r.pair))]) {
     const rates = input.rates.filter((r) => r.pair === pair);
-    const dates = rates.map((r) => r.date).sort();
-    const range = [dates[0]!, dates.at(-1)!] as const;
-    const common = { pair, source: input.source, kind: input.kind };
-    const stored = [
-      ...(
-        await db
-          .select()
-          .from(fxRates)
-          .where(
-            and(
-              eq(fxRates.pair, pair),
-              eq(fxRates.source, input.source),
-              eq(fxRates.kind, input.kind),
-              between(fxRates.date, ...range),
-            ),
-          )
-      ).map(({ rate, ...r }) => ({ ...r, value: rate as number | null })),
-      ...(
-        await db
-          .select()
-          .from(fxWithdrawals)
-          .where(
-            and(
-              eq(fxWithdrawals.pair, pair),
-              eq(fxWithdrawals.source, input.source),
-              eq(fxWithdrawals.kind, input.kind),
-              between(fxWithdrawals.date, ...range),
-            ),
-          )
-      ).map((r) => ({ ...r, value: null })),
-    ];
+    const stored = await storedFxVintages(db, pair, input.source, input.kind, dateRange(rates));
     const { values, withdrawals, result } = newVintages(
       stored,
-      rates.map((r) => ({
-        ...common,
-        date: r.date,
-        value: vintageValue(r, r.rate, `${input.source} ${pair}`),
-        publishedAt: r.publishedAt ?? null,
-        fetchedAt,
-        knownAt: r.publishedAt ? instant(r.publishedAt) : fetchedAt,
-      })),
+      incomingFx(rates, { pair, source: input.source, kind: input.kind }, fetchedAt),
       pair,
     );
     rows.push(...values.map(({ value, ...r }) => ({ ...r, rate: value! })));
@@ -813,14 +778,220 @@ export async function storeFx(
   // Written only after every pair passed, in one transaction: a refused pair refuses the whole
   // response (nothing stored).
   await db.transaction(async (tx) => {
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      await tx.insert(fxRates).values(rows.slice(i, i + CHUNK));
-    }
-    for (let i = 0; i < gone.length; i += CHUNK) {
-      await tx.insert(fxWithdrawals).values(gone.slice(i, i + CHUNK));
-    }
+    await insertFx(tx, rows, gone);
   });
   return out;
+}
+
+/** The first and last date of a list of rates (not empty). */
+function dateRange(rates: readonly { date: string }[]): readonly [string, string] {
+  const dates = rates.map((r) => r.date).sort();
+  return [dates[0]!, dates.at(-1)!];
+}
+
+/** A stored or incoming FX vintage row of one pair, source and kind (`value` null: withdrawn). */
+type FxVintageRow = VintageRow & { pair: string; source: string; kind: FxKind };
+
+/** The stored vintages (values and withdrawals) of a pair, source and kind within `range`. */
+async function storedFxVintages(
+  q: Pick<Db, 'select'>,
+  pair: string,
+  source: string,
+  kind: FxKind,
+  range: readonly [string, string],
+): Promise<FxVintageRow[]> {
+  return [
+    ...(
+      await q
+        .select()
+        .from(fxRates)
+        .where(
+          and(
+            eq(fxRates.pair, pair),
+            eq(fxRates.source, source),
+            eq(fxRates.kind, kind),
+            between(fxRates.date, ...range),
+          ),
+        )
+    ).map(({ rate, ...r }) => ({ ...r, value: rate as number | null })),
+    ...(
+      await q
+        .select()
+        .from(fxWithdrawals)
+        .where(
+          and(
+            eq(fxWithdrawals.pair, pair),
+            eq(fxWithdrawals.source, source),
+            eq(fxWithdrawals.kind, kind),
+            between(fxWithdrawals.date, ...range),
+          ),
+        )
+    ).map((r) => ({ ...r, value: null })),
+  ];
+}
+
+/** Incoming rates as vintage rows (`vintageValue` refuses a value that is neither). */
+function incomingFx(
+  rates: readonly FxRate[],
+  common: { pair: string; source: string; kind: FxKind },
+  fetchedAt: string,
+): FxVintageRow[] {
+  return rates.map((r) => ({
+    ...common,
+    date: r.date,
+    value: vintageValue(r, r.rate, `${common.source} ${common.pair}`),
+    publishedAt: r.publishedAt ?? null,
+    fetchedAt,
+    knownAt: r.publishedAt ? instant(r.publishedAt) : fetchedAt,
+  }));
+}
+
+async function insertFx(
+  tx: Pick<Db, 'insert'>,
+  rows: (typeof fxRates.$inferInsert)[],
+  gone: (typeof fxWithdrawals.$inferInsert)[],
+): Promise<void> {
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    await tx.insert(fxRates).values(rows.slice(i, i + CHUNK));
+  }
+  for (let i = 0; i < gone.length; i += CHUNK) {
+    await tx.insert(fxWithdrawals).values(gone.slice(i, i + CHUNK));
+  }
+}
+
+/**
+ * The tax rate kinds from the lowest to the highest rate on one date (requirements 07 "FX for
+ * tax"; `TaxFxRate` in the plug-in SDK): the customer sells the pair's base currency at
+ * `tax_sell` (the bank's buying rate, e.g. TTB), and buys it at `tax_buy` (the bank's selling
+ * rate, e.g. TTS); `tax_mid` (e.g. TTM) lies between. Equal rates are in order.
+ */
+export const TAX_FX_ORDER = ['tax_sell', 'tax_mid', 'tax_buy'] as const;
+export type TaxFxStoredKind = (typeof TAX_FX_ORDER)[number];
+
+/** A vintage of a tax rate as `taxFxOrderProblems` reads it (`value` null: withdrawn). */
+export interface TaxFxVintage {
+  date: string;
+  publishedAt: string | null;
+  knownAt: string;
+  fetchedAt: string;
+  value: number | null;
+}
+
+/**
+ * The order rule on what a point-in-time read returns at `at` (requirements 04 `asOf`; 07 "FX
+ * for tax"): per date in `dates`, the latest vintage of each kind known at `at` (`PointInTime`,
+ * the reader the tax engine uses, on exactly that date, never an earlier one), and then
+ * `tax_buy >= tax_mid >= tax_sell` among the kinds that have a value. One problem line per pair
+ * of kinds out of order. A kind with no value on the date (never published, or withdrawn) is
+ * not compared: it stays unknown. Pure: the plug-in checks use it on a response alone,
+ * `storeTaxFx` on the response merged with the stored rows.
+ */
+export function taxFxOrderProblems(
+  rows: Partial<Record<TaxFxStoredKind, readonly TaxFxVintage[]>>,
+  dates: Iterable<string>,
+  at: string,
+): string[] {
+  const read = new Map<TaxFxStoredKind, PointInTime>();
+  for (const kind of TAX_FX_ORDER) {
+    const list = rows[kind] ?? [];
+    read.set(
+      kind,
+      new PointInTime(
+        vintages(
+          list.filter((r): r is TaxFxVintage & { value: number } => r.value !== null),
+          list.filter((r) => r.value === null),
+        ),
+      ),
+    );
+  }
+  const problems: string[] = [];
+  for (const date of [...new Set(dates)].sort()) {
+    const value = new Map<TaxFxStoredKind, number>();
+    for (const kind of TAX_FX_ORDER) {
+      const v = read.get(kind)!.asOf(date, at);
+      if (v !== undefined && v.date === date) value.set(kind, v.value);
+    }
+    for (const [i, lower] of TAX_FX_ORDER.entries()) {
+      for (const higher of TAX_FX_ORDER.slice(i + 1)) {
+        const low = value.get(lower);
+        const high = value.get(higher);
+        if (low !== undefined && high !== undefined && high < low) {
+          problems.push(`${date}: ${higher} ${high} is below ${lower} ${low}`);
+        }
+      }
+    }
+  }
+  return problems;
+}
+
+/**
+ * Stores one tax FX response (requirements 07 "FX for tax", 15 `TaxFxSource`): every kind of
+ * every pair as FX vintages under its own kind (`newVintages`, as `storeFx`), in one
+ * transaction, so a failure in any kind stores nothing. Before writing, the order rule
+ * (`taxFxOrderProblems`) runs per pair on the response merged with the stored rows of all three
+ * kinds, read at the fetch (the latest of the fetch time and the new rows' known times, so every
+ * new row counts): a partial revision (only the TTS republished, now below the stored TTM) is
+ * refused like an out-of-order response. Any problem refuses the whole response. Returns what
+ * was stored per kind; items are `<pair> <kind>`.
+ */
+export async function storeTaxFx(
+  db: Db,
+  input: {
+    source: string;
+    rates: readonly (FxRate & { kind: TaxFxStoredKind })[];
+    fetchedAt: string;
+  },
+): Promise<Record<TaxFxStoredKind, StoredValues>> {
+  const out = Object.fromEntries(
+    TAX_FX_ORDER.map((k) => [k, { inserted: 0, revised: [], withdrawn: [] } as StoredValues]),
+  ) as Record<TaxFxStoredKind, StoredValues>;
+  if (input.rates.length === 0) return out;
+  const fetchedAt = instant(input.fetchedAt, 'fetchedAt');
+  return db.transaction(async (tx) => {
+    const rows: (typeof fxRates.$inferInsert)[] = [];
+    const gone: (typeof fxWithdrawals.$inferInsert)[] = [];
+    const problems: string[] = [];
+    for (const pair of [...new Set(input.rates.map((r) => r.pair))]) {
+      const rates = input.rates.filter((r) => r.pair === pair);
+      const range = dateRange(rates);
+      const merged: Partial<Record<TaxFxStoredKind, FxVintageRow[]>> = {};
+      let at = fetchedAt;
+      for (const kind of TAX_FX_ORDER) {
+        const stored = await storedFxVintages(tx, pair, input.source, kind, range);
+        const { values, withdrawals, result } = newVintages(
+          stored,
+          incomingFx(
+            rates.filter((r) => r.kind === kind),
+            { pair, source: input.source, kind },
+            fetchedAt,
+          ),
+          `${pair} ${kind}`,
+        );
+        rows.push(...values.map(({ value, ...r }) => ({ ...r, rate: value! })));
+        gone.push(...withdrawals.map(({ value: _, ...r }) => r));
+        out[kind].inserted += result.new;
+        out[kind].revised.push(...result.revised);
+        out[kind].withdrawn.push(...result.withdrawn);
+        merged[kind] = [...stored, ...values, ...withdrawals];
+        for (const r of [...values, ...withdrawals]) if (r.knownAt > at) at = r.knownAt;
+      }
+      problems.push(
+        ...taxFxOrderProblems(
+          merged,
+          rates.map((r) => r.date),
+          at,
+        ).map((p) => `${pair} ${p}`),
+      );
+    }
+    if (problems.length > 0) {
+      const more = problems.length > 5 ? `; and ${problems.length - 5} more` : '';
+      throw new Error(
+        `tax rates out of order as they would be read: ${problems.slice(0, 5).join('; ')}${more}`,
+      );
+    }
+    await insertFx(tx, rows, gone);
+    return out;
+  });
 }
 
 const ISSUER_FIELDS = ['nav', 'distribution', 'split'] as const;

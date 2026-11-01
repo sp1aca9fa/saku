@@ -3,21 +3,27 @@
 // with. Core checks every response before anything is stored (layer A for this data path); a
 // response with any problem is refused whole, so no partial or mislabeled set is ever stored.
 //
-// Structural checks (each a problem line):
+// Checks on the response (`taxFxProblems`, each a problem line):
 // - every rate names the requested pair, a real calendar date (`YYYY-MM-DD`), a tax kind
 //   (`tax_mid`, `tax_buy`, `tax_sell`) and a rate name the install's regime declares that maps
 //   onto that same kind (`TaxRegime.fx.rates`);
+// - a publication time, when given, is an instant with a time of day and a zone (the rule storing
+//   applies, `publicationInstant`): a date alone or a zone-less time is refused;
 // - a value is a finite number above 0 (never 0 as "unknown"); a withdrawal carries no value;
 // - one vintage (pair, kind, date, publication time) is stated once (two different statements
 //   would make which one holds a guess);
-// - on one date and publication time, every `tax_buy` >= every `tax_mid` >= every `tax_sell`, and
-//   `tax_buy` >= `tax_sell` (the customer buys the pair's base currency at the higher rate; see
-//   `TaxFxRate`). Equal rates pass.
+// - the order rule (`taxFxOrderProblems` in @saku/db): per date, on the latest vintage of each
+//   kind as a point-in-time read would return it once the response is stored,
+//   `tax_buy >= tax_mid >= tax_sell` (equal passes; the customer buys the pair's base currency
+//   at the higher rate, see `TaxFxRate`). Here on the response alone; storing (`storeTaxFx`)
+//   runs it again on the response merged with the stored rows, so a partial revision that
+//   breaks the order against a stored rate is refused too.
 //
 // Not built (an owner decision, docs/data-pipeline.md): a cross-check of tax rates against the
 // valuation rates within a tolerance. A date with no rate is not a structural problem here:
 // a missing rate stays unknown and the tax engine says so, never filling it from another date.
 import { isTradingDate } from '@saku/core';
+import { type TaxFxVintage, publicationInstant, taxFxOrderProblems } from '@saku/db';
 import { TAX_FX_KINDS } from './tax-regime';
 import type { TaxFx, TaxFxKind, TaxFxRate, TaxRegime } from './types';
 
@@ -29,31 +35,24 @@ export function taxFxPairs(regime: Pick<TaxRegime, 'info'>): string[] {
   return regime.info.currency === 'USD' ? [] : [`USD${regime.info.currency}`];
 }
 
-/** The order on one date: higher rank, higher or equal rate. */
-const RANK: Record<TaxFxKind, number> = { tax_sell: 0, tax_mid: 1, tax_buy: 2 };
-
-/** A publication time as one key per instant (any spelling of the same instant); none: ''. */
-function publishedKey(value: unknown): string {
-  if (value === undefined || value === null) return '';
-  if (typeof value !== 'string') return `?${String(value)}`;
-  const t = Date.parse(value);
-  return Number.isFinite(t) ? new Date(t).toISOString() : `?${value}`;
-}
-
 /**
  * The problems of one tax FX response for `pair` under the regime's declared rate names (`fx`);
  * empty when it may be stored. Reads the response as unknown data (a plug-in's types are not
- * trusted at run time).
+ * trusted at run time). `fetchedAt`: when the response was fetched (ISO; default now), the known
+ * time of a rate without a publication time.
  */
 export function taxFxProblems(
   rates: readonly unknown[] | unknown,
-  o: { pair: string; fx: Pick<TaxFx, 'rates'> },
+  o: { pair: string; fx: Pick<TaxFx, 'rates'>; fetchedAt?: string },
 ): string[] {
   if (!Array.isArray(rates)) return ['the response is not a list of rates'];
+  const fetchedAt = new Date(o.fetchedAt ?? Date.now()).toISOString();
   const problems: string[] = [];
   const vintages = new Map<string, string>();
-  /** Per date and publication time, the values per kind. */
-  const groups = new Map<string, { date: string; byKind: Map<TaxFxKind, number[]> }>();
+  /** Per kind, the response's vintages as a point-in-time read sees them. */
+  const byKind: Partial<Record<TaxFxKind, TaxFxVintage[]>> = {};
+  const dates: string[] = [];
+  let readAt = fetchedAt;
   rates.forEach((raw: unknown, i) => {
     const at = `rate ${i}`;
     if (raw === null || typeof raw !== 'object') {
@@ -90,9 +89,15 @@ export function taxFxProblems(
       );
       ok = false;
     }
-    if (r.publishedAt !== undefined && typeof r.publishedAt !== 'string') {
-      problems.push(`${where}: publishedAt is not text`);
-      ok = false;
+    let published: string | null = null;
+    if (r.publishedAt !== undefined) {
+      try {
+        if (typeof r.publishedAt !== 'string') throw new Error('publishedAt is not text');
+        published = publicationInstant(r.publishedAt);
+      } catch (e) {
+        problems.push(`${where}: ${e instanceof Error ? e.message : String(e)}`);
+        ok = false;
+      }
     }
     const withdrawn = r.withdrawn === true;
     if (r.withdrawn !== undefined && !withdrawn) {
@@ -108,33 +113,26 @@ export function taxFxProblems(
       ok = false;
     }
     if (!ok) return;
-    const published = publishedKey(r.publishedAt);
     const statement = withdrawn ? 'withdrawn' : String(r.rate);
-    const vintage = `${String(r.kind)}|${String(r.date)}|${published}`;
+    const vintage = `${String(r.kind)}|${String(r.date)}|${published ?? ''}`;
     const seen = vintages.get(vintage);
     if (seen !== undefined && seen !== statement) {
       problems.push(`${where}: stated twice for one publication time (${seen} and ${statement})`);
       return;
     }
     vintages.set(vintage, statement);
-    if (withdrawn) return;
-    const key = `${String(r.date)}|${published}`;
-    const group = groups.get(key) ?? { date: r.date as string, byKind: new Map() };
-    groups.set(key, group);
-    const kind = r.kind as TaxFxKind;
-    group.byKind.set(kind, [...(group.byKind.get(kind) ?? []), r.rate as number]);
+    const knownAt = published ?? fetchedAt;
+    if (knownAt > readAt) readAt = knownAt;
+    dates.push(r.date as string);
+    (byKind[r.kind as TaxFxKind] ??= []).push({
+      date: r.date as string,
+      publishedAt: (r.publishedAt as string | undefined) ?? null,
+      knownAt,
+      fetchedAt,
+      value: withdrawn ? null : (r.rate as number),
+    });
   });
-  for (const { date, byKind } of groups.values()) {
-    const kinds = [...byKind.keys()].sort((a, b) => RANK[a] - RANK[b]);
-    for (const [i, lower] of kinds.entries()) {
-      for (const higher of kinds.slice(i + 1)) {
-        const low = Math.max(...byKind.get(lower)!);
-        const high = Math.min(...byKind.get(higher)!);
-        if (high < low) {
-          problems.push(`${date}: ${higher} ${high} is below ${lower} ${low}`);
-        }
-      }
-    }
-  }
-  return problems;
+  // The order is read only on a response whose rates all passed (a refused one is refused anyway).
+  if (problems.length > 0) return problems;
+  return taxFxOrderProblems(byKind, dates, readAt);
 }

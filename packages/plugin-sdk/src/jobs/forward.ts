@@ -10,6 +10,7 @@ import {
   type StandInPrice,
   type StrategyDay,
   Strategy,
+  StoredStrategy,
   type TickerHealth,
   type TradingDate,
   backtest,
@@ -106,7 +107,9 @@ export function parseVersion(version: {
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   }
-  const parsed = Strategy.safeParse(stored);
+  // The stored-version schema: a limit added after registration (the cost limits, C2) never
+  // refuses a version registered before it.
+  const parsed = StoredStrategy.safeParse(stored);
   if (parsed.success) return { strategy: parsed.data };
   // One line per problem, where it is: readable in the log and the admins' job-failure alert.
   return {
@@ -1107,9 +1110,11 @@ const asDay = (e: ForwardEntry): StrategyDay => ({
 
 /**
  * The record's own equity: its recorded holdings traded as the strategy executes, from 1.
- * `prior` is the whole record before `today`, in date order.
+ * `prior` is the whole record before `today`, in date order. A cost the stored version omits (a
+ * version registered before C2 froze the effective costs into it) is charged as 0 here, as when
+ * it was recorded: the backtest reads an omitted cost as 0 (exported for that test).
  */
-function forwardEquity(
+export function forwardEquity(
   strategy: Strategy,
   prior: StrategyDay[],
   bars: Record<string, RawBar[]>,
@@ -1118,7 +1123,8 @@ function forwardEquity(
 ): number | null {
   const days = [...prior, today];
   try {
-    return backtest({ strategy, days, bars, cashRate }).points.at(-1)!.equity;
+    return backtest({ strategy, days, bars, cashRate, omittedCostsAsZero: true }).points.at(-1)!
+      .equity;
   } catch {
     // A holding without a bar that day: the equity is unknown, not guessed.
     return null;

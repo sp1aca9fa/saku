@@ -29,7 +29,7 @@ describe('backtest', () => {
     const unknown = () => undefined;
     const x = { X: [bar(D[0]!, 100), bar(D[1]!, 110), bar(D[2]!, 99)] };
     const held = backtest({
-      strategy: { execution: 'same_close', costs: {} },
+      strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
       days: decide(['X', 'X', 'X']),
       bars: x,
       cashRate: unknown,
@@ -37,7 +37,7 @@ describe('backtest', () => {
     expect(held.points.at(-1)!.equity).toBeCloseTo(0.99, 12);
     expect(() =>
       backtest({
-        strategy: { execution: 'same_close', costs: {} },
+        strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
         days: decide(['X', 'CASH_USD', 'CASH_USD']),
         bars: x,
         cashRate: unknown,
@@ -45,7 +45,7 @@ describe('backtest', () => {
     ).toThrow(/No cash rate/);
     expect(() =>
       backtest({
-        strategy: { execution: 'same_close', costs: {} },
+        strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
         days: decide(['X?L=3', 'X?L=3', 'X?L=3']),
         bars: x,
         cashRate: unknown,
@@ -55,7 +55,7 @@ describe('backtest', () => {
 
   it('same close: holds from the deciding close (testfol timing)', () => {
     const r = backtest({
-      strategy: { execution: 'same_close', costs: {} },
+      strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
       days: decide(['X', 'X', 'X']),
       bars: { X: [bar(D[0]!, 100), bar(D[1]!, 110), bar(D[2]!, 99)] },
       cashRate: none,
@@ -68,7 +68,7 @@ describe('backtest', () => {
 
   it('next open: trades at the next open; cash earns from the following night', () => {
     const r = backtest({
-      strategy: { execution: 'next_open', costs: {} },
+      strategy: { execution: 'next_open', costs: { slippageBps: 0, feePct: 0 } },
       days: decide(['X', 'CASH_USD', 'CASH_USD', 'CASH_USD']),
       bars: {
         X: [
@@ -91,7 +91,7 @@ describe('backtest', () => {
 
   it('next close: the deciding day and the next one under the old holdings', () => {
     const r = backtest({
-      strategy: { execution: 'next_close', costs: {} },
+      strategy: { execution: 'next_close', costs: { slippageBps: 0, feePct: 0 } },
       days: decide(['X', 'Y', 'Y']),
       bars: {
         X: [bar(D[0]!, 100), bar(D[1]!, 110), bar(D[2]!, 121)],
@@ -119,7 +119,7 @@ describe('backtest', () => {
   it('synthetic leverage: L x return minus financing and expense, per day', () => {
     expect(parseTicker('SPY?L=3&E=0.9')).toEqual({ base: 'SPY', leverage: 3, expensePct: 0.9 });
     const r = backtest({
-      strategy: { execution: 'same_close', costs: {} },
+      strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
       days: decide(['SPY?L=3&E=0.9', 'SPY?L=3&E=0.9']),
       bars: { SPY: [bar(D[0]!, 100), bar(D[1]!, 101)] },
       cashRate: () => 2.52,
@@ -129,7 +129,7 @@ describe('backtest', () => {
 
   it('gives the ex-date dividend to the overnight holder', () => {
     const r = backtest({
-      strategy: { execution: 'next_open', costs: {} },
+      strategy: { execution: 'next_open', costs: { slippageBps: 0, feePct: 0 } },
       days: decide(['X', 'CASH_USD']).concat(decide(['CASH_USD', 'CASH_USD', 'CASH_USD']).slice(2)),
       bars: {
         X: [
@@ -157,6 +157,7 @@ describe('backtest', () => {
       name: 'Gap',
       account: 'taxable',
       execution: 'next_close',
+      costs: { slippageBps: 0, feePct: 0 },
       safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
       evaluation: { frequency: 'daily' },
       signals: [
@@ -200,7 +201,7 @@ describe('backtest', () => {
     // Without a safe state to take, the gap is not guessed.
     expect(() =>
       backtest({
-        strategy: { execution: 'next_close', costs: {} },
+        strategy: { execution: 'next_close', costs: { slippageBps: 0, feePct: 0 } },
         days,
         bars: { X: x },
         cashRate: none,
@@ -222,6 +223,7 @@ describe('backtest', () => {
         name: 'Signal elsewhere',
         account: 'taxable',
         execution: 'next_close',
+        costs: { slippageBps: 0, feePct: 0 },
         safeState: { holdings: [{ ticker: safe, weight: 100 }] },
         evaluation: { frequency: 'daily' },
         signals: [
@@ -283,6 +285,70 @@ describe('backtest', () => {
   });
 });
 
+// docs/indicators.md "Equity curves", "Costs" (C2): an omitted cost is unknown, never a silent 0,
+// unless the caller says so (stored pre-C2 versions, testfol parity cases).
+describe('omitted costs', () => {
+  const input = {
+    days: decide(['X', 'Y']),
+    bars: { X: [bar(D[0]!, 1), bar(D[1]!, 1)], Y: [bar(D[0]!, 1), bar(D[1]!, 2)] },
+    cashRate: none,
+  };
+  const execution = 'same_close' as const;
+
+  it('an undefined slippage or fee fails, naming the field', () => {
+    expect(() => backtest({ strategy: { execution, costs: {} }, ...input })).toThrow(
+      "costs not resolved: slippageBps; resolve with the install's broker_costs first",
+    );
+    expect(() =>
+      backtest({ strategy: { execution, costs: { slippageBps: 10 } }, ...input }),
+    ).toThrow('costs not resolved: feePct');
+    expect(() => backtest({ strategy: { execution, costs: { feePct: 0.1 } }, ...input })).toThrow(
+      'costs not resolved: slippageBps',
+    );
+    // Whole shares too, and an explicit false is no flag.
+    expect(() =>
+      backtest({
+        strategy: { execution, costs: { slippageBps: 10 } },
+        ...input,
+        omittedCostsAsZero: false,
+        wholeShares: { initialAmount: '1000', currency: 'USD' },
+      }),
+    ).toThrow('costs not resolved: feePct');
+  });
+
+  it('with the flag an omitted cost is 0: the result of explicit zeros, to the bit', () => {
+    const zeros = backtest({
+      strategy: { execution, costs: { slippageBps: 0, feePct: 0 } },
+      ...input,
+    });
+    expect(
+      backtest({ strategy: { execution, costs: {} }, ...input, omittedCostsAsZero: true }),
+    ).toEqual(zeros);
+    const fee = backtest({
+      strategy: { execution, costs: { slippageBps: 0, feePct: 0.1 } },
+      ...input,
+    });
+    expect(
+      backtest({
+        strategy: { execution, costs: { feePct: 0.1 } },
+        ...input,
+        omittedCostsAsZero: true,
+      }),
+    ).toEqual(fee);
+  });
+
+  it('resolved costs give the same result with or without the flag', () => {
+    const costs = { slippageBps: 10, feePct: 0.1 };
+    const plain = backtest({ strategy: { execution, costs }, ...input });
+    expect(
+      backtest({ strategy: { execution, costs }, ...input, omittedCostsAsZero: true }),
+    ).toEqual(plain);
+    // Entry turnover 1, switch 2, at 0.2%; Y is bought at D1's close, after its rise.
+    expect(plain.costs).toBeCloseTo(0.002 + 0.004, 12);
+    expect(plain.points[1]!.equity).toBeCloseTo(0.998 * (1 - 0.004), 12);
+  });
+});
+
 // docs/indicators.md "Equity curves", "Returns": a held ticker's bars dated between two sessions
 // (another ticker it may hold has no bar there) are compounded into the next session, never dropped.
 describe('bars between sessions', () => {
@@ -300,7 +366,7 @@ describe('bars between sessions', () => {
 
   it('a 2:1 split on a date that is no session counts (Y has no bar there)', () => {
     const r = backtest({
-      strategy: { execution: 'same_close', costs: {}, ...yAllocation },
+      strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 }, ...yAllocation },
       days: [at('2026-01-05', x100), at('2026-01-07', x100)],
       bars: {
         X: [
@@ -319,7 +385,7 @@ describe('bars between sessions', () => {
 
   it('next open: the gap bars (split, dividend) go into the night part, before the trade', () => {
     const r = backtest({
-      strategy: { execution: 'next_open', costs: {}, ...yAllocation },
+      strategy: { execution: 'next_open', costs: { slippageBps: 0, feePct: 0 }, ...yAllocation },
       days: [
         at('2026-01-05', x100),
         at('2026-01-06', [{ ticker: 'Y', weight: 100 }]),
@@ -348,7 +414,7 @@ describe('bars between sessions', () => {
 
   it('without a gap the return is the same as before, to the bit', () => {
     const r = backtest({
-      strategy: { execution: 'same_close', costs: {} },
+      strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
       days: [at('2026-01-05', x100), at('2026-01-06', x100)],
       bars: { X: [bar('2026-01-05', 3), bar('2026-01-06', 7, { divCash: 0.1, splitFactor: 3 })] },
       cashRate: none,
@@ -356,10 +422,131 @@ describe('bars between sessions', () => {
     expect(r.points[1]!.equity).toBe(1 + (((7 + 0.1) * 3) / 3 - 1));
   });
 
+  const zero = { slippageBps: 0, feePct: 0 };
+
+  it('a ticker held over a night without a bar on the previous session fails (no pre-entry move)', () => {
+    // A is bought at 01-06's close, a session (evaluated) where A has no bar: its 100 -> 150
+    // since 01-05 happened before the entry and is unknown from 01-06, never credited.
+    const cash = [{ ticker: 'CASH_USD', weight: 100 }];
+    const a = [{ ticker: 'A', weight: 100 }];
+    expect(() =>
+      backtest({
+        strategy: { execution: 'same_close', costs: zero },
+        days: [at('2026-01-05', cash), at('2026-01-06', a), at('2026-01-07', a)],
+        bars: { A: [bar('2026-01-05', 100), bar('2026-01-07', 150)] },
+        cashRate: none,
+      }),
+    ).toThrow(/A has no bar on 2026-01-06, the session before 2026-01-07/);
+  });
+
+  it('synthetic leverage over a 3-day gap resets daily (requirements 05), each day its own rate', () => {
+    // X falls 15% a day; Y (in an allocation) has no bar on 01-06 and 01-07: one step covers
+    // 01-06, 01-07 and 01-08. L x the compounded fall would be 3 x (0.85^3 - 1) = -115.7%.
+    const dates = ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08'];
+    const xs = dates.map((d, i) => bar(d, 100 * 0.85 ** i));
+    const lev = [{ ticker: 'X?L=3', weight: 100 }];
+    const rates: Record<string, number> = { '2026-01-06': 2.52, '2026-01-07': 5.04 };
+    const run = (y: RawBar[], cashRate: (d: string) => number) =>
+      backtest({
+        strategy: { execution: 'same_close', costs: zero, ...yAllocation },
+        days: [at('2026-01-05', lev), at('2026-01-08', lev)],
+        bars: { X: xs, Y: y },
+        cashRate,
+      });
+    const gap = run([bar(dates[0]!, 10), bar(dates[3]!, 10)], (d) => rates[d] ?? 0);
+    expect(gap.points.map((p) => p.date)).toEqual([dates[0], dates[3]]);
+    const day = (r: number) => 1 + 3 * (0.85 - 1) - (2 * r) / 100 / 252;
+    expect(gap.points[1]!.equity).toBeCloseTo(day(2.52) * day(5.04) * day(0), 14);
+    expect(gap.points[1]!.equity).toBeGreaterThan(0);
+    // The same as with every day a session (no gap).
+    const daily = backtest({
+      strategy: { execution: 'same_close', costs: zero, ...yAllocation },
+      days: dates.map((d) => at(d, lev)),
+      bars: { X: xs, Y: dates.map((d) => bar(d, 10)) },
+      cashRate: (d) => rates[d] ?? 0,
+    });
+    expect(gap.points[1]!.equity).toBeCloseTo(daily.points[3]!.equity, 14);
+  });
+
+  it('cash over a gap earns each covered day (a date some holdable ticker has a bar)', () => {
+    // Covered: 01-06, 01-07 (X, which it may hold, has bars) and the session 01-08; 01-09 and
+    // 01-10 (no bar for anything it may hold) are not covered. Rates differ per day.
+    const cash = [{ ticker: 'CASH_USD', weight: 100 }];
+    const xAndY = {
+      allocations: [
+        { name: 'X', holdings: [{ ticker: 'X', weight: 100 }] },
+        { name: 'Y', holdings: [{ ticker: 'Y', weight: 100 }] },
+      ],
+    } as unknown as Partial<Pick<Strategy, 'allocations'>>;
+    const rates: Record<string, number> = {
+      '2026-01-06': 2.52,
+      '2026-01-07': 5.04,
+      '2026-01-08': 7.56,
+      '2026-01-11': 2.52,
+    };
+    const r = backtest({
+      strategy: { execution: 'same_close', costs: zero, ...xAndY },
+      days: [at('2026-01-05', cash), at('2026-01-08', cash), at('2026-01-11', cash)],
+      bars: {
+        X: ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08', '2026-01-11'].map((d) =>
+          bar(d, 1),
+        ),
+        Y: [bar('2026-01-05', 1), bar('2026-01-08', 1), bar('2026-01-11', 1)],
+      },
+      cashRate: (d) => rates[d] ?? 0,
+    });
+    expect(r.points.map((p) => p.date)).toEqual(['2026-01-05', '2026-01-08', '2026-01-11']);
+    expect(r.points[1]!.equity).toBeCloseTo(1.0001 * 1.0002 * 1.0003, 15);
+    expect(r.points[2]!.equity).toBeCloseTo(1.0001 * 1.0002 * 1.0003 * 1.0001, 15);
+    // Whole shares: the residual earns per covered day, and a gap dividend earns from the next.
+    const w = backtest({
+      strategy: { execution: 'same_close', costs: zero, ...yAllocation },
+      days: [at('2026-01-05', x100), at('2026-01-08', x100)],
+      bars: {
+        X: [
+          bar('2026-01-05', 300),
+          bar('2026-01-06', 300, { divCash: 1 }),
+          bar('2026-01-07', 300),
+          bar('2026-01-08', 300),
+        ],
+        Y: [bar('2026-01-05', 1), bar('2026-01-08', 1)],
+      },
+      cashRate: () => 2.52,
+      wholeShares: { initialAmount: '1000', currency: 'USD' },
+    });
+    // 3 shares, 100 cash: 01-06 100 x 1.0001 + 3; 01-07 and 01-08 x 1.0001 each.
+    expect(w.points[1]!.value!.amount).toBeCloseTo(900 + (100 * 1.0001 + 3) * 1.0001 ** 2, 10);
+  });
+
+  it('a day whose growth is at or below 0 stops the backtest (fractional)', () => {
+    // 3 x -40% = -120%: nothing left to compound.
+    const lev = [{ ticker: 'X?L=3', weight: 100 }];
+    expect(() =>
+      backtest({
+        strategy: { execution: 'same_close', costs: zero },
+        days: [at('2026-01-05', lev), at('2026-01-06', lev)],
+        bars: { X: [bar('2026-01-05', 100), bar('2026-01-06', 60)] },
+        cashRate: none,
+      }),
+    ).toThrow(/X\?L=3 on 2026-01-06: growth -0\.2/);
+    // Inside a gap too (one covered day of -40%).
+    expect(() =>
+      backtest({
+        strategy: { execution: 'same_close', costs: zero, ...yAllocation },
+        days: [at('2026-01-05', lev), at('2026-01-07', lev)],
+        bars: {
+          X: [bar('2026-01-05', 100), bar('2026-01-06', 60), bar('2026-01-07', 60)],
+          Y: [bar('2026-01-05', 1), bar('2026-01-07', 1)],
+        },
+        cashRate: none,
+      }),
+    ).toThrow(/X\?L=3 on 2026-01-06: growth/);
+  });
+
   it('a strategy that may hold only cash: the sessions are the evaluated dates', () => {
     const cash = [{ ticker: 'CASH_USD', weight: 100 }];
     const r = backtest({
-      strategy: { execution: 'same_close', costs: {} },
+      strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
       days: [at('2026-01-05', cash), at('2026-01-07', cash)],
       bars: { X: [bar('2026-01-05', 1), bar('2026-01-06', 1), bar('2026-01-07', 1)] },
       cashRate: () => 2.52,

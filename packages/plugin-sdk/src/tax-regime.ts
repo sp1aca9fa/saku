@@ -573,6 +573,12 @@ export function taxRegimeProblems(regime: unknown): string[] {
   if (fields(r.fx, 'fx', FX_FIELDS, FX_FIELDS)) {
     const f = r.fx as Record<string, unknown>;
     const names = new Set<string>();
+    /**
+     * The rate name declared on each stored kind: rates are stored by kind (`fx_rates.kind`), not
+     * by name, so two names on one kind would read the same stored rate (one could never be told
+     * from the other). Refused.
+     */
+    const nameOfKind = new Map<unknown, string>();
     if (!isObject(f.rates) || Object.keys(f.rates).length === 0) {
       bad('fx.rates', 'name at least one rate');
     } else {
@@ -584,6 +590,10 @@ export function taxRegimeProblems(regime: unknown): string[] {
         const d = def as Record<string, unknown>;
         oneOf(d.kind, `${path}.kind`, TAX_FX_KINDS);
         textKey(d.nameKey, `${path}.nameKey`, 'rateName');
+        const other = nameOfKind.get(d.kind);
+        if (other !== undefined) {
+          bad(path, `${String(d.kind)} is already the kind of ${other}; one name per stored kind`);
+        } else nameOfKind.set(d.kind, name);
       }
     }
     for (const use of ['purchases', 'sales', 'dividends'] as const) {
@@ -881,7 +891,10 @@ export async function setTaxRegime(
   regimes: readonly TaxRegime[],
   actor = 'cli',
 ): Promise<void> {
+  // The regime's account types: refused while stored benchmarks name one it does not define.
+  const accountTypes = regimes.find((r) => r.info.key === key)?.accountTypes.map((a) => a.key);
   await setSetting(db, 'tax_regime', key, actor, {
     taxRegimes: regimes.map(taxRegimeDeclarationOf),
+    ...(accountTypes && { accountTypes }),
   });
 }

@@ -492,9 +492,12 @@
     }
   },
   "benchmarks": {
-    "us_stocks": "US stocks (S&P 500 index fund)",
-    "global_stocks": "Global stocks (all-world index fund)",
-    "stocks_bonds_60_40": "Stocks and bonds 60/40",
+    "us_stocks": "US stocks",
+    "global_stocks": "Global stocks",
+    "stocks_bonds_60_40": "Stocks and bonds",
     "deposits": "Bank deposits"
-  }
+  },
+  "benchmarkLabel": "{name} ({holdings})",
+  "benchmarkHolding": "{ticker} {weight}%",
+  "benchmarkDeposit": "deposit rate"
 }

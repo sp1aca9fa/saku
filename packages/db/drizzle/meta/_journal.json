@@ -127,6 +127,20 @@
       "when": 1793546701422,
       "tag": "0017_user_tax_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1793547663704,
+      "tag": "0018_deposit_rates",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1793548159304,
+      "tag": "0019_replace_guards",
+      "breakpoints": true
     }
   ]
 }

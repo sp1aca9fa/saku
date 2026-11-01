@@ -36,7 +36,7 @@ const run = (
   extra: Partial<BacktestInput> & { costs?: BacktestInput['strategy']['costs'] } = {},
 ) =>
   backtest({
-    strategy: { execution, costs: extra.costs ?? {} },
+    strategy: { execution, costs: extra.costs ?? { slippageBps: 0, feePct: 0 } },
     days: decide(list),
     bars,
     cashRate: extra.cashRate ?? none,
@@ -123,7 +123,7 @@ describe('whole shares', () => {
 
   it('sizing: a quotient within float noise of a whole number is that number', () => {
     // 58 x 100 / (100 x 2) = 29 (0.58 x 100 / 2 would be 28.999...: 28 shares).
-    const at = (weight: number, amount: string, p: number, costs = {}) =>
+    const at = (weight: number, amount: string, p: number, costs = { slippageBps: 0, feePct: 0 }) =>
       run(
         'same_close',
         [
@@ -147,7 +147,7 @@ describe('whole shares', () => {
     expect(t.residualCash.amount).toBeGreaterThanOrEqual(0);
     // A true quotient 1e-9 below a whole number is not float noise: 21.020999978979 / 3.003 is
     // 6.999999993..., so 6 shares (a 1e-9 snap bought 7 and left -2.1e-8, failing a valid run).
-    const edge = at(100, '21.020999978979', 3, { feePct: 0.1 });
+    const edge = at(100, '21.020999978979', 3, { slippageBps: 0, feePct: 0.1 });
     expect(edge.shares).toEqual({ X: 6 });
     expect(edge.residualCash.amount).toBeCloseTo(21.020999978979 - 18 - 0.018, 12);
   });
@@ -171,7 +171,7 @@ describe('whole shares', () => {
     // costs 0.25 x (1000 + 600) = 400, residual 0. The rate is never read (cash stays 0).
     const flat = [bar(D[0]!, 100), bar(D[1]!, 100)];
     const r = run('same_close', ['X', 'Y'], { X: flat, Y: flat }, '1250', {
-      costs: { slippageBps: 2500 },
+      costs: { slippageBps: 2500, feePct: 0 },
       cashRate: () => undefined,
     });
     const [entry, sw] = r.wholeShares!.trades;
@@ -338,7 +338,7 @@ describe('whole shares', () => {
         backtest({
           strategy: {
             execution: 'same_close',
-            costs: {},
+            costs: { slippageBps: 0, feePct: 0 },
             ...strategy,
           } as BacktestInput['strategy'],
           days,
@@ -351,7 +351,7 @@ describe('whole shares', () => {
     // The fractional run holds it as before.
     expect(() =>
       backtest({
-        strategy: { execution: 'same_close', costs: {} },
+        strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
         days: decide(['X?L=2', 'X?L=2']),
         bars: x,
         cashRate: none,
@@ -364,7 +364,7 @@ describe('whole shares', () => {
     const days = decide(['X', 'X']);
     const with_ = (ws: { initialAmount: string; currency: string }) => () =>
       backtest({
-        strategy: { execution: 'same_close', costs: {} },
+        strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
         days,
         bars: x,
         cashRate: none,
@@ -381,7 +381,9 @@ describe('whole shares', () => {
     ).toThrow(/split-adjusted/);
     // A cost rate of 100% or more.
     expect(() =>
-      run('same_close', ['X'], { X: [bar(D[0]!, 100)] }, '1000', { costs: { feePct: 100 } }),
+      run('same_close', ['X'], { X: [bar(D[0]!, 100)] }, '1000', {
+        costs: { slippageBps: 0, feePct: 100 },
+      }),
     ).toThrow(/cost rate/);
     // A price at or below 0 at a trade.
     expect(() =>
@@ -417,7 +419,11 @@ describe('whole shares', () => {
       }));
     const go = (execution: Execution, d: StrategyDay[], bars: Record<string, RawBar[]>) =>
       backtest({
-        strategy: { execution, costs: {}, allocations } as unknown as BacktestInput['strategy'],
+        strategy: {
+          execution,
+          costs: { slippageBps: 0, feePct: 0 },
+          allocations,
+        } as unknown as BacktestInput['strategy'],
         days: d,
         bars,
         cashRate: none,
@@ -501,7 +507,7 @@ describe('whole shares', () => {
       backtest({
         strategy: {
           execution: 'same_close',
-          costs: {},
+          costs: { slippageBps: 0, feePct: 0 },
           allocations: [
             { name: 'A', holdings: [{ ticker: 'X', weight: 100 }] },
             { name: 'B', holdings: twice },
@@ -517,7 +523,7 @@ describe('whole shares', () => {
 
   it('without the option: no amounts in the result', () => {
     const r = backtest({
-      strategy: { execution: 'same_close', costs: {} },
+      strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
       days: decide(['X', 'X']),
       bars: { X: [bar(D[0]!, 300), bar(D[1]!, 330)] },
       cashRate: none,
@@ -550,7 +556,7 @@ describe('whole shares', () => {
     ];
     for (const execution of ['next_open', 'next_close', 'same_close'] as const) {
       const fractional = backtest({
-        strategy: { execution, costs: {} },
+        strategy: { execution, costs: { slippageBps: 0, feePct: 0 } },
         days: decide(list),
         bars,
         cashRate: () => 2.52,

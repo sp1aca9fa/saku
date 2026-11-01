@@ -407,7 +407,7 @@ describe('whole shares: core vs reference at exact whole-share boundaries', () =
               const dates = ['2026-01-05', '2026-01-06'];
               const c: Case = {
                 execution,
-                strategy: { execution, costs: {} },
+                strategy: { execution, costs: { slippageBps: 0, feePct: 0 } },
                 days: dates.map((date) => ({
                   date,
                   signals: {},

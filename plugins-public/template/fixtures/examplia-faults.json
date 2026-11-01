@@ -192,6 +192,11 @@
       "message": "fx\\.rates\\.MID\\.kind: must be one of tax_mid, tax_buy, tax_sell"
     },
     {
+      "path": ["fx", "rates", "ASK", "kind"],
+      "value": "tax_mid",
+      "message": "fx\\.rates\\.ASK: tax_mid is already the kind of MID; one name per stored kind"
+    },
+    {
       "path": ["foreignWithholding", 0, "country"],
       "value": "QX",
       "message": "the regime's own country is not foreign"

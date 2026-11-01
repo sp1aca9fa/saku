@@ -1,6 +1,7 @@
 export * from './alerts';
 export * from './client';
 export * from './closed-events';
+export * from './deposit-rates';
 export * from './env';
 export * from './market';
 export * from './rechecks';

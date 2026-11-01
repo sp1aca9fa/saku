@@ -5,16 +5,10 @@
 // `pnpm plugins benchmarks <file.json>`: sets the benchmark set (requirements 01, 12) from a JSON
 // file (`templates/benchmarks/`), each benchmark's account checked against the install's regime
 // as loaded (refused when no regime is set or it is not loaded).
+import { benchmarkLabel, translator } from '@saku/content';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import {
-  benchmarkAccountProblems,
-  benchmarkSet,
-  createDb,
-  getSetting,
-  parseBenchmarks,
-  setSetting,
-} from '@saku/db';
+import { createDb, getSetting, parseBenchmarks, setSetting } from '@saku/db';
 import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { allInfos, loadPlugins, savePluginInfos } from '../registry';
@@ -43,16 +37,6 @@ if (command === 'tax-regime') {
     console.error((e as Error).message);
     process.exit(1);
   }
-  // Benchmarks set under another regime may name an account type this one does not define.
-  const set = await benchmarkSet(db);
-  const regime = plugins.taxRegimes.find((r) => r.info.key === key)!;
-  if ('benchmarks' in set) {
-    const wrong = benchmarkAccountProblems(
-      set.benchmarks,
-      regime.accountTypes.map((a) => a.key),
-    );
-    for (const w of wrong) console.log(`Warning: benchmark ${w}; set them again.`);
-  }
 } else if (command === 'benchmarks') {
   try {
     if (!key)
@@ -76,7 +60,14 @@ if (command === 'tax-regime') {
     await setSetting(db, 'benchmarks', JSON.stringify(parsed.benchmarks), 'cli', {
       accountTypes: regime.accountTypes.map((a) => a.key),
     });
-    console.log(`benchmarks = ${parsed.benchmarks.map((b) => b.id).join(', ')}`);
+    // Each with what it holds next to its name (in the install's primary language).
+    const t = translator((await getSetting(db, 'primary_language')) ?? 'en');
+    console.log('benchmarks =');
+    for (const b of parsed.benchmarks) {
+      console.log(
+        `  ${b.id}: ${benchmarkLabel(t, b)}, fee ${b.feePctPerYear}% a year, ${b.account}`,
+      );
+    }
   } catch (e) {
     console.error((e as Error).message);
     process.exit(1);

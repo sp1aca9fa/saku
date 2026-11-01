@@ -61,15 +61,3 @@ export function parseTaxAccountsArgs(argv: string[]): TaxAccountsArgs | { error:
   const closedOn = flags['--on'];
   return { command, user, accountType, ...(closedOn !== undefined && { closedOn }) };
 }
-
-/** Today's calendar date (`YYYY-MM-DD`) in an IANA time zone. */
-export function dateIn(timeZone: string, now: Date): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(now);
-  const get = (type: string) => parts.find((p) => p.type === type)!.value;
-  return `${get('year')}-${get('month')}-${get('day')}`;
-}

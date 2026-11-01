@@ -6,12 +6,13 @@
 //
 // Account types are the install regime's (`pnpm plugins tax-regime <key>`); `taxable` is implied
 // for every user, never opened or closed. Opening the first account locks the install's tax
-// regime. A close without --on is dated today in the install's time zone (`time_zone`).
+// regime. Dates are not later than today in the install's time zone (`time_zone`); a close
+// without --on is dated today there (without a time zone, --on is required). After a closed
+// account of a type, reopening it needs --opened-on, later than that close.
 import {
   IMPLIED_TAX_ACCOUNT,
   closeTaxAccount,
   createDb,
-  getSetting,
   getUserByUsername,
   openTaxAccount,
   taxAccountsOf,
@@ -21,7 +22,7 @@ import { exitIfUnmigrated } from '@saku/db/migrate';
 import { loadPlugins } from '../registry';
 import { assertServerOnly } from '../server-only';
 import { installTaxRegime } from '../tax-regime';
-import { dateIn, parseTaxAccountsArgs } from './tax-accounts-args';
+import { parseTaxAccountsArgs } from './tax-accounts-args';
 
 assertServerOnly();
 loadRootEnv();
@@ -75,15 +76,11 @@ try {
     });
     console.log(`${args.user}: ${args.accountType} account opened.`);
   } else {
-    let closedOn = args.closedOn;
-    if (closedOn === undefined) {
-      const timeZone = await getSetting(db, 'time_zone');
-      if (timeZone === undefined) {
-        fail('time_zone is not set, so today is not known: give the date with --on YYYY-MM-DD.');
-      }
-      closedOn = dateIn(timeZone!, new Date());
-    }
-    await closeTaxAccount(db, owner, { accountType: args.accountType, closedOn, actor: 'cli' });
+    const closedOn = await closeTaxAccount(db, owner, {
+      accountType: args.accountType,
+      ...(args.closedOn !== undefined && { closedOn: args.closedOn }),
+      actor: 'cli',
+    });
     console.log(`${args.user}: ${args.accountType} account closed on ${closedOn}.`);
   }
 } catch (e) {

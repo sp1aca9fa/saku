@@ -492,9 +492,12 @@
     }
   },
   "benchmarks": {
-    "us_stocks": "米国株(S&P 500インデックスファンド)",
-    "global_stocks": "全世界株(全世界インデックスファンド)",
-    "stocks_bonds_60_40": "株式60%・債券40%",
+    "us_stocks": "米国株",
+    "global_stocks": "全世界株",
+    "stocks_bonds_60_40": "株式と債券",
     "deposits": "銀行預金"
-  }
+  },
+  "benchmarkLabel": "{name}({holdings})",
+  "benchmarkHolding": "{ticker} {weight}%",
+  "benchmarkDeposit": "預金金利"
 }

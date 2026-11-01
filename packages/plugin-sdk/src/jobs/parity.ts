@@ -408,7 +408,14 @@ export async function parity(
         }
         cashYellow = h.yellow;
       }
-      const run = backtest({ strategy: c.strategy, days, bars, cashRate });
+      // A parity case is testfol's run: a cost it omits is one testfol did not charge (0).
+      const run = backtest({
+        strategy: c.strategy,
+        days,
+        bars,
+        cashRate,
+        omittedCostsAsZero: true,
+      });
       const s = summary(run.points);
       const stats = compareStats({ ...s, switches: run.switches }, c.stats);
       const red = stats.some((x) => !x.within);

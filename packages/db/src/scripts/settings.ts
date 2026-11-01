@@ -1,8 +1,11 @@
 // `pnpm settings list | set <key> <value>`: install-wide admin settings from the server.
+// `pnpm settings deposit-rate add <ratePct> <from YYYY-MM-DD> <currency>` | `deposit-rate list`:
+// the base currency's deposit rate, a dated append-only series (deposit-rates.ts).
 import { createDb } from '../client';
 import { dbConfigFromEnv, loadRootEnv } from '../env';
 import { exitIfUnmigrated } from '../migrate';
 import { activeSymbols } from '../market';
+import { addDepositRate, depositRateEntries } from '../deposit-rates';
 import {
   SETTINGS,
   getSetting,
@@ -15,7 +18,7 @@ import {
 loadRootEnv();
 const db = createDb(dbConfigFromEnv());
 await exitIfUnmigrated(db);
-const [command, key, value] = process.argv.slice(2);
+const [command, key, value, ...more] = process.argv.slice(2);
 
 if (command === 'list') {
   for (const k of Object.keys(SETTINGS)) {
@@ -36,9 +39,22 @@ if (command === 'list') {
     console.error((e as Error).message);
     process.exit(1);
   }
+} else if (command === 'deposit-rate' && key === 'add' && value && more.length === 2) {
+  try {
+    await addDepositRate(db, { ratePct: value, from: more[0]!, currency: more[1]! });
+    console.log(`deposit rate ${value}% a year in ${more[1]} from ${more[0]}`);
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
+} else if (command === 'deposit-rate' && key === 'list') {
+  const entries = await depositRateEntries(db);
+  if (entries.length === 0) console.log('No deposit rate entries (the rate is unknown).');
+  for (const e of entries) console.log(`from ${e.from}: ${e.ratePct}% a year (${e.currency})`);
 } else {
   console.error(
-    `Usage: pnpm settings list | pnpm settings set <${Object.keys(SETTINGS).join('|')}> <value>`,
+    `Usage: pnpm settings list | pnpm settings set <${Object.keys(SETTINGS).join('|')}> <value> | ` +
+      'pnpm settings deposit-rate add <ratePct> <from YYYY-MM-DD> <currency> | pnpm settings deposit-rate list',
   );
   process.exit(1);
 }

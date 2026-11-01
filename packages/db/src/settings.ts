@@ -2,10 +2,11 @@
 // agree on what a setting may hold.
 import {
   COST_FIELDS,
+  COST_PCT_BELOW,
+  MAX_SLIPPAGE_BPS,
   type CostField,
   compareDecimalText,
   floatDecimalTextProblem,
-  isTradingDate,
   tickerProblem,
 } from '@saku/core';
 import { eq } from 'drizzle-orm';
@@ -58,12 +59,6 @@ export const SETTINGS = {
    * (`parseBrokerCosts`). A strategy's omitted cost takes the install's; unset: none (never 0).
    */
   broker_costs: (v: string) => 'costs' in parseBrokerCosts(v),
-  /**
-   * The base currency's deposit rate (requirements 05 `CASH_BASE`, 01 "Bank deposits", 12):
-   * `{ "ratePct": "0.2", "asOf": "2026-10-01", "currency": "<base currency>" }`
-   * (`parseDepositRate`); the currency is checked against `base_currency` when set.
-   */
-  deposit_rate: (v: string) => 'rate' in parseDepositRate(v),
   /**
    * The benchmark set (requirements 01 "Benchmark set", 12): a JSON list (`parseBenchmarks`). Set
    * only with the install regime's account types at hand (`setSetting`'s `accountTypes`, `pnpm
@@ -249,7 +244,8 @@ export function unmatchedTolerances(
     .sort();
 }
 
-// --- Broker costs, deposit rate, benchmarks (C2; spec 2026-11-02 c2-settings) ---
+// --- Broker costs and benchmarks (C2; spec 2026-11-02 c2-settings; the deposit rate is a dated
+// series, deposit-rates.ts) ---
 //
 // JSON settings are read strictly, like a strategy file: a key given twice in one object (which
 // `JSON.parse` would silently read as the last), an unknown key (a typo) or a missing one is
@@ -339,10 +335,9 @@ function rateProblem(
   return undefined;
 }
 
-/** The highest slippage the setting accepts, in basis points (10%): more is a typo, not a cost. */
-export const MAX_SLIPPAGE_BPS = '1000';
-/** Fees and FX spreads are below this percent: 100% or more would take the whole amount traded. */
-export const COST_PCT_BELOW = '100';
+/** The limits a strategy's own costs have (core schema): the setting holds them as text. */
+const MAX_SLIPPAGE_TEXT = String(MAX_SLIPPAGE_BPS);
+const COST_PCT_BELOW_TEXT = String(COST_PCT_BELOW);
 
 /** The install's broker costs, each decimal text (slippage in bps, fee and spread in percent). */
 export type BrokerCosts = Record<CostField, string>;
@@ -362,7 +357,7 @@ export function parseBrokerCosts(text: string): { costs: BrokerCosts } | { probl
     const p = rateProblem(
       v[f],
       f,
-      f === 'slippageBps' ? { atMost: MAX_SLIPPAGE_BPS } : { below: COST_PCT_BELOW },
+      f === 'slippageBps' ? { atMost: MAX_SLIPPAGE_TEXT } : { below: COST_PCT_BELOW_TEXT },
     );
     if (p) problems.push(p);
   }
@@ -392,76 +387,7 @@ export async function brokerCosts(
   return 'costs' in parsed ? parsed : { invalid: parsed.problems };
 }
 
-/**
- * The deposit rate's ceiling (below 1000% a year): only a guard against an absurd value; it
- * catches no unit mistake (a rate in basis points or as a fraction), which the owner checks.
- */
-export const DEPOSIT_RATE_BELOW = '1000';
-
-/** The base currency's deposit rate: percent a year (decimal text), dated, in that currency. */
-export interface DepositRate {
-  ratePct: string;
-  /** The date the rate was read (`YYYY-MM-DD`): it is known from that date on (`asOf`). */
-  asOf: string;
-  currency: string;
-}
-
-const DEPOSIT_KEYS = ['ratePct', 'asOf', 'currency'] as const;
-
-/**
- * `deposit_rate`: `ratePct` decimal text >= 0 and below DEPOSIT_RATE_BELOW, `asOf` a real date,
- * `currency` an ISO 4217 code (the base currency's, checked when set and when read).
- */
-export function parseDepositRate(text: string): { rate: DepositRate } | { problems: string[] } {
-  const read = strictJson(text);
-  if ('problems' in read) return read;
-  const v = read.value;
-  if (!isObject(v)) {
-    return {
-      problems: [
-        'must be a JSON object such as {"ratePct":"0.2","asOf":"2026-10-01","currency":"EUR"}',
-      ],
-    };
-  }
-  const problems = keyProblems(v, DEPOSIT_KEYS, '');
-  if (Object.hasOwn(v, 'ratePct')) {
-    const p = rateProblem(v.ratePct, 'ratePct', { below: DEPOSIT_RATE_BELOW });
-    if (p) problems.push(p);
-  }
-  if (Object.hasOwn(v, 'asOf') && !(typeof v.asOf === 'string' && isTradingDate(v.asOf))) {
-    problems.push(`asOf must be a date like 2026-10-01 (got ${JSON.stringify(v.asOf)})`);
-  }
-  if (
-    Object.hasOwn(v, 'currency') &&
-    !(typeof v.currency === 'string' && /^[A-Z]{3}$/.test(v.currency))
-  ) {
-    problems.push(`currency must be an ISO 4217 code (got ${JSON.stringify(v.currency)})`);
-  }
-  if (problems.length > 0) return { problems };
-  return { rate: { ratePct: v.ratePct, asOf: v.asOf, currency: v.currency } as DepositRate };
-}
-
-/**
- * The deposit rate: `unset` when never set; `invalid` when the stored value no longer parses or
- * is not in the base currency (only a hand edit can do either), never read as unset.
- */
-export async function depositRate(
-  db: Db,
-): Promise<{ rate: DepositRate } | { unset: true } | { invalid: string[] }> {
-  const text = await getSetting(db, 'deposit_rate');
-  if (text === undefined) return { unset: true };
-  const parsed = parseDepositRate(text);
-  if ('problems' in parsed) return { invalid: parsed.problems };
-  const base = await getSetting(db, 'base_currency');
-  if (parsed.rate.currency !== base) {
-    return {
-      invalid: [`currency ${parsed.rate.currency} is not the base currency ${base ?? '(not set)'}`],
-    };
-  }
-  return parsed;
-}
-
-/** The holding a benchmark uses for the base currency's deposit rate (`deposit_rate`). */
+/** The holding a benchmark uses for the base currency's deposit rate (`deposit-rates.ts`). */
 export const DEPOSIT = 'DEPOSIT';
 
 /** A benchmark (requirements 01 "Benchmark set"): what it holds, its fund fee, its account type. */
@@ -521,7 +447,7 @@ export function parseBenchmarks(
     }
     if (Object.hasOwn(b, 'holdings')) problems.push(...holdingsProblems(b.holdings, where));
     if (Object.hasOwn(b, 'feePctPerYear')) {
-      const p = rateProblem(b.feePctPerYear, 'feePctPerYear', { below: COST_PCT_BELOW });
+      const p = rateProblem(b.feePctPerYear, 'feePctPerYear', { below: COST_PCT_BELOW_TEXT });
       if (p) problems.push(`${where}${p}`);
     }
     if (
@@ -598,17 +524,48 @@ export function benchmarkAccountProblems(
 }
 
 /**
- * The benchmark set: `unset` when never set; `invalid` when the stored value no longer parses
- * (only a hand edit can do that). Account types are checked against the regime by the reader
- * that loads it (`benchmarkAccountProblems`).
+ * The benchmark set, checked against the install regime's account types as loaded
+ * (`accountTypes`): `unset` when never set; `invalid` when the stored value no longer parses
+ * (only a hand edit can do that) or a benchmark names an account type the regime does not define.
+ * Never read as unset, and never used with an account the regime does not have.
  */
 export async function benchmarkSet(
   db: Db,
+  accountTypes: readonly string[],
 ): Promise<{ benchmarks: Benchmark[] } | { unset: true } | { invalid: string[] }> {
   const text = await getSetting(db, 'benchmarks');
   if (text === undefined) return { unset: true };
   const parsed = parseBenchmarks(text);
-  return 'benchmarks' in parsed ? parsed : { invalid: parsed.problems };
+  if ('problems' in parsed) return { invalid: parsed.problems };
+  const wrong = benchmarkAccountProblems(parsed.benchmarks, accountTypes);
+  return wrong.length > 0 ? { invalid: wrong } : parsed;
+}
+
+/**
+ * Refuses setting the tax regime `key` while the stored benchmarks name an account type it does
+ * not define (`accountTypes`: its keys; undefined: not known, refused while benchmarks are
+ * stored). Benchmarks that no longer parse (a hand edit) do not block it: their reader reports them.
+ */
+async function checkBenchmarksUnderRegime(
+  db: Db,
+  key: string,
+  accountTypes: readonly string[] | undefined,
+): Promise<void> {
+  const text = await getSetting(db, 'benchmarks');
+  if (text === undefined) return;
+  const parsed = parseBenchmarks(text);
+  if ('problems' in parsed) return;
+  if (accountTypes === undefined) {
+    throw new Error(
+      `Benchmarks are set: the ${key} regime's account types are needed to check them (pnpm plugins tax-regime <key>).`,
+    );
+  }
+  const wrong = benchmarkAccountProblems(parsed.benchmarks, accountTypes);
+  if (wrong.length > 0) {
+    throw new Error(
+      `The stored benchmarks name account types the ${key} regime does not define. Set benchmarks whose accounts both regimes define first (every regime has taxable; pnpm plugins benchmarks <file>):\n${wrong.map((p) => `- ${p}`).join('\n')}`,
+    );
+  }
 }
 
 /** Why a value is refused, for the settings that say more than "not valid". */
@@ -616,11 +573,9 @@ function valueProblems(key: SettingKey, value: string): string[] | undefined {
   const parsed =
     key === 'broker_costs'
       ? parseBrokerCosts(value)
-      : key === 'deposit_rate'
-        ? parseDepositRate(value)
-        : key === 'benchmarks'
-          ? parseBenchmarks(value)
-          : undefined;
+      : key === 'benchmarks'
+        ? parseBenchmarks(value)
+        : undefined;
   return parsed && 'problems' in parsed ? parsed.problems : undefined;
 }
 
@@ -643,25 +598,16 @@ export async function setSetting(
   options: {
     /** `tax_regime` only: the loaded tax regimes' declarations (the setting names one of them). */
     taxRegimes?: readonly TaxRegimeDeclaration[];
-    /** `benchmarks` only: the account type keys of the install's tax regime, as loaded. */
+    /**
+     * `benchmarks`: the account type keys of the install's tax regime, as loaded. `tax_regime`:
+     * those of the regime being set (needed while benchmarks are stored).
+     */
     accountTypes?: readonly string[];
   } = {},
 ) {
   const problems = valueProblems(key, value);
   if (problems) throw new Error(`Not a valid ${key}:\n${problems.map((p) => `- ${p}`).join('\n')}`);
   if (!SETTINGS[key](value)) throw new Error(`Not a valid ${key}: ${value}`);
-  if (key === 'deposit_rate') {
-    const base = await getSetting(db, 'base_currency');
-    const { currency } = (parseDepositRate(value) as { rate: DepositRate }).rate;
-    if (base === undefined) {
-      throw new Error("Set base_currency first: deposit_rate is the base currency's rate.");
-    }
-    if (currency !== base) {
-      throw new Error(
-        `deposit_rate is the base currency's rate: its currency must be ${base} (got ${currency}).`,
-      );
-    }
-  }
   if (key === 'benchmarks') {
     if (options.accountTypes === undefined) {
       throw new Error(
@@ -681,9 +627,14 @@ export async function setSetting(
     throw new Error(`base_currency is ${current} and cannot be changed once set.`);
   }
   if (key === 'tax_regime') {
-    const declaration = await checkTaxRegimeChange(db, value, options.taxRegimes);
-    // The value and the declaration it was set with are written together.
+    // Checked and written in one write transaction (libsql's default `BEGIN IMMEDIATE`), so a
+    // tax account opened at the same moment (`openTaxAccount`, also one write transaction) is
+    // either seen by the check or waits for the change, never interleaved with it. The value and
+    // the declaration it was set with are written together.
     await db.transaction(async (tx) => {
+      const q = tx as unknown as Db;
+      const declaration = await checkTaxRegimeChange(q, value, options.taxRegimes);
+      await checkBenchmarksUnderRegime(q, value, options.accountTypes);
       await tx
         .insert(appSettings)
         .values({ key, value })

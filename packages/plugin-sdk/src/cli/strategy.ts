@@ -5,7 +5,8 @@
 //                                                          --registration also every reason register
 //                                                          would refuse (writes nothing); prints the
 //                                                          costs it would use (the install's
-//                                                          broker_costs for any the file omits)
+//                                                          broker_costs for any the file omits);
+//                                                          exit 1 when a cost is not known
 //   pnpm strategy register <file.yaml> --user <username>   register: an immutable version whose
 //   pnpm strategy register <file.yaml> --library           forward record starts with the next close;
 //                                                          refused for same_close or a ticker whose
@@ -131,8 +132,10 @@ if (tool === 'strategy' && command === 'check') {
   // What the file says, as read: a misread value shows here, before anything is registered.
   for (const line of strategySummary(s)) console.log(line);
   // The costs a backtest or registration would use now (the install's for those the file omits).
+  // Unknown costs: not valid to run, exit 1 (never read as 0).
   const costs = await effectiveCosts(db, s);
-  console.log('problem' in costs ? `Costs not known: ${costs.problem}` : costsLine(costs));
+  if ('problem' in costs) fail(`Costs not known: ${costs.problem}`);
+  console.log(costsLine(costs as Exclude<typeof costs, { problem: string }>));
   console.log(`${s.name}: valid; depends on ${dependencies(s).join(', ')}.`);
   if (a.registration) {
     // The same account lookup as register; without either flag the account is not checked.

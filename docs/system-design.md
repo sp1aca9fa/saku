@@ -120,7 +120,8 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `users` | id, username, password_hash, totp_secret (encrypted), is_admin, disabled, language | |
 | `user_devices` | id, user_id, label, created_at, last_seen_at, revoked_at | Max 2 active |
 | `backup_codes`, `login_attempts` | | Auth |
-| `app_settings` | key, value | Install-wide admin settings (base currency, time zone, languages, regime, broker costs, deposit rate, benchmark set, ...; list in `docs/setup.md`, "Settings") |
+| `app_settings` | key, value | Install-wide admin settings (base currency, time zone, languages, regime, broker costs, benchmark set, ...; list in `docs/setup.md`, "Settings") |
+| `deposit_rates` | rate_pct, from_date, currency, actor, created_at | The base currency's deposit rate as a dated series, append-only (triggers; each entry starts after every earlier one), read through `depositRateAsOf` (C2, migration 0018) |
 | `user_settings` | owner_id, example_amount, defaults (json) | Per user |
 | `plugin_info` | key, kind, description (json), saved_at | Written by each job run; the description also keeps `formerProviders` (`{ id, since }`: provider ids it was saved under before and when each stopped, for 32 days) |
 | `source_roles` | data_kind, plugin_key, role, position | Admin's choice |
@@ -147,11 +148,13 @@ Stage A tables (A1 creates the market data, auth, settings and operations tables
 | `chain_anchors` | id, chain_head_hash, anchored_at, method (rfc3161), authority, proof | |
 | `journal_entries` | owner_id, version_id, signal_date, action (done/skipped/delayed), action_date, note | CLI in A2, UI in D1 |
 | `notification_channels` | id, owner_id, type (the `Notifier` plug-in key), target_enc, admin, enabled | Per user; admin channels flagged; disabled, never deleted |
-| `user_tax_accounts` | id, owner_id, account_type (a key of the install regime's account types, never `taxable`), opened_on, created_at, closed_on; unique (owner_id, account_type) while closed_on is null (0017) | Per user (requirements 07). `taxable` is implied for every user, never stored. Never deleted; only closed_on is set, once (triggers); a reopened account is a new row. A row locks `tax_regime` (`USER_TAX_TABLES`) |
+| `user_tax_accounts` | id, owner_id, account_type (a key of the install regime's account types, never `taxable`), opened_on, created_at, closed_on; unique (owner_id, account_type) while closed_on is null (0017) | Per user (requirements 07). `taxable` is implied for every user, never stored. Never deleted; only closed_on is set, once (triggers); no INSERT OR REPLACE over a row (0019); a reopened account is a new row, opened after the type's latest close. A row locks `tax_regime` (`USER_TAX_TABLES`) |
 | `alerts_sent` | owner_id, channel_id, subject (version id or job type), date, type, allocation, sent_at; unique (channel, subject, date, type) | Idempotency; `allocation` is what the channel was last told |
 | `job_runs` | id, job_type (daily, weekly, monthly, bootstrap, checks), started_at, finished_at, status, dates_processed, error, heartbeat_sent | |
 | `provider_usage` | provider, window_type, window_start, request_count, unique_symbols | Quota guard |
 | `activity_log` | id, at, actor, action, detail | Admin tasks, updates, resets |
+
+Protected rows cannot be replaced: `INSERT OR REPLACE` deletes a conflicting row without firing its DELETE trigger, so BEFORE INSERT guards (0019) refuse any insert whose key exists in `user_tax_accounts` (also an open row of the same owner and type), `stand_in_closes`, `closed_event_resolutions`, `red_rechecks` (also the version and date), `strategy_versions`, `forward_entries`, `forward_annotations` and `chain_anchors`. `stand_ins` is not guarded this way: the verify run upserts open stand-ins by key (an upsert fires BEFORE INSERT triggers too); its closed rows stay protected against updates and deletes.
 
 Every user-owned table has `owner_id`; every query on it is scoped in `packages/db` query functions that take the signed-in user, and tests call each server action as another user. Market data tables are global; only jobs write them. Later stages add (all with `owner_id`) trades, cash balances, tax lots, quota ledger, loss carryforward, paper portfolios, alerts, robustness reports, finder results.
 
@@ -204,7 +207,7 @@ A plug-in package's `src/index.ts`: `export const bars: BarSource[] = [...]; exp
 - Trading dates are `YYYY-MM-DD` strings (America/New_York), never `Date` objects in core logic. Display in the install's time zone.
 - 252-day annualization; float64 analytics (1e-9 relative tolerance); decimal.js money and tax.
 - Near-tie rule: within 1e-9 relative, keep the previous state.
-- Synthetic leverage and USD cash use `asOf` of the series a series plug-in declares as the USD cash rate (`provides.cashRates.USD`; FRED: `DTB3`) converted to a daily rate (unknown stays unknown, never 0%); base-currency cash uses the deposit rate setting.
+- Synthetic leverage and USD cash use `asOf` of the series a series plug-in declares as the USD cash rate (`provides.cashRates.USD`; FRED: `DTB3`) converted to a daily rate (unknown stays unknown, never 0%); base-currency cash uses the deposit rate series (`deposit_rates`, read through `depositRateAsOf`; unknown before its first entry).
 
 ## 10. Compute placement
 Library evaluation, robustness sweeps and Monte Carlo run in server jobs (results stored) or in the browser via Web Workers. Server actions only serve light requests.

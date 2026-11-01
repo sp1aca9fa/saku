@@ -165,7 +165,7 @@ describe('the backtest and the metrics read the same grammar', () => {
     }));
     expect(() =>
       backtest({
-        strategy: { execution: 'same_close', costs: {} },
+        strategy: { execution: 'same_close', costs: { slippageBps: 0, feePct: 0 } },
         days,
         bars: { X: [bar(D[0]!, 100), bar(D[1]!, 101)] },
         cashRate: () => 2,

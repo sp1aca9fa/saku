@@ -21,6 +21,9 @@ import {
   type RefStrategy,
 } from './index';
 
+// Explicit zero costs (omitted costs throw unless omittedCostsAsZero is passed).
+const ZERO = { slippageBps: 0, feePct: 0 };
+
 const dates = ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08'];
 type H = RefDay['holdings'];
 const A: H = [
@@ -428,7 +431,7 @@ describe('reference: days without a decision (docs/indicators.md, equity curves)
   };
   const s: RefStrategy = {
     execution: 'next_close',
-    costs: { feePct: 0.1 },
+    costs: { slippageBps: 0, feePct: 0.1 },
     signals: [
       {
         id: 'on',
@@ -505,7 +508,7 @@ describe('reference: a signal ticker without a bar is a session without a decisi
   };
   const s: RefStrategy = {
     execution: 'next_close',
-    costs: { feePct: 0.1 },
+    costs: { slippageBps: 0, feePct: 0.1 },
     signals: [
       {
         id: 'on',
@@ -814,7 +817,9 @@ describe('reference: one ticker grammar', () => {
         allocation: 'a',
         holdings: [{ ticker, weight: 100 }],
       }));
-      expect(() => refBacktest({}, days, bars, () => 0), ticker).toThrow(/malformed ticker/);
+      expect(() => refBacktest({ costs: ZERO }, days, bars, () => 0), ticker).toThrow(
+        /malformed ticker/,
+      );
     }
     const ok: RefDay[] = ['2026-06-01', '2026-06-02'].map((date) => ({
       date,
@@ -822,7 +827,7 @@ describe('reference: one ticker grammar', () => {
       allocation: 'a',
       holdings: [{ ticker: 'X?L=2&E=0', weight: 100 }],
     }));
-    expect(refBacktest({}, ok, bars, () => 0).equity).toEqual([1, 1]);
+    expect(refBacktest({ costs: ZERO }, ok, bars, () => 0).equity).toEqual([1, 1]);
   });
 });
 
@@ -850,7 +855,7 @@ describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
     xs.forEach((x, i) => expect(x).toBeCloseTo(ys[i]!, 9));
   };
   const X = hold(['X', 100]);
-  const nextClose = { execution: 'next_close' as const };
+  const nextClose = { execution: 'next_close' as const, costs: ZERO };
 
   it('buys floor(x) shares and keeps the rest as USD cash (next_close, no costs)', () => {
     const bars = { X: mk([{ close: 100 }, { close: 110 }, { close: 121 }]) };
@@ -916,7 +921,7 @@ describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
     };
     const Y = hold(['Y', 100]);
     const r = refBacktest(
-      { execution: 'next_close', costs: { feePct: 25 } },
+      { execution: 'next_close', costs: { slippageBps: 0, feePct: 25 } },
       decide([X, Y, Y, Y]),
       bars,
       () => 0,
@@ -999,7 +1004,7 @@ describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
     // Day-0 decision trades at day 1 open: floor(1010 / 100) = 10, residual 10. Day 2 (no trade,
     // whole day): 25 shares, no fraction: 10 + 25 x 52.
     const r = refBacktest(
-      { execution: 'next_open' },
+      { execution: 'next_open', costs: ZERO },
       decide([X, X, X]),
       bars,
       () => 0,
@@ -1009,7 +1014,7 @@ describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
     near(amounts(r), [1010, 1010, 10 + 25 * 52]);
     // 3 shares x 2.5 = 7.5 -> 7 kept, 0.5 x 52 at the close.
     const r2 = refBacktest(
-      { execution: 'next_open' },
+      { execution: 'next_open', costs: ZERO },
       decide([X, X, X]),
       bars,
       () => 0,
@@ -1026,7 +1031,13 @@ describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
       X: mk([{ close: 100 }, { open: 100, close: 100 }, { open: 40, close: 41, splitFactor: 2.5 }]),
       Y: mk([{ close: 10 }, { open: 10, close: 10 }, { open: 10, close: 10 }]),
     };
-    const r = refBacktest({ execution: 'next_open' }, decide([X, Y, Y]), bars, () => 0, usd('300'));
+    const r = refBacktest(
+      { execution: 'next_open', costs: ZERO },
+      decide([X, Y, Y]),
+      bars,
+      () => 0,
+      usd('300'),
+    );
     // V at day 2 open = 20 + 7 x 40 = 300: 30 Y shares, residual 0.
     expect(r.trades![1]!.V.amount).toBeCloseTo(300, 9);
     expect(r.trades![1]!.shares).toEqual({ Y: 30 });
@@ -1047,6 +1058,7 @@ describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
     expect(() => run(usd('1000'), bars, hold(['X?L=2', 100]))).toThrow(/synthetic/);
     const withAllocation = {
       execution: 'next_close' as const,
+      costs: ZERO,
       allocations: [{ name: 'lev', holdings: hold(['X?L=3', 100]) }],
     };
     expect(() =>
@@ -1054,6 +1066,7 @@ describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
     ).toThrow(/synthetic/);
     const withSafe = {
       execution: 'next_close' as const,
+      costs: ZERO,
       safeState: { holdings: hold(['X?E=1', 100]) },
     };
     expect(() => refBacktest(withSafe, decide([X, X, X]), bars, () => 0, usd('1000'))).toThrow(
@@ -1066,7 +1079,13 @@ describe('reference: whole shares (docs/indicators.md "Whole shares")', () => {
     // A missing open at a next_open trade.
     const noOpen = { X: mk([{ close: 100 }, { close: 100 }, { close: 100 }]) };
     expect(() =>
-      refBacktest({ execution: 'next_open' }, decide([X, X, X]), noOpen, () => 0, usd('1000')),
+      refBacktest(
+        { execution: 'next_open', costs: ZERO },
+        decide([X, X, X]),
+        noOpen,
+        () => 0,
+        usd('1000'),
+      ),
     ).toThrow(/no open/);
   });
 
@@ -1103,6 +1122,7 @@ describe('reference: bars between sessions (docs/indicators.md "Returns")', () =
     dates.map((date) => ({ date, signals: {}, allocation: 'a', holdings: hold(t) }));
   const strategy = (t: string, execution: 'next_close' | 'next_open' = 'next_close') => ({
     execution,
+    costs: ZERO,
     allocations: [
       { name: 'a', holdings: hold(t) },
       { name: 'g', holdings: hold('G') },
@@ -1138,19 +1158,19 @@ describe('reference: bars between sessions (docs/indicators.md "Returns")', () =
     expect(r2.equity[2]).toBeCloseTo((100 / 100) * (99 / 98), 12);
   });
 
-  it('a synthetic ticker takes L x the compounded base return, financing once', () => {
-    // X: 100, 100, gap 110, 121. L = 2, rate 25.2% (0.001 a session):
-    // D[3]: 1 + 2 x (121 / 100 - 1) - (2 - 1) x 0.001 = 1.419 (a daily reset would give 1.439).
+  it('a synthetic ticker resets daily over a gap, financing per covered day', () => {
+    // X: 100, 100, gap 110, 121. L = 2, rate 25.2% (0.001 a day): two covered days, each
+    // 1 + 2 x 0.1 - (2 - 1) x 0.001 = 1.199: 1.199^2 = 1.437601.
     const X = mk([{ close: 100 }, { close: 100 }, { close: 110 }, { close: 121 }]);
     const r = refBacktest(strategy('X?L=2'), decide('X?L=2', sessionDates), { X, G }, () => 25.2);
-    expect(r.equity[2]).toBeCloseTo(1.419, 12);
+    expect(r.equity[2]).toBeCloseTo(1.199 ** 2, 12);
   });
 
   it('a cash-only strategy takes its sessions from the evaluated dates', () => {
     const S = mk([{ close: 1 }, { close: 1 }, { close: 1 }, { close: 1 }]);
     const days = decide('CASH_USD', [D[0]!, D[1]!, D[3]!]);
     // Z is loaded but not held: its dates do not make sessions.
-    const r = refBacktest({ execution: 'next_close' }, days, { S, Z: S }, () => 25.2);
+    const r = refBacktest({ execution: 'next_close', costs: ZERO }, days, { S, Z: S }, () => 25.2);
     expect(r.dates).toEqual([D[0], D[1], D[3]]);
     // Bought at D[1]'s close; one night to D[3]: 1.001.
     expect(r.equity[2]).toBeCloseTo(1.001, 12);
@@ -1200,7 +1220,11 @@ describe('reference: bars between sessions (docs/indicators.md "Returns")', () =
 
     it('a cost rate of 100% or more is refused', () => {
       const H = mk([{ close: 200 }, { close: 200 }, { close: 200 }, { close: 200 }]);
-      for (const costs of [{ feePct: 100 }, { slippageBps: 5000, feePct: 50 }, { feePct: 150 }]) {
+      for (const costs of [
+        { slippageBps: 0, feePct: 100 },
+        { slippageBps: 5000, feePct: 50 },
+        { slippageBps: 0, feePct: 150 },
+      ]) {
         expect(() =>
           refBacktest(
             { ...strategy('H'), costs },
@@ -1214,7 +1238,7 @@ describe('reference: bars between sessions (docs/indicators.md "Returns")', () =
       // 99.99% is allowed.
       expect(() =>
         refBacktest(
-          { ...strategy('H'), costs: { feePct: 99.99 } },
+          { ...strategy('H'), costs: { slippageBps: 0, feePct: 99.99 } },
           decide('H', sessionDates),
           { H, G },
           () => 0,
@@ -1227,6 +1251,7 @@ describe('reference: bars between sessions (docs/indicators.md "Returns")', () =
       const H = mk([{ close: 200 }, { close: 200 }, { close: 200 }, { close: 200 }]);
       const s = {
         execution: 'next_close' as const,
+        costs: ZERO,
         allocations: [
           { name: 'a', holdings: hold('H') },
           {
@@ -1241,6 +1266,184 @@ describe('reference: bars between sessions (docs/indicators.md "Returns")', () =
       expect(() =>
         refBacktest(s, decide('H', sessionDates), { H, G }, () => 0, usd('1000')),
       ).toThrow(/twice/);
+    });
+  });
+});
+
+describe('reference: omitted costs (docs/indicators.md "Costs")', () => {
+  const D = ['2026-09-01', '2026-09-02', '2026-09-03'];
+  const bars = {
+    X: [100, 110, 121].map((close, i) => ({
+      date: D[i]!,
+      open: close,
+      close,
+      divCash: 0,
+      splitFactor: 1,
+      closeIsSplitAdjusted: false,
+    })),
+  };
+  const days: RefDay[] = D.map((date) => ({
+    date,
+    signals: {},
+    allocation: 'a',
+    holdings: [{ ticker: 'X', weight: 100 }],
+  }));
+  const run = (costs: { slippageBps?: number; feePct?: number } | undefined, o?: object) =>
+    refBacktest({ execution: 'next_close', costs }, days, bars, () => 0, o);
+
+  it('throws when slippageBps or feePct is undefined', () => {
+    expect(() => run(undefined)).toThrow(/slippageBps/);
+    expect(() => run({ feePct: 0.1 })).toThrow(/slippageBps/);
+    expect(() => run({ slippageBps: 10 })).toThrow(/feePct/);
+    expect(() =>
+      run(undefined, { wholeShares: { initialAmount: '1000', currency: 'USD' } }),
+    ).toThrow(/slippageBps/);
+  });
+
+  it('omittedCostsAsZero: true reads them as 0 (the pre-C2 reading)', () => {
+    const zero = run({ slippageBps: 0, feePct: 0 });
+    expect(run(undefined, { omittedCostsAsZero: true })).toEqual(zero);
+    // Only the omitted one is 0: fee 1% with slippage omitted, bought at 110: 0.99, then x 1.1.
+    const r = run({ feePct: 1 }, { omittedCostsAsZero: true });
+    expect(r.equity[2]).toBeCloseTo(0.99 * 1.1, 12);
+    // false is the same as leaving it out.
+    expect(() => run(undefined, { omittedCostsAsZero: false })).toThrow(/slippageBps/);
+  });
+});
+
+describe('reference: covered days (docs/indicators.md "Returns", "Cash", "Synthetic leverage")', () => {
+  // Sessions need every holdable ticker; G has no bar on D[2..4], so those are covered days of
+  // the step from D[1] to D[5] whenever another holdable ticker has a bar there.
+  const D = ['2026-10-01', '2026-10-02', '2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08'];
+  const mk = (closes: (number | undefined)[], extra: Partial<RefBar>[] = []): RefBar[] =>
+    closes.flatMap((close, i) =>
+      close === undefined
+        ? []
+        : [
+            {
+              date: D[i]!,
+              open: close,
+              close,
+              divCash: 0,
+              splitFactor: 1,
+              closeIsSplitAdjusted: false,
+              ...extra[i],
+            },
+          ],
+    );
+  const G = mk([10, 10, undefined, undefined, undefined, 10]);
+  const hold = (t: string) => [{ ticker: t, weight: 100 }];
+  const strategy = (t: string, execution: 'next_close' | 'same_close' = 'next_close') => ({
+    execution,
+    costs: ZERO,
+    allocations: [
+      { name: 'a', holdings: hold(t) },
+      { name: 'g', holdings: hold('G') },
+    ],
+  });
+  const decide = (t: string, dates: string[]): RefDay[] =>
+    dates.map((date) => ({ date, signals: {}, allocation: 'a', holdings: hold(t) }));
+  const sessions = [D[0]!, D[1]!, D[5]!];
+
+  it('X?L=3 falling 15% a day over a 3-day gap stays positive and equals the daily reset', () => {
+    const X = mk([100, 100, 85, 72.25, 61.4125, 52.200625]);
+    const r = refBacktest(strategy('X?L=3'), decide('X?L=3', sessions), { X, G }, () => 0);
+    expect(r.dates).toEqual(sessions);
+    // Four covered days (D[2..4], D[5]), each 1 - 3 x 0.15 = 0.55.
+    expect(r.equity[2]).toBeCloseTo(0.55 ** 4, 12);
+    expect(r.equity[2]).toBeGreaterThan(0);
+    // With a rate of 25.2% (0.001 a day): each day 1 - 0.45 - 2 x 0.001 = 0.548.
+    const f = refBacktest(strategy('X?L=3'), decide('X?L=3', sessions), { X, G }, () => 25.2);
+    expect(f.equity[2]).toBeCloseTo(0.548 ** 4, 12);
+  });
+
+  it('a day whose growth is not above 0 fails', () => {
+    // X falls 40% on a covered day: 1 - 3 x 0.4 = -0.2.
+    const X = mk([100, 100, 60, 60, 60, 60]);
+    expect(() =>
+      refBacktest(strategy('X?L=3'), decide('X?L=3', sessions), { X, G }, () => 0),
+    ).toThrow(/growth/);
+  });
+
+  it('cash earns each covered day at that day rate', () => {
+    // H (holdable, not held) has bars on D[2..4]; cash is held from D[1]'s close.
+    const H = mk([10, 10, 10, 10, 10, 10]);
+    const rates: Record<string, number> = {
+      [D[2]!]: 25.2,
+      [D[3]!]: 50.4,
+      [D[4]!]: 0,
+      [D[5]!]: 25.2,
+    };
+    const s = {
+      execution: 'next_close' as const,
+      costs: ZERO,
+      allocations: [
+        { name: 'c', holdings: hold('CASH_USD') },
+        { name: 'h', holdings: hold('H') },
+        { name: 'g', holdings: hold('G') },
+      ],
+    };
+    const r = refBacktest(s, decide('CASH_USD', sessions), { H, G }, (d) => rates[d] ?? 0);
+    expect(r.equity[2]).toBeCloseTo(1.001 * 1.002 * 1 * 1.001, 12);
+  });
+
+  it('a held ticker without a bar on a covered day has return 0 there; its move counts on its next bar', () => {
+    // H has no bar on D[3]; H2 (holdable) makes D[2..4] covered days.
+    const H = mk([100, 100, 110, undefined, 121, 133.1]);
+    const H2 = mk([1, 1, 1, 1, 1, 1]);
+    const s = {
+      execution: 'next_close' as const,
+      costs: ZERO,
+      allocations: [
+        { name: 'a', holdings: hold('H') },
+        { name: 'b', holdings: hold('H2') },
+        { name: 'g', holdings: hold('G') },
+      ],
+    };
+    const r = refBacktest(s, decide('H', sessions), { H, H2, G }, () => 0);
+    expect(r.equity[2]).toBeCloseTo(1.331, 12);
+  });
+
+  it('the pre-entry probe: held over a night without a bar on the previous session fails', () => {
+    // H has no bar on D[0], an evaluated date; same_close buys H at D[0] (fractional), so the
+    // step to D[1] holds H from a session where H has no bar: its move before entry is unknown.
+    const H = mk([undefined, 100, 100, 100, 100, 100]);
+    const S = mk([1, 1, 1, 1, 1, 1]);
+    const s = { execution: 'same_close' as const, costs: ZERO };
+    const days = decide('H', [D[0]!, D[1]!]);
+    expect(() => refBacktest(s, days, { H, S }, () => 0)).toThrow(/without a bar that day/);
+  });
+
+  describe('whole shares', () => {
+    const usd = (initialAmount: string) => ({ wholeShares: { initialAmount, currency: 'USD' } });
+
+    it('residual interest per covered day, then split and dividend that day', () => {
+      // 9 shares at 100, residual 50 (initial 950). Rate 25.2% = 0.001 a day on D[2..5].
+      // D[2]: 50 x 1.001 = 50.05; split 1.5 -> 13.5: 13 kept, 0.5 x 70 = 35: 85.05.
+      // D[3]: 85.05 x 1.001 = 85.13505; dividend 1 x 13 = 13: 98.13505.
+      // D[4]: x 1.001 = 98.23318505.  D[5]: x 1.001 = 98.33141823505.
+      const X = mk([100, 100, 70, 70, 70, 71], [{}, {}, { splitFactor: 1.5 }, { divCash: 1 }]);
+      const r = refBacktest(strategy('X'), decide('X', sessions), { X, G }, () => 25.2, usd('950'));
+      const cash = ((50 * 1.001 + 35) * 1.001 + 13) * 1.001 * 1.001;
+      expect(r.value![2]!.amount).toBeCloseTo(cash + 13 * 71, 9);
+    });
+
+    it('the rate is read only when the cash at the start of a covered day is above 0', () => {
+      // 10 shares at 100, residual 0. A dividend on the last covered day: no rate read.
+      const late = mk([100, 100, 100, 100, 100, 100], [{}, {}, {}, {}, {}, { divCash: 1 }]);
+      const ok = refBacktest(
+        strategy('X'),
+        decide('X', sessions),
+        { X: late, G },
+        () => NaN,
+        usd('1000'),
+      );
+      expect(ok.value![2]!.amount).toBeCloseTo(1010, 9);
+      // A dividend on D[2]: the cash is above 0 at the start of D[3], the unknown rate fails.
+      const early = mk([100, 100, 100, 100, 100, 100], [{}, {}, { divCash: 1 }]);
+      expect(() =>
+        refBacktest(strategy('X'), decide('X', sessions), { X: early, G }, () => NaN, usd('1000')),
+      ).toThrow(/unknown cash rate/);
     });
   });
 });

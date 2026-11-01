@@ -161,6 +161,18 @@ describe('tax regime declarations', () => {
     ]);
   });
 
+  it('refuses two rate names on one stored kind (rates are stored by kind)', () => {
+    const r = regime();
+    r.fx.rates = {
+      M: { kind: 'tax_mid', nameKey: 'a' },
+      M2: { kind: 'tax_mid', nameKey: 'a' },
+      B: { kind: 'tax_buy', nameKey: 'a' },
+    };
+    expect(taxRegimeProblems(r)).toEqual([
+      'fx.rates.M2: tax_mid is already the kind of M; one name per stored kind',
+    ]);
+  });
+
   it('refuses an account quota with no limit, and a carryforward beyond 100 years', () => {
     const r = regime();
     r.accountTypes[1]!.quota = {};

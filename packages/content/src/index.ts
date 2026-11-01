@@ -70,6 +70,25 @@ export function missingKeys(language: string): string[] {
 }
 
 /**
+ * A benchmark's name with what it holds, the way every benchmark is shown (a generic name alone
+ * would hide the composition): `US stocks (SPY 100%)`. `DEPOSIT` is shown as the deposit rate.
+ */
+export function benchmarkLabel(
+  t: Translate,
+  b: { id: string; holdings: readonly { ticker: string; weight: number }[] },
+): string {
+  const holdings = b.holdings
+    .map((h) =>
+      t('benchmarkHolding', {
+        ticker: h.ticker === 'DEPOSIT' ? t('benchmarkDeposit') : h.ticker,
+        weight: h.weight,
+      }),
+    )
+    .join(', ');
+  return t('benchmarkLabel', { name: benchmarkName(t, b.id), holdings });
+}
+
+/**
  * A benchmark's name (requirements 01 "Benchmark set", the `benchmarks` setting): the text
  * `benchmarks.<id>` when the content has one, else the id itself (an install's own benchmark
  * named by its admin; no hardcoded text).

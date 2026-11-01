@@ -125,6 +125,27 @@ export const appSettings = sqliteTable('app_settings', {
   updatedAt: text('updated_at').notNull().$defaultFn(nowIso).$onUpdateFn(nowIso),
 });
 
+/**
+ * The base currency's deposit rate as a dated series (requirements 05 `CASH_BASE`, 01 "Bank
+ * deposits", 12): each entry applies from its `from_date` until the next one; read only through
+ * `depositRateAsOf` (no look-ahead). Append-only (triggers in migration 0018): an entry is never
+ * edited or removed, and each new one starts after every earlier one, so what a past date reads
+ * never changes. `rate_pct` is decimal text (percent a year).
+ */
+export const depositRates = sqliteTable(
+  'deposit_rates',
+  {
+    id: serial(),
+    ratePct: text('rate_pct').notNull(),
+    fromDate: text('from_date').notNull(),
+    currency: text('currency').notNull(),
+    /** Who added it (`cli`, or a user id later). */
+    actor: text('actor').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex('deposit_rates_from_uq').on(t.fromDate)],
+);
+
 export const userSettings = sqliteTable('user_settings', {
   ownerId: text('owner_id')
     .primaryKey()
