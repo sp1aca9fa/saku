@@ -598,11 +598,11 @@ describe('core vs reference: whole strategies with every B1 operand (random OHLC
           allocations: [
             {
               name: 'Lever',
-              // The last derived signal, when there is one, also decides (Lever only, so Hold and
-              // Cash stay reachable as before).
+              // The last derived signal, when there is one, also decides, and with 2 or more the
+              // first one in `none` (Lever only, so Hold and Cash stay reachable as before).
               when: {
                 all: ['trend', 'pct', ...(p.derived.length ? [`d${p.derived.length - 1}`] : [])],
-                none: ['breakout'],
+                none: ['breakout', ...(p.derived.length > 1 ? ['d0'] : [])],
               },
               holdings: [{ ticker: 'X?L=2&E=0.5', weight: 100 }],
             },

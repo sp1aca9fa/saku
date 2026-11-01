@@ -167,12 +167,18 @@ export const inputsOf = (s: AnySignal): string[] =>
 /**
  * The derived signals in an order where each comes after every derived signal it reads, file
  * order otherwise (the order in the file does not matter, docs/indicators.md "Signals"); compare
- * and ensemble signals read none, so they can all go first. Throws on a cycle or a reference to
- * itself, which the schema refuses (a parsed strategy has neither).
+ * and ensemble signals read none, so they can all go first. Throws on an unknown id, a cycle or a
+ * reference to itself, which the schema refuses (a parsed strategy has none of them).
  */
 export function derivedOrder(signals: AnySignal[]): DerivedSignal[] {
   const derived = signals.filter(isDerived);
   const derivedIds = new Set(derived.map((s) => s.id));
+  const allIds = new Set(signals.map((s) => s.id));
+  for (const s of derived) {
+    for (const id of inputsOf(s)) {
+      if (!allIds.has(id)) throw new Error(`Signal "${s.id}" reads an unknown signal "${id}".`);
+    }
+  }
   const placed = new Set<string>();
   const out: DerivedSignal[] = [];
   while (out.length < derived.length) {
@@ -316,7 +322,7 @@ export const Strategy = z
           'signals read each other in a cycle (' +
           [...ring, ring[0]!].map((id) => `"${id}"`).join(' -> ') +
           '), so none of them has a value; break the cycle',
-        path: ['signals', s.signals.findIndex((x) => x.id === ring[0]), 'of'],
+        path: ['signals', s.signals.findIndex((x) => isDerived(x) && x.id === ring[0]), 'of'],
       });
     }
     s.allocations.forEach((a, i) => {

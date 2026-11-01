@@ -238,13 +238,30 @@ describe('Strategy schema: not, and, or', () => {
     ]);
   });
 
-  it('derivedOrder throws on a cycle (the schema refuses one first)', () => {
+  it('a cycle is reported at the derived signal, not a compare signal with the same id', () => {
+    const r = issues([
+      compare('a'),
+      { id: 'a', type: 'not', of: 'b' },
+      { id: 'b', type: 'not', of: 'a' },
+    ]);
+    expect(r).toContainEqual(['signals', 'signal ids must be unique']);
+    const cycle = r.find((i) => i[1]!.includes('cycle'));
+    expect(cycle?.[0]).toBe('signals.1.of');
+  });
+
+  it('derivedOrder throws on a cycle or an unknown id (the schema refuses both first)', () => {
     expect(() =>
       derivedOrder([
         { id: 'p', type: 'not', of: 'q' },
         { id: 'q', type: 'not', of: 'p' },
       ]),
     ).toThrow(/cycle/);
+    expect(() =>
+      derivedOrder([
+        { id: 'q', type: 'not', of: 'p' },
+        { id: 'p', type: 'and', of: ['q', 'zz'] },
+      ]),
+    ).toThrow(/unknown signal "zz"/);
   });
 
   it.each([
