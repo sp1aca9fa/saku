@@ -34,6 +34,8 @@ Rules:
 - If the spec contradicts itself or the requirements, or would change what a signal means, how
   money or risk is shown, or which data is trusted, stop and report the question with your
   recommendation instead of guessing.
+- After editing a source file temporarily (a probe or mutation check), restore it with
+  `git checkout -- <file>`, never `cp` (`cp` asks before overwriting here and hangs the shell).
 
 Output (short, no narration):
 ```

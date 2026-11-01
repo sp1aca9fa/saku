@@ -30,6 +30,8 @@ Rules:
 - If the spec is unclear, take the most conservative reading and list it under Assumptions. If
   the unclear part is a later-stage detail, leave it out and say so.
 - If the chunk turns out to touch trust territory, stop and say "needs builder-heavy" and why.
+- After editing a source file temporarily (a probe or mutation check), restore it with
+  `git checkout -- <file>`, never `cp` (`cp` asks before overwriting here and hangs the shell).
 
 Output (short, no narration):
 ```
