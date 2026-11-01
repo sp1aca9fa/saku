@@ -114,6 +114,7 @@ function checkInput(input: GoalProjectionInput): void {
         throw new Error(`goalProjection: ${name}: close or split on ${b.date} is not positive.`);
       }
       if (
+        typeof b.closeIsSplitAdjusted !== 'boolean' ||
         !(typeof b.divCash === 'number' && Number.isFinite(b.divCash) && b.divCash >= 0) ||
         !finiteOrMissing(b.open) ||
         !finiteOrMissing(b.high) ||
@@ -290,13 +291,16 @@ export function goalProjection(input: GoalProjectionInput): Statistic<GoalProjec
       }
       return e;
     };
+    // A session missing from the run, or a non-finite equity, is a caller error and throws
+    // before the no-value reason of an equity at h <= 0.
+    const future = input.future.map(at);
     let previous = at(h);
     if (previous <= 0) return noValue('equityNotPositive');
     let wealth = input.initial;
     let lost = false;
     let month = monthOf(h);
-    for (const f of input.future) {
-      const e = at(f);
+    for (const [i, f] of input.future.entries()) {
+      const e = future[i]!;
       if (!lost) {
         if (e <= 0) {
           lost = true;

@@ -383,10 +383,17 @@ describe('overfitting', () => {
     expect(o.effectiveTrials).toEqual(effectiveTrials(excess));
     expect(o.deflatedSharpe).toEqual(deflatedSharpe(excess, 2));
     expect(o.overfittingProbability).toEqual(backtestOverfitting(excess, 2));
-    const none = overfitting({ trials: [], cashReturn: () => 0, selected: 0 });
-    expect(reason(none.deflatedSharpe)).toBe('tooFewTrials');
-    const short = overfitting({ trials: [curve([0.01, 0.02])], cashReturn: () => 0, selected: 0 });
-    expect(reason(short.overfittingProbability)).toBe('tooShort');
+    // Caller errors first: with no trial no index is in range; odd partitions throw even when
+    // the trials have a no-value reason.
+    expect(() => overfitting({ trials: [], cashReturn: () => 0, selected: 0 })).toThrow('no trial');
+    const one = [curve([0.01, 0.02])];
+    expect(() =>
+      overfitting({ trials: one, cashReturn: () => 0, selected: 0, partitions: 3 }),
+    ).toThrow('partitions');
+    // PBO: fewer than 2 trials comes before any per-trial reason; the DSR has its own.
+    const short = overfitting({ trials: one, cashReturn: () => 0, selected: 0 });
+    expect(reason(short.overfittingProbability)).toBe('tooFewTrials');
+    expect(reason(short.deflatedSharpe)).toBe('tooShort');
     expect(() => overfitting({ trials, cashReturn: () => 0, selected: 5 })).toThrow('no trial 5');
   });
 });

@@ -22,8 +22,8 @@ const addDays = (date: TradingDate, days: number): TradingDate =>
 export interface Fold {
   /** The fold's first boundary date (B_q). */
   start: TradingDate;
-  /** The last date of the fold's series. */
-  end: TradingDate;
+  /** The date of the fold's last own point; undefined when the fold holds none (no value). */
+  end: TradingDate | undefined;
   /** Yearly Sharpe of the strategy and of the benchmark over the fold. */
   strategy: Metric<number>;
   benchmark: Metric<number>;
@@ -53,14 +53,14 @@ function foldSeries(
   to: TradingDate,
   first: boolean,
   last: boolean,
-): EquitySample[] {
-  const out: EquitySample[] = [];
+): { series: EquitySample[]; own: EquitySample[] } {
+  const own: EquitySample[] = [];
   let before: EquitySample | undefined;
   for (const p of series) {
     if (p.date < from) before = p;
-    else if (p.date < to || (last && p.date === to)) out.push(p);
+    else if (p.date < to || (last && p.date === to)) own.push(p);
   }
-  return !first && before ? [before, ...out] : out;
+  return { series: !first && before ? [before, ...own] : own, own };
 }
 
 /**
@@ -92,11 +92,11 @@ export function walkForward(input: {
     const last = q === K - 1;
     const s = foldSeries(points, bounds[q]!, bounds[q + 1]!, q === 0, last);
     const b = foldSeries(benchmark, bounds[q]!, bounds[q + 1]!, q === 0, last);
-    const strategy = metrics({ points: s, cashReturn: input.cashReturn }).sharpe;
-    const bench = metrics({ points: b, cashReturn: input.cashReturn }).sharpe;
+    const strategy = metrics({ points: s.series, cashReturn: input.cashReturn }).sharpe;
+    const bench = metrics({ points: b.series, cashReturn: input.cashReturn }).sharpe;
     folds.push({
       start: bounds[q]!,
-      end: s.at(-1)?.date ?? bounds[q]!,
+      end: s.own.at(-1)?.date,
       strategy,
       benchmark: bench,
       beat:
@@ -134,6 +134,8 @@ export interface CrisisFigures {
 
 export interface CrisisReplay {
   id: string;
+  /** The window's source, repeated with its result. */
+  source: string;
   start: TradingDate;
   end: TradingDate;
   strategy: Statistic<CrisisFigures>;
@@ -201,6 +203,7 @@ export function crisisReplays(input: {
     const benchmark = inWindow(input.benchmark, w);
     return {
       id: w.id,
+      source: w.source,
       start: w.start,
       end: w.end,
       strategy,

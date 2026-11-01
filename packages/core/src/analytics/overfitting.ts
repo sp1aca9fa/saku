@@ -400,10 +400,10 @@ export interface Overfitting {
 export function overfitting(
   input: TrialsInput & { selected: number; partitions?: number },
 ): Overfitting {
-  if (input.trials.length === 0) {
-    const none = noValue<never>('tooFewTrials');
-    return { effectiveTrials: none, deflatedSharpe: none, overfittingProbability: none };
-  }
+  // Caller errors throw before any no-value reason (docs/analytics.md "Caller errors and the
+  // order of reasons"): a malformed series, `selected` outside 0..M-1 (so no trial throws), and
+  // partitions odd or below 2.
+  input.trials.forEach((t, j) => checkSeries(t, `trial ${j}`));
   if (
     !Number.isInteger(input.selected) ||
     input.selected < 0 ||
@@ -411,18 +411,25 @@ export function overfitting(
   ) {
     throw new Error(`overfitting: no trial ${input.selected}.`);
   }
+  const partitions = input.partitions ?? PBO_PARTITIONS;
+  if (!Number.isInteger(partitions) || partitions < 2 || partitions % 2 !== 0) {
+    throw new Error('backtestOverfitting: the partitions are an even integer >= 2.');
+  }
+  // PBO compares at least 2 trials: fewer is `tooFewTrials` before any per-trial reason.
+  const pboTooFew =
+    input.trials.length < 2 ? noValue<BacktestOverfitting>('tooFewTrials') : undefined;
   const aligned = alignTrials(input);
   if (!aligned.ok) {
     return {
       effectiveTrials: aligned,
       deflatedSharpe: aligned,
-      overfittingProbability: aligned,
+      overfittingProbability: pboTooFew ?? aligned,
     };
   }
   const { excess } = aligned.value;
   return {
     effectiveTrials: effectiveTrials(excess),
     deflatedSharpe: deflatedSharpe(excess, input.selected),
-    overfittingProbability: backtestOverfitting(excess, input.partitions),
+    overfittingProbability: pboTooFew ?? backtestOverfitting(excess, partitions),
   };
 }

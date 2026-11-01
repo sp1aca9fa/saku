@@ -427,29 +427,26 @@ function buildTrials(seed: number): TrialsCase {
 /** The overfitting statistics of one case, core and reference, compared one by one. */
 function compareTrials(c: TrialsCase, label: string): string | undefined {
   const core = () => overfitting({ ...c.input, selected: c.selected, partitions: c.partitions });
+  const dsr = compare(
+    () => core().deflatedSharpe,
+    () => refDeflatedSharpe({ ...c.input, selected: c.selected }),
+    `${label} deflatedSharpe`,
+  );
+  // No trial: both throw on `selected` (compared above). The reference's effective trials and
+  // PBO of trials take no `selected`, so they have nothing to compare there.
+  if (c.input.trials.length === 0) return dsr;
   return (
+    dsr ??
     compare(
       () => core().effectiveTrials,
       () => refEffectiveTrialsOfTrials(c.input),
       `${label} effectiveTrials`,
     ) ??
     compare(
-      () => core().deflatedSharpe,
-      () => refDeflatedSharpe({ ...c.input, selected: c.selected }),
-      `${label} deflatedSharpe`,
-    ) ??
-    (c.input.trials.length === 1
-      ? // One trial: both give no value; which reason comes first is an open reading (below).
-        compare(
-          () => core().overfittingProbability.ok,
-          () => refPbo({ ...c.input, partitions: c.partitions }).ok,
-          `${label} overfittingProbability (one trial)`,
-        )
-      : compare(
-          () => core().overfittingProbability,
-          () => refPbo({ ...c.input, partitions: c.partitions }),
-          `${label} overfittingProbability`,
-        ))
+      () => core().overfittingProbability,
+      () => refPbo({ ...c.input, partitions: c.partitions }),
+      `${label} overfittingProbability`,
+    )
   );
 }
 
@@ -458,11 +455,10 @@ describe('overfitting statistics: core vs reference', () => {
     const reasons = new Map<string, number>();
     for (let seed = 1; seed <= 400; seed++) {
       const c = buildTrials(seed);
-      // Not compared here: the two cases where the contract leaves the order of a refusal and a
-      // no-value reason open (see the "open readings" tests below).
-      if (c.input.trials.length === 0) continue;
       const d = compareTrials(c, `seed ${seed}`);
       if (d) throw new Error(d);
+      // No trial: both throw (compared above), so no reasons to count.
+      if (c.input.trials.length === 0) continue;
       const r = overfitting({ ...c.input, selected: c.selected, partitions: c.partitions });
       for (const s of Object.values(r)) {
         const key = s.ok ? 'ok' : s.reason;
@@ -780,21 +776,6 @@ function buildPeriods(seed: number) {
 }
 
 describe('walk-forward folds: core vs reference', () => {
-  /**
-   * A fold without an own point (a gap of more than a year) has no last point: core gives the
-   * date of the point before the fold, the reference undefined. Open reading (end of the file):
-   * left out of the comparison; everything else in the fold is compared.
-   */
-  const withoutEmptyEnd = <T extends { ok: boolean }>(r: T): T => {
-    if (!r.ok) return r;
-    const v = (r as unknown as { value: { folds: { end?: string; start: string }[] } }).value;
-    const own = (f: { end?: string; start: string }) => f.end !== undefined && f.end >= f.start;
-    return {
-      ...r,
-      value: { ...v, folds: v.folds.map((f) => (own(f) ? f : { ...f, end: 'empty' })) },
-    } as T;
-  };
-
   it("a benchmark point after the strategy's last date is in no fold (same period for both)", () => {
     const rnd = random(1300);
     const dates = sessions(rnd, '2012-01-03', 1200);
@@ -831,8 +812,8 @@ describe('walk-forward folds: core vs reference', () => {
         folds: c.folds,
       };
       const d = compare(
-        () => withoutEmptyEnd(walkForward(input)),
-        () => withoutEmptyEnd(refWalkForward(input)),
+        () => walkForward(input),
+        () => refWalkForward(input),
         `seed ${1000 + seed}`,
       );
       if (d) throw new Error(d);
@@ -866,18 +847,6 @@ describe('walk-forward folds: core vs reference', () => {
 const TEMPLATE = crisisTemplate as CrisisWindow[];
 
 describe('crisis replays: core vs reference', () => {
-  /** The reference repeats each window's `source` in its result; the contract does not say. */
-  const withoutSource = (r: ReturnType<typeof refCrisisReplays>) =>
-    r.ok
-      ? {
-          ...r,
-          value: {
-            ...r.value,
-            windows: r.value.windows.map(({ source: _, ...w }) => w),
-          },
-        }
-      : r;
-
   it('agree on the template windows and random windows', () => {
     let covered = 0;
     for (let seed = 1; seed <= 300; seed++) {
@@ -894,8 +863,7 @@ describe('crisis replays: core vs reference', () => {
       const input = { points: c.points, benchmark: c.benchmark, windows };
       const d = compare(
         () => crisisReplays(input),
-        () =>
-          withoutSource(refCrisisReplays({ strategy: c.points, benchmark: c.benchmark, windows })),
+        () => refCrisisReplays({ strategy: c.points, benchmark: c.benchmark, windows }),
         `seed ${2000 + seed}`,
       );
       if (d) throw new Error(d);
@@ -912,7 +880,7 @@ describe('crisis replays: core vs reference', () => {
     for (const windows of [TEMPLATE, []]) {
       agree(
         () => crisisReplays({ points: flat, benchmark: flat2, windows }),
-        () => withoutSource(refCrisisReplays({ strategy: flat, benchmark: flat2, windows })),
+        () => refCrisisReplays({ strategy: flat, benchmark: flat2, windows }),
         `flat, ${windows.length} windows`,
       );
     }
@@ -1383,26 +1351,212 @@ describe('Wilson interval and near ties: core vs reference', () => {
   });
 });
 
-// ---- Open readings: where the contract does not decide between the two ----
-
-// ---- Open readings (left out of the comparisons above, put to the owner) ----
+// ---- Caller errors and the order of reasons (docs/analytics.md, settled 2026-11-02) ----
 //
-// Where core and the reference read the contract differently and the text does not decide. Each
-// is excluded where noted; nothing here asserts either reading.
-// 1. PBO of one trial whose data also has a trials reason (equity <= 0, datesDiffer, tooShort,
-//    cashRateMissing, noDispersion): core gives that reason, the reference `tooFewTrials`
-//    (compared as "both no value").
-// 2. No trial at all: core's `overfitting` gives `tooFewTrials`; the reference DSR throws (no
-//    index is in range). Not compared.
-// 3. Walk-forward with `folds = 1`: core throws (folds >= 2), the reference gives `tooShort`
-//    (K = 1 < 2). Not compared.
-// 4. A walk-forward fold without an own point: `end` is the point before the fold in core
-//    (earlier than `start`), undefined in the reference (normalized above).
-// 5. Phi(NaN): core NaN, the reference throws. Not compared.
-// 6. Projection: a negative `divCash` throws in core, not in the reference; a non-boolean
-//    `closeIsSplitAdjusted` throws in the reference, not in core; an equity at h <= 0 together
-//    with a future session missing from the run: core no value, the reference throws. Not
-//    compared.
-// 7. `overfitting` with invalid partitions and trials that have a no-value reason: core returns
-//    the reason, the reference PBO throws. Not compared (valid trials: both throw, above).
-// 8. Crisis replays: the reference repeats each window's `source` in its result (removed above).
+// The eight readings the first comparison found open, now asserted. A caller error throws before
+// any no-value reason; for PBO fewer than 2 trials comes first; an empty walk-forward fold has no
+// `end`; each crisis result repeats its window's source.
+
+describe('caller errors and the order of reasons: core vs reference', () => {
+  const rnd = random(6000);
+  const dates = sessions(rnd, '2018-01-02', 80);
+  const walk = () => {
+    let v = 10;
+    return dates.map((date, i) => {
+      if (i > 0) v *= 1 + 0.01 * gauss(rnd);
+      return { date, equity: v };
+    });
+  };
+  const cash = () => 0.0001;
+
+  it('1. PBO of one trial is tooFewTrials before any per-trial reason', () => {
+    const wiped = walk();
+    wiped[5]!.equity = 0;
+    const flat = dates.map((date) => ({ date, equity: 7 }));
+    for (const trial of [wiped, flat, walk().slice(0, 10), walk()]) {
+      const input = { trials: [trial], cashReturn: cash };
+      expect(overfitting({ ...input, selected: 0 }).overfittingProbability).toEqual({
+        ok: false,
+        reason: 'tooFewTrials',
+      });
+      agree(
+        () => overfitting({ ...input, selected: 0 }).overfittingProbability,
+        () => refPbo(input),
+        'one trial',
+      );
+    }
+  });
+
+  it('2. the DSR of no trial throws (no index is in range)', () => {
+    bothThrow(
+      () => overfitting({ trials: [], cashReturn: cash, selected: 0 }),
+      () => refDeflatedSharpe({ trials: [], cashReturn: cash, selected: 0 }),
+      'no trial',
+    );
+  });
+
+  it('3. walk-forward with folds = 1 throws', () => {
+    const points = walk();
+    bothThrow(
+      () => walkForward({ points, benchmark: points, cashReturn: cash, folds: 1 }),
+      () => refWalkForward({ points, benchmark: points, cashReturn: cash, folds: 1 }),
+      'folds 1',
+    );
+  });
+
+  it('4. a walk-forward fold without an own point has no end and no value', () => {
+    // Points 2 days apart, then a gap of 900 days: with 4 folds the second holds no point.
+    const ds = Array.from({ length: 800 }, (_, i) => addDays('2010-01-04', 2 * i));
+    const points = ds.map((d, i) => ({
+      date: i < 300 ? d : addDays(d, 900),
+      equity: 1 + 0.01 * Math.sin(i) + i * 0.001,
+    }));
+    const input = { points, benchmark: points, cashReturn: cash, folds: 4 };
+    const r = walkForward(input);
+    const empty = r.ok ? r.value.folds.filter((f) => f.end === undefined) : [];
+    expect(empty.length).toBeGreaterThan(0);
+    for (const f of empty) expect(f.strategy.ok).toBe(false);
+    agree(
+      () => walkForward(input),
+      () => refWalkForward(input),
+      'empty fold',
+    );
+  });
+
+  it('5. Phi of NaN throws', () => {
+    bothThrow(
+      () => normalCdf(Number.NaN),
+      () => refPhi(Number.NaN),
+      'Phi(NaN)',
+    );
+  });
+
+  describe('6. projection refusals come before its no-value reasons', () => {
+    const { history, dates: hd } = buildHistory(random(6002), 1, 300);
+    const base: GoalProjectionInput = {
+      history,
+      future: sessions(random(6003), addDays(hd.at(-1)!, 1), 20),
+      run: trendRun(1, hd.at(-10)!),
+      initial: 1000,
+      monthly: 0,
+      goal: 1000,
+      currency: 'XYZ',
+      seed: 5,
+      paths: 3,
+    };
+    const asRef = (x: GoalProjectionInput) => x as unknown as RefProjectionInput;
+    const withBar = (change: (b: RawBar) => void): GoalProjectionInput => {
+      const h = structuredClone(history);
+      change(h.B![100]!);
+      return { ...base, history: h };
+    };
+
+    it('a negative divCash throws', () => {
+      const input = withBar((b) => (b.divCash = -0.1));
+      bothThrow(
+        () => goalProjection(input),
+        () => refGoalProjection(asRef(input)),
+        'negative divCash',
+      );
+    });
+
+    it('a closeIsSplitAdjusted that is not a boolean throws', () => {
+      for (const flag of [undefined, 0, 'true']) {
+        const input = withBar((b) => {
+          (b as { closeIsSplitAdjusted: unknown }).closeIsSplitAdjusted = flag;
+        });
+        bothThrow(
+          () => goalProjection(input),
+          () => refGoalProjection(asRef(input)),
+          `closeIsSplitAdjusted ${String(flag)}`,
+        );
+      }
+    });
+
+    it('fewer than 252 sample days is tooShort before any path runs', () => {
+      const short = { ...base, history: { B: history.B!.slice(-252) } };
+      let runs = 0;
+      const counted = {
+        ...short,
+        run: (b: Record<string, RawBar[]>) => {
+          runs++;
+          return base.run(b);
+        },
+      };
+      expect(goalProjection(counted)).toEqual({ ok: false, reason: 'tooShort' });
+      expect(runs).toBe(0);
+      agree(
+        () => goalProjection(counted),
+        () => refGoalProjection(asRef(counted)),
+        '251 sample days',
+      );
+      expect(runs).toBe(0);
+      // A run that would throw is never reached either.
+      const broken = {
+        ...short,
+        run: (): ProjectionPoint[] => {
+          throw new Error('run called');
+        },
+      };
+      agree(
+        () => goalProjection(broken),
+        () => refGoalProjection(asRef(broken)),
+        'tooShort, run never called',
+      );
+    });
+
+    it('a session missing from the run throws before an equity at h <= 0 is no value', () => {
+      const dead = (b: Record<string, readonly RawBar[]>) =>
+        base.run(b as Record<string, RawBar[]>).map((p) => ({ ...p, equity: -1 }));
+      const missing = { ...base, run: (b: Record<string, RawBar[]>) => dead(b).slice(0, -1) };
+      bothThrow(
+        () => goalProjection(missing),
+        () => refGoalProjection(asRef(missing)),
+        'missing session, dead at h',
+      );
+      const nan = {
+        ...base,
+        run: (b: Record<string, RawBar[]>) =>
+          dead(b).map((p, i, all) => (i === all.length - 1 ? { ...p, equity: Number.NaN } : p)),
+      };
+      bothThrow(
+        () => goalProjection(nan),
+        () => refGoalProjection(asRef(nan)),
+        'NaN equity, dead at h',
+      );
+      const deadOnly = { ...base, run: dead };
+      expect(goalProjection(deadOnly)).toEqual({ ok: false, reason: 'equityNotPositive' });
+      agree(
+        () => goalProjection(deadOnly),
+        () => refGoalProjection(asRef(deadOnly)),
+        'dead at h',
+      );
+    });
+  });
+
+  it('7. invalid partitions throw even when the trials have a no-value reason', () => {
+    const wiped = walk();
+    wiped[3]!.equity = -1;
+    for (const trials of [[wiped, walk()], [walk()], [walk(), walk().slice(0, 5)]]) {
+      for (const partitions of [3, 0, 2.5]) {
+        bothThrow(
+          () => overfitting({ trials, cashReturn: cash, selected: 0, partitions }),
+          () => refPbo({ trials, cashReturn: cash, partitions }),
+          `partitions ${partitions}`,
+        );
+      }
+    }
+  });
+
+  it("8. each crisis result repeats its window's source", () => {
+    const points = walk();
+    const windows = [{ id: 'w', start: dates[10]!, end: dates[30]!, source: 'made up' }];
+    const r = crisisReplays({ points, benchmark: points, windows });
+    expect(r.ok && r.value.windows[0]!.source).toBe('made up');
+    agree(
+      () => crisisReplays({ points, benchmark: points, windows }),
+      () => refCrisisReplays({ strategy: points, benchmark: points, windows }),
+      'source',
+    );
+  });
+});

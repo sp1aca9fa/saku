@@ -43,9 +43,9 @@ function erfcNonNegative(x: number): number {
   return expMinusSquare(x) / (SQRT_PI * f);
 }
 
-/** Phi(z), the standard normal distribution function. */
+/** Phi(z), the standard normal distribution function; NaN is a caller error (throws). */
 export function normalCdf(z: number): number {
-  if (Number.isNaN(z)) return NaN;
+  if (Number.isNaN(z)) throw new Error('normalCdf: z is NaN.');
   if (z === -Infinity) return 0;
   if (z === Infinity) return 1;
   const x = Math.abs(z) / Math.SQRT2;
@@ -70,6 +70,7 @@ function lowerQuantile(p: number): number {
     const cdf = normalCdf(x);
     const step = ((Math.log(cdf) - target) * cdf) / normalDensity(x);
     x -= step;
+    if (!Number.isFinite(x)) break;
     if (Math.abs(step) <= 4e-16 * Math.max(1, Math.abs(x))) break;
   }
   if (!Number.isFinite(x)) throw new Error(`normalQuantile: ${p} is below the supported range.`);
