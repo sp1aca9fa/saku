@@ -555,3 +555,100 @@ describe('reference: a signal ticker without a bar is a session without a decisi
     expect(() => refBacktest(withSafeH, days, bars, () => 0)).toThrow(/no bars loaded for G/);
   });
 });
+
+describe('reference: derived signals not / and / or', () => {
+  const ds = ['2026-04-01', '2026-04-02', '2026-04-03', '2026-04-06'];
+  // Closes 10, 20, 30, 12 (no near-ties). Comparisons on the plain price (the reference has no parser):
+  //   a: price > 15  -> F, T, T, F
+  //   b: price < 25  -> T, T, F, T
+  const bars: Record<string, RefBar[]> = {
+    Q: [10, 20, 30, 12].map((close, i) => ({
+      date: ds[i]!,
+      close,
+      divCash: 0,
+      splitFactor: 1,
+      closeIsSplitAdjusted: false,
+    })),
+  };
+  const s: RefStrategy = {
+    signals: [
+      // Declared before the signals it reads.
+      { id: 'neither', type: 'not', of: 'either' },
+      { id: 'both', type: 'and', of: ['a', 'b'] },
+      { id: 'either', type: 'or', of: ['notA', 'notB'] },
+      {
+        id: 'a',
+        type: 'compare',
+        left: { indicator: 'price', ticker: 'Q' },
+        op: '>',
+        right: { threshold: 15 },
+      },
+      {
+        id: 'b',
+        type: 'compare',
+        left: { indicator: 'price', ticker: 'Q' },
+        op: '<',
+        right: { threshold: 25 },
+      },
+      { id: 'notA', type: 'not', of: 'a' },
+      { id: 'notB', type: 'not', of: 'b' },
+    ],
+    allocations: [
+      { name: 'both', when: { all: ['both'] }, holdings: [{ ticker: 'Q', weight: 100 }] },
+      { name: 'rest', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+    ],
+  };
+
+  it('evaluates derived signals in any order, without state of their own', () => {
+    const out = refEvaluate(s, bars);
+    const col = (id: string) => out.map((d) => d.signals[id]);
+    expect(col('a')).toEqual([false, true, true, false]);
+    expect(col('b')).toEqual([true, true, false, true]);
+    expect(col('notA')).toEqual([true, false, false, true]);
+    expect(col('notB')).toEqual([false, false, true, false]);
+    // either = notA or notB; neither = not either = a and b.
+    expect(col('either')).toEqual([true, false, true, true]);
+    expect(col('neither')).toEqual([false, true, false, false]);
+    expect(col('both')).toEqual([false, true, false, false]);
+    expect(out.map((d) => d.allocation)).toEqual(['rest', 'both', 'rest', 'rest']);
+  });
+
+  it('a derived signal is defined only when its inputs are (warm-up)', () => {
+    const warm: RefStrategy = {
+      signals: [
+        { id: 'n', type: 'not', of: 'up' },
+        {
+          id: 'up',
+          type: 'compare',
+          left: { indicator: 'return', ticker: 'Q', length: 1 },
+          op: '>',
+          right: { threshold: 0 },
+        },
+      ],
+      allocations: [
+        { name: 'x', when: { any: ['n'] }, holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        { name: 'y', holdings: [{ ticker: 'Q', weight: 100 }] },
+      ],
+    };
+    const out = refEvaluate(warm, bars);
+    // Returns: +100%, +50%, -60% from the second day.
+    expect(out.map((d) => d.date)).toEqual(ds.slice(1));
+    expect(out.map((d) => d.signals.n)).toEqual([false, false, true]);
+    expect(out.map((d) => d.allocation)).toEqual(['y', 'y', 'x']);
+  });
+
+  it('an unknown id or a cycle throws (no parser in the reference)', () => {
+    const base = s.signals.filter((x) => x.id === 'a');
+    const unknown = { ...s, signals: [...base, { id: 'z', type: 'not' as const, of: 'nope' }] };
+    expect(() => refEvaluate(unknown, bars)).toThrow(/unknown signal nope/);
+    const cycle = {
+      ...s,
+      signals: [
+        ...base,
+        { id: 'p', type: 'and' as const, of: ['a', 'q'] },
+        { id: 'q', type: 'not' as const, of: 'p' },
+      ],
+    };
+    expect(() => refEvaluate(cycle, bars)).toThrow(/cycle/);
+  });
+});

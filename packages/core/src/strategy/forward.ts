@@ -15,7 +15,7 @@ import {
   signalTickers,
   whyUndecided,
 } from './engine';
-import type { Comparison, Holding, Strategy } from './schema';
+import { type Holding, type Strategy, comparisonsOf } from './schema';
 
 export const SAFE_STATE = 'Safe state';
 
@@ -110,13 +110,12 @@ function shifted(
   };
 }
 
-const comparisonsOf = (s: Strategy['signals'][number]): Comparison[] =>
-  s.type === 'compare' ? [s] : s.members;
-
 /**
  * Each comparison's state on every evaluated date, keyed `${signal}#${index}`, with the bars of a
  * ticker it reads. The engine keeps one state per comparison, set by that comparison alone, so
- * running it on the comparisons as signals of their own gives the same states.
+ * running it on the comparisons as signals of their own gives the same states. Derived signals
+ * (not, and, or) have no comparisons and no state of their own: they carry a stand-in only
+ * through the comparisons they read, listed under those signals.
  */
 function comparisonStates(strategy: Strategy, bars: Record<string, RawBar[]>) {
   const comparisons = strategy.signals.flatMap((s) =>

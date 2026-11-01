@@ -3,7 +3,7 @@
 // return, the volatility one included (spec 2026-11-01 lookback-health, C2). The YAML templates
 // replaced JSON ones (spec 2026-11-01 yaml-strategies); their content is unchanged: the former
 // JSON text is kept here and must read to the same value.
-import { Strategy, dependencies } from '@saku/core';
+import { Strategy, comparisonsOf, dependencies } from '@saku/core';
 import { findRepoRoot } from '@saku/db/env';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -109,7 +109,7 @@ describe('strategy templates', () => {
     const s = strategy('setup-1.yaml');
     expect(dependencies(s)).toContain('SPY');
     const operands = s.signals
-      .flatMap((x) => (x.type === 'compare' ? [x] : x.members))
+      .flatMap(comparisonsOf)
       .flatMap((c) => [c.left, c.right])
       .filter((o) => 'indicator' in o);
     expect(

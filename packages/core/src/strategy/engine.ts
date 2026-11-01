@@ -18,14 +18,17 @@ import {
   volatility,
   yangZhang,
 } from './indicators';
-import type {
-  Allocation,
-  Comparison,
-  Condition,
-  Holding,
-  IndicatorOperand,
-  Operand,
-  Strategy,
+import {
+  type Allocation,
+  type Comparison,
+  type Condition,
+  type Holding,
+  type IndicatorOperand,
+  type Operand,
+  type Strategy,
+  comparisonsOf,
+  derivedOrder,
+  isDerived,
 } from './schema';
 
 /** Values within this relative distance of a bound are a tie: the previous state is kept (06). */
@@ -33,7 +36,7 @@ export const NEAR_TIE = 1e-9;
 
 export interface StrategyDay {
   date: TradingDate;
-  /** Compare signals: true/false; ensembles: the share of members true. */
+  /** Compare and derived (not, and, or) signals: true/false; ensembles: the share of members true. */
   signals: Record<string, boolean | number>;
   allocation: string;
   holdings: Holding[];
@@ -80,8 +83,6 @@ export function onSeriesBasis(bars: RawBar[], series: number[]): SeriesBar[] {
 }
 
 const tickersOf = (o: Operand): string[] => ('ticker' in o ? [o.ticker] : []);
-const comparisonsOf = (s: Strategy['signals'][number]): Comparison[] =>
-  s.type === 'compare' ? [s] : s.members;
 
 /** Every ticker the signals read (holdings are not needed to evaluate). */
 export function signalTickers(s: Strategy): string[] {
@@ -362,6 +363,7 @@ export function evaluate(strategy: Strategy, bars: Record<string, RawBar[]>): St
   }
 
   const { lookup } = context(bars);
+  const order = derivedOrder(strategy.signals);
 
   const dateSets = tickers.map((t) => new Set(bars[t]!.map((b) => b.date)));
   const dates =
@@ -377,6 +379,7 @@ export function evaluate(strategy: Strategy, bars: Record<string, RawBar[]>): St
     const truth: Record<string, boolean> = {};
     let defined = true;
     for (const s of strategy.signals) {
+      if (isDerived(s)) continue;
       const results = comparisonsOf(s).map((c, i) => {
         const key = `${s.id}#${i}`;
         const value = lookup(c.left, date);
@@ -399,7 +402,25 @@ export function evaluate(strategy: Strategy, bars: Record<string, RawBar[]>): St
         truth[s.id] = share >= s.threshold;
       }
     }
+    // Derived signals (docs/indicators.md "Signals"), after every signal they read: true/false
+    // from the inputs' states that date (an ensemble's state: its share against its threshold),
+    // no state or near-tie of their own. Defined when every input is.
+    for (const s of order) {
+      const inputs = (s.type === 'not' ? [s.of] : s.of).map((id) => truth[id]);
+      if (inputs.some((v) => v === undefined)) {
+        defined = false;
+        continue;
+      }
+      truth[s.id] =
+        s.type === 'not'
+          ? !inputs[0]
+          : s.type === 'and'
+            ? inputs.every(Boolean)
+            : inputs.some(Boolean);
+    }
     if (!defined) continue;
+    // After the compare and ensemble signals, each in file order (not the order of evaluation).
+    for (const s of strategy.signals) if (isDerived(s)) signals[s.id] = truth[s.id]!;
     const active: Allocation = strategy.allocations.find(
       (a) => !a.when || conditionHolds(a.when, (id) => truth[id]!),
     )!;

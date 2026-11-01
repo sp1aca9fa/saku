@@ -45,6 +45,7 @@
 // no full-history grade to read; the daily run grades the series on each recorded day.
 import {
   CASH_USD,
+  comparisonsOf,
   type Strategy,
   type TradingDate,
   dependencies,
@@ -83,7 +84,7 @@ export const RANGE_VOLATILITY_REFUSAL =
 /** Whether a signal reads a range volatility (refused until open/high/low are checked, C32). */
 export function readsRangeVolatility(strategy: Strategy): boolean {
   return strategy.signals
-    .flatMap((s) => (s.type === 'compare' ? [s] : s.members))
+    .flatMap(comparisonsOf)
     .flatMap((c) => [c.left, c.right])
     .some(
       (o) =>

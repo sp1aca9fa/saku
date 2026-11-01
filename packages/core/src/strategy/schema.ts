@@ -2,7 +2,8 @@
 // Setup 1 needs: price, SMA and volatility operands, compare and ensemble signals with tolerance
 // bands, an allocation chain with fixed-weight holdings, and the safe state. B1 adds the other v1
 // indicators of requirements 06 (EMA, N-day return, range-based volatility methods, drawdown,
-// N-day high and low). Other parts of 05 join as later stages need them.
+// N-day high and low) and the derived signals not, and, or. Other parts of 05 join as later
+// stages need them.
 //
 // Every object is strict: an unknown key (a typo such as `tolerencePct`) is refused, never
 // dropped, since a registered version must be exactly what its file says (requirements 05,
@@ -105,16 +106,121 @@ export const PLAIN_PRICE_AGAINST_PERCENTAGE =
   'percentage, so the comparison would change after one. Compare price levels with price ' +
   'levels, and percentages with percentages or a fixed level, instead';
 
+const signalId = z.string().min(1);
+
+/**
+ * Derived (`not`) and aggregate (`and`, `or`) signals (requirements 05 "Signals"; contract in
+ * docs/indicators.md "Signals"): they read other signals' states on the same date and keep no
+ * state of their own. `and` and `or` name at least 2 different signals (a repeated id would make
+ * fewer than 2, most likely a typo; refused like a ticker listed twice in holdings).
+ */
+const distinctIds = z
+  .array(signalId)
+  .min(2)
+  .superRefine((ids, ctx) => {
+    for (const id of new Set(ids.filter((x, i) => ids.indexOf(x) !== i))) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `"${id}" is named twice; name each signal once (at least 2 different ones)`,
+      });
+    }
+  });
+
 export const Signal = z.discriminatedUnion('type', [
-  z.strictObject({ id: z.string().min(1), type: z.literal('compare'), ...comparison }),
+  z.strictObject({ id: signalId, type: z.literal('compare'), ...comparison }),
   z.strictObject({
-    id: z.string().min(1),
+    id: signalId,
     type: z.literal('ensemble'),
     members: z.array(Comparison).min(1),
     /** True when at least this share of members is true. */
     threshold: z.number().gt(0).max(1),
   }),
+  /** True when the named signal is false. */
+  z.strictObject({ id: signalId, type: z.literal('not'), of: signalId }),
+  /** True when every named signal is true. */
+  z.strictObject({ id: signalId, type: z.literal('and'), of: distinctIds }),
+  /** True when at least one named signal is true. */
+  z.strictObject({ id: signalId, type: z.literal('or'), of: distinctIds }),
 ]);
+
+type AnySignal = z.infer<typeof Signal>;
+export type DerivedSignal = Extract<AnySignal, { type: 'not' | 'and' | 'or' }>;
+
+export const isDerived = (s: AnySignal): s is DerivedSignal =>
+  s.type === 'not' || s.type === 'and' || s.type === 'or';
+
+/**
+ * The comparisons a signal evaluates itself: a compare signal its own, an ensemble its members,
+ * a derived signal none (it reads other signals' states, whose comparisons are listed there).
+ * Every walk over operands (tickers, lookbacks, refusals) goes through this.
+ */
+export function comparisonsOf(s: AnySignal): z.infer<typeof Comparison>[] {
+  if (s.type === 'compare') return [s];
+  if (s.type === 'ensemble') return s.members;
+  return [];
+}
+
+/** The signal ids a derived signal reads (none for compare and ensemble signals). */
+export const inputsOf = (s: AnySignal): string[] =>
+  s.type === 'not' ? [s.of] : isDerived(s) ? s.of : [];
+
+/**
+ * The derived signals in an order where each comes after every derived signal it reads, file
+ * order otherwise (the order in the file does not matter, docs/indicators.md "Signals"); compare
+ * and ensemble signals read none, so they can all go first. Throws on a cycle or a reference to
+ * itself, which the schema refuses (a parsed strategy has neither).
+ */
+export function derivedOrder(signals: AnySignal[]): DerivedSignal[] {
+  const derived = signals.filter(isDerived);
+  const derivedIds = new Set(derived.map((s) => s.id));
+  const placed = new Set<string>();
+  const out: DerivedSignal[] = [];
+  while (out.length < derived.length) {
+    const next = derived.find(
+      (s) => !placed.has(s.id) && inputsOf(s).every((id) => !derivedIds.has(id) || placed.has(id)),
+    );
+    if (!next) throw new Error('Derived signals read each other in a cycle.');
+    placed.add(next.id);
+    out.push(next);
+  }
+  return out;
+}
+
+/**
+ * Each cycle among derived signals once (a reference to itself excluded: it has its own
+ * message), as the ids along it starting from the one first in the file; ids that are not
+ * derived signals (unknown, compare, ensemble) end a path.
+ */
+function cyclesOf(signals: AnySignal[]): string[][] {
+  const reads = new Map(
+    signals.filter(isDerived).map((s) => [s.id, inputsOf(s).filter((x) => x !== s.id)]),
+  );
+  const order = [...reads.keys()];
+  const done = new Set<string>();
+  const cycles: string[][] = [];
+  const seen = new Set<string>();
+  const visit = (id: string, path: string[]) => {
+    const at = path.indexOf(id);
+    if (at >= 0) {
+      const ring = path.slice(at);
+      // Rotate to start from the id first in the file, so a cycle is reported once.
+      const first = ring.reduce((a, b) => (order.indexOf(b) < order.indexOf(a) ? b : a));
+      const k = ring.indexOf(first);
+      const rotated = [...ring.slice(k), ...ring.slice(0, k)];
+      const key = rotated.join('\u0000');
+      if (!seen.has(key)) {
+        seen.add(key);
+        cycles.push(rotated);
+      }
+      return;
+    }
+    if (done.has(id) || !reads.has(id)) return;
+    for (const next of reads.get(id)!) visit(next, [...path, id]);
+    done.add(id);
+  };
+  for (const id of order) visit(id, []);
+  return cycles;
+}
 
 export const Holding = z.strictObject({ ticker, weight: z.number().gt(0).max(100) });
 const holdings = z
@@ -182,7 +288,7 @@ export const Strategy = z
       const comparisons =
         x.type === 'compare'
           ? [{ c: x, path: ['signals', i] }]
-          : x.members.map((c, j) => ({ c, path: ['signals', i, 'members', j] }));
+          : comparisonsOf(x).map((c, j) => ({ c, path: ['signals', i, 'members', j] }));
       for (const { c, path } of comparisons) {
         if (plainPriceAgainstLevel(c)) {
           ctx.addIssue({ code: 'custom', message: PLAIN_PRICE_AGAINST_LEVEL, path });
@@ -192,6 +298,27 @@ export const Strategy = z
         }
       }
     });
+    // Derived signals: every id they read exists, is not their own, and they form no cycle.
+    s.signals.forEach((x, i) => {
+      for (const id of new Set(inputsOf(x))) {
+        const path = ['signals', i, 'of'];
+        if (id === x.id) {
+          ctx.addIssue({ code: 'custom', message: `signal "${id}" reads itself`, path });
+        } else if (!ids.includes(id)) {
+          ctx.addIssue({ code: 'custom', message: `unknown signal "${id}"`, path });
+        }
+      }
+    });
+    for (const ring of cyclesOf(s.signals)) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          'signals read each other in a cycle (' +
+          [...ring, ring[0]!].map((id) => `"${id}"`).join(' -> ') +
+          '), so none of them has a value; break the cycle',
+        path: ['signals', s.signals.findIndex((x) => x.id === ring[0]), 'of'],
+      });
+    }
     s.allocations.forEach((a, i) => {
       const last = i === s.allocations.length - 1;
       if (last && a.when) {

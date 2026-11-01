@@ -468,13 +468,52 @@ describe('core vs reference: whole strategies with every B1 operand (random OHLC
       ),
     ),
     shareThreshold: fc.constantFrom(0.25, 0.5, 0.75, 1),
+    // Derived signals (not, and, or), each reading the signals above or earlier derived ones,
+    // nested; the whole list then shuffled (the order in the file does not matter).
+    derived: fc.array(
+      fc.record({
+        type: fc.constantFrom('not', 'and', 'or'),
+        picks: fc.array(fc.nat(), { minLength: 2, maxLength: 3 }),
+      }),
+      { maxLength: 4 },
+    ),
+    order: fc.nat(),
   });
+
+  /** `base` with the derived signals added (inputs chosen by `picks`), in a shuffled order. */
+  const withDerived = <T extends { id: string }>(
+    base: T[],
+    derived: { type: string; picks: number[] }[],
+    order: number,
+  ) => {
+    const pool = base.map((b) => b.id);
+    const out: object[] = [...base];
+    derived.forEach(({ type, picks }, i) => {
+      const id = `d${i}`;
+      const pick = (k: number) => pool[k % pool.length]!;
+      if (type === 'not') out.push({ id, type, of: pick(picks[0]!) });
+      else {
+        const of = [...new Set(picks.map(pick))];
+        if (of.length < 2) of.push(pick(picks[0]! + 1));
+        out.push({ id, type, of });
+      }
+      pool.push(id);
+    });
+    const rnd = random(order);
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [out[i], out[j]] = [out[j]!, out[i]!];
+    }
+    return out;
+  };
 
   it('signals, allocations and equity agree on both series bases', () => {
     let evaluated = 0;
     /** Sessions without a decision (the safe state), valued by both. */
     let undecided = 0;
     const allocations = new Set<string>();
+    /** Evaluated days of strategies with at least 2 derived signals (often one reading another). */
+    let derivedDays = 0;
     fc.assert(
       fc.property(ohlcWalk, params, (bars, p) => {
         // On plain prices, levels away from 0 only (owner question C27, open): a percentage
@@ -503,59 +542,68 @@ describe('core vs reference: whole strategies with every B1 operand (random OHLC
           safeState: { holdings: [{ ticker: 'X', weight: 100 }] },
           evaluation: { frequency: 'daily' },
           costs: { slippageBps: 5, feePct: 0.1 },
-          signals: [
-            {
-              id: 'trend',
-              type: 'compare',
-              left: price,
-              op: '>',
-              right: x({ indicator: 'ema', length: p.n }),
-              tolerancePct: p.tolerances[0],
-            },
-            {
-              id: 'cross',
-              type: 'compare',
-              left: x({ indicator: 'ema', length: p.n }),
-              op: '>',
-              right: x({ indicator: 'sma', length: p.m }),
-              tolerancePct: p.tolerances[1],
-            },
-            // The price equals its N-day high (or low) on every new high (low): exact ties.
-            {
-              id: 'breakout',
-              type: 'compare',
-              left: price,
-              op: '<',
-              right: x({ indicator: 'high', length: p.n }),
-              tolerancePct: p.tolerances[2],
-            },
-            {
-              id: 'floor',
-              type: 'compare',
-              left: price,
-              op: '>',
-              right: x({ indicator: 'low', length: p.m }),
-              tolerancePct: p.tolerances[3],
-            },
-            {
-              id: 'pct',
-              type: 'ensemble',
-              threshold: p.shareThreshold,
-              members: [
-                vs(x({ indicator: 'return', length: p.n }), 0),
-                vs(x({ indicator: 'drawdown' }), 1),
-                vs(x({ indicator: 'drawdown', length: p.m }), 2),
-                vs(x({ indicator: 'volatility', length: p.m }), 3),
-                vs(x({ indicator: 'volatility', method: 'parkinson', length: p.n }), 4),
-                vs(x({ indicator: 'volatility', method: 'garman_klass', length: p.n }), 5),
-                vs(x({ indicator: 'volatility', method: 'yang_zhang', length: p.m }), 6),
-              ],
-            },
-          ],
+          signals: withDerived(
+            [
+              {
+                id: 'trend',
+                type: 'compare',
+                left: price,
+                op: '>',
+                right: x({ indicator: 'ema', length: p.n }),
+                tolerancePct: p.tolerances[0],
+              },
+              {
+                id: 'cross',
+                type: 'compare',
+                left: x({ indicator: 'ema', length: p.n }),
+                op: '>',
+                right: x({ indicator: 'sma', length: p.m }),
+                tolerancePct: p.tolerances[1],
+              },
+              // The price equals its N-day high (or low) on every new high (low): exact ties.
+              {
+                id: 'breakout',
+                type: 'compare',
+                left: price,
+                op: '<',
+                right: x({ indicator: 'high', length: p.n }),
+                tolerancePct: p.tolerances[2],
+              },
+              {
+                id: 'floor',
+                type: 'compare',
+                left: price,
+                op: '>',
+                right: x({ indicator: 'low', length: p.m }),
+                tolerancePct: p.tolerances[3],
+              },
+              {
+                id: 'pct',
+                type: 'ensemble',
+                threshold: p.shareThreshold,
+                members: [
+                  vs(x({ indicator: 'return', length: p.n }), 0),
+                  vs(x({ indicator: 'drawdown' }), 1),
+                  vs(x({ indicator: 'drawdown', length: p.m }), 2),
+                  vs(x({ indicator: 'volatility', length: p.m }), 3),
+                  vs(x({ indicator: 'volatility', method: 'parkinson', length: p.n }), 4),
+                  vs(x({ indicator: 'volatility', method: 'garman_klass', length: p.n }), 5),
+                  vs(x({ indicator: 'volatility', method: 'yang_zhang', length: p.m }), 6),
+                ],
+              },
+            ],
+            p.derived,
+            p.order,
+          ),
           allocations: [
             {
               name: 'Lever',
-              when: { all: ['trend', 'pct'], none: ['breakout'] },
+              // The last derived signal, when there is one, also decides (Lever only, so Hold and
+              // Cash stay reachable as before).
+              when: {
+                all: ['trend', 'pct', ...(p.derived.length ? [`d${p.derived.length - 1}`] : [])],
+                none: ['breakout'],
+              },
               holdings: [{ ticker: 'X?L=2&E=0.5', weight: 100 }],
             },
             {
@@ -573,6 +621,7 @@ describe('core vs reference: whole strategies with every B1 operand (random OHLC
         expect(core.map((d) => d.signals)).toEqual(ref.map((d) => d.signals));
         expect(core.map((d) => d.allocation)).toEqual(ref.map((d) => d.allocation));
         evaluated += core.length;
+        if (p.derived.length > 1) derivedDays += core.length;
         for (const d of core) allocations.add(d.allocation);
 
         // Equity on every session from the first evaluated day (days without a decision
@@ -592,6 +641,7 @@ describe('core vs reference: whole strategies with every B1 operand (random OHLC
     );
     expect(evaluated).toBeGreaterThan(0);
     expect(undecided).toBeGreaterThan(0);
+    expect(derivedDays).toBeGreaterThan(0);
     expect(allocations.size).toBe(3);
   });
 });

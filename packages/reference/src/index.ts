@@ -40,10 +40,14 @@ export interface RefComparison {
 
 export interface RefSignal extends Partial<RefComparison> {
   id: string;
-  type: 'compare' | 'ensemble';
+  type: 'compare' | 'ensemble' | 'not' | 'and' | 'or';
   members?: RefComparison[];
   threshold?: number;
+  /** Derived signals: `not` names one signal id, `and` / `or` a list of ids. */
+  of?: string | string[];
 }
+
+const isDerived = (sig: RefSignal) => sig.type === 'not' || sig.type === 'and' || sig.type === 'or';
 
 export interface RefStrategy {
   execution?: 'next_open' | 'next_close' | 'same_close';
@@ -348,8 +352,10 @@ function refStep(value: number, ref: number, c: RefComparison, state: State): St
 
 /** Signals and allocations per date (daily evaluation). */
 export function refEvaluate(s: RefStrategy, bars: Record<string, RefBar[]>): RefDay[] {
-  const comparisons = (sig: RefSignal): RefComparison[] =>
-    sig.type === 'compare' ? [sig as RefComparison] : sig.members!;
+  const comparisons = (sig: RefSignal): RefComparison[] => {
+    if (isDerived(sig)) return [];
+    return sig.type === 'compare' ? [sig as RefComparison] : sig.members!;
+  };
   const tickers = new Set<string>();
   for (const sig of s.signals) {
     for (const c of comparisons(sig)) {
@@ -424,6 +430,7 @@ export function refEvaluate(s: RefStrategy, bars: Record<string, RefBar[]>): Ref
     const on: Record<string, boolean> = {};
     let ready = true;
     for (const sig of s.signals) {
+      if (isDerived(sig)) continue;
       let trues = 0;
       const list = comparisons(sig);
       for (let k = 0; k < list.length; k++) {
@@ -446,6 +453,27 @@ export function refEvaluate(s: RefStrategy, bars: Record<string, RefBar[]>): Ref
       }
     }
     if (!ready) continue;
+    // Derived signals (docs/indicators.md "not / and / or"): read the other signals' states on the
+    // same date, keep no state of their own, and may name signals declared later in the list.
+    const byId = new Map(s.signals.map((sig) => [sig.id, sig]));
+    const resolve = (id: string, path: string[]): boolean => {
+      if (path.includes(id))
+        throw new Error(`reference: signal cycle ${[...path, id].join(' -> ')}`);
+      const sig = byId.get(id);
+      if (!sig) throw new Error(`reference: unknown signal ${id}`);
+      if (!isDerived(sig)) return on[id]!;
+      if (on[id] === undefined) {
+        const inputs = (Array.isArray(sig.of) ? sig.of : [sig.of!]).map((x) =>
+          resolve(x, [...path, id]),
+        );
+        if (sig.type === 'not') on[id] = !inputs[0]!;
+        else if (sig.type === 'and') on[id] = inputs.every((x) => x);
+        else on[id] = inputs.some((x) => x);
+        signals[id] = on[id];
+      }
+      return on[id];
+    };
+    for (const sig of s.signals) if (isDerived(sig)) resolve(sig.id, []);
     let chosen = s.allocations[s.allocations.length - 1]!;
     for (const a of s.allocations) {
       const w = a.when;

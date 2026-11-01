@@ -107,6 +107,39 @@ describe('forwardDecision', () => {
     expect(far).toMatchObject({ dataStatus: 'yellow', allocation: 'Risk on' });
   });
 
+  it('decision margin with a derived signal: it moves only through what it reads', () => {
+    const derived = Strategy.parse({
+      ...strategy,
+      signals: [{ id: 'B', type: 'not', of: 'A' }, ...strategy.signals],
+      allocations: [
+        { name: 'Calm', when: { all: ['B'] }, holdings: [{ ticker: 'X', weight: 100 }] },
+        { name: 'Risk on', holdings: [{ ticker: 'X3', weight: 100 }] },
+      ],
+    });
+    const standIn = {
+      status: 'yellow' as const,
+      reasons: ['stand_in@s'],
+      standIns: [{ date: D, band: 0.01 }],
+    };
+    const close = forwardDecision(
+      derived,
+      D,
+      { X: bars([100, 100, 100, 101]) },
+      { X: standIn, X3: green },
+    );
+    expect(close).toMatchObject({ dataStatus: 'red', safeStateApplied: true });
+    expect(close.reasons).toContain('X:decision_margin');
+    expect(close.signals).toEqual({ A: true, B: false });
+    const far = forwardDecision(
+      derived,
+      D,
+      { X: bars([100, 100, 100, 110]) },
+      { X: standIn, X3: green },
+    );
+    expect(far).toMatchObject({ dataStatus: 'yellow', allocation: 'Risk on' });
+    expect(far.signals).toEqual({ A: true, B: false });
+  });
+
   it('decision margin: shifts every stand-in together, not one at a time', () => {
     const pair = Strategy.parse({
       ...strategy,

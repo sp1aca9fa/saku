@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RawBar } from '../domain';
-import { evaluate, splitAdjusted } from './engine';
+import { evaluate, signalLookbacks, signalTickers, splitAdjusted, whyUndecided } from './engine';
 import { sma, volatility } from './indicators';
 import { Strategy } from './schema';
 import { parsePlainAgainstLevel } from './testkit';
@@ -227,5 +227,112 @@ describe('Strategy schema', () => {
       allocations: [{ name: 'a', holdings: [{ ticker: 'X', weight: 100 }] }],
     });
     expect(s.execution).toBe('next_open');
+  });
+});
+
+// Derived and aggregate signals (requirements 05 "Signals"; docs/indicators.md "Signals"): they
+// read the other signals' states on the same date, keep no state of their own, and are defined
+// when every signal they read is.
+describe('evaluate: not, and, or', () => {
+  // `up`: X above 100 (band 3%, stateful); `fast`: X above its 2-day SMA (from day 1).
+  const up = {
+    id: 'up',
+    type: 'compare',
+    left: { indicator: 'price', ticker: 'X' },
+    op: '>',
+    right: { threshold: 100 },
+    tolerancePct: 3,
+  };
+  const fast = {
+    id: 'fast',
+    type: 'compare',
+    left: { indicator: 'price', ticker: 'X' },
+    op: '>',
+    right: { indicator: 'sma', ticker: 'X', length: 2 },
+  };
+  const derived = [
+    { id: 'down', type: 'not', of: 'up' },
+    { id: 'both', type: 'and', of: ['up', 'fast'] },
+    { id: 'either', type: 'or', of: ['down', 'fast'] },
+    { id: 'neither', type: 'not', of: 'either' },
+  ];
+  const make = (signals: unknown[]) =>
+    parsePlainAgainstLevel({
+      name: 't',
+      account: 'taxable',
+      safeState: { holdings: [{ ticker: 'X', weight: 100 }] },
+      evaluation: { frequency: 'daily' },
+      signals,
+      allocations: [
+        { name: 'Both', when: { all: ['both'] }, holdings: [{ ticker: 'X3', weight: 100 }] },
+        { name: 'Neither', when: { all: ['neither'] }, holdings: [{ ticker: 'X', weight: 100 }] },
+        { name: 'Else', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+      ],
+    });
+  // up (band 97..103): T T F F T T; fast (above the 2-day SMA, from day 1): - F F T T F
+  const closes = [101, 98, 96.9, 102, 103.5, 99];
+  const input = { X: bars(closes) };
+
+  it("reads the inputs' states on the same date (the band applied by the input)", () => {
+    const days = evaluate(make([up, fast, ...derived]), input);
+    // `fast` has no value on day 0, so nothing is decided that day.
+    expect(days.map((d) => d.date)).toEqual([1, 2, 3, 4, 5].map(day));
+    expect(days.map((d) => d.signals)).toEqual([
+      { up: true, fast: false, down: false, both: false, either: false, neither: true },
+      { up: false, fast: false, down: true, both: false, either: true, neither: false },
+      { up: false, fast: true, down: true, both: false, either: true, neither: false },
+      { up: true, fast: true, down: false, both: true, either: true, neither: false },
+      { up: true, fast: false, down: false, both: false, either: false, neither: true },
+    ]);
+    expect(days.map((d) => d.allocation)).toEqual(['Neither', 'Else', 'Else', 'Both', 'Neither']);
+    // No ties of their own (none here at all).
+    expect(days.every((d) => d.ties.length === 0)).toBe(true);
+  });
+
+  it('the order in the file does not matter', () => {
+    const base = evaluate(make([up, fast, ...derived]), input);
+    const orders = [
+      [...[...derived].reverse(), fast, up],
+      [derived[3], up, derived[2], fast, derived[0], derived[1]],
+      [derived[2], derived[3], derived[1], derived[0], up, fast],
+    ];
+    for (const signals of orders) {
+      const days = evaluate(make(signals), input);
+      expect(days.map((d) => [d.date, d.signals, d.allocation])).toEqual(
+        base.map((d) => [d.date, d.signals, d.allocation]),
+      );
+    }
+  });
+
+  it("reads an ensemble's state (its share against its threshold), not its share", () => {
+    const ens = {
+      id: 'trend',
+      type: 'ensemble',
+      members: [2, 3].map((length) => ({
+        left: { indicator: 'price', ticker: 'X' },
+        op: '>',
+        right: { indicator: 'sma', ticker: 'X', length },
+      })),
+      threshold: 0.5,
+    };
+    const days = evaluate(
+      make([ens, { id: 'flat', type: 'not', of: 'trend' }, up, fast, ...derived]),
+      {
+        X: bars([100, 101, 102, 101.9, 90]),
+      },
+    );
+    // Day 3: 101.9 above SMA 2 (101.95)? no; above SMA 3 (101.63)? yes: share 0.5, true.
+    expect(days.map((d) => [d.signals.trend, d.signals.flat])).toEqual([
+      [1, false],
+      [0.5, false],
+      [0, true],
+    ]);
+  });
+
+  it('tickers, lookbacks and the reasons for no decision come from the inputs only', () => {
+    const s = make([...derived, up, fast]);
+    expect(signalTickers(s)).toEqual(['X']);
+    expect(signalLookbacks(s).get('X')).toEqual({ bars: 2, totalReturn: false });
+    expect(whyUndecided(s, input, day(0))).toEqual(['X:warm_up(sma)']);
   });
 });
