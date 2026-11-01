@@ -20,6 +20,7 @@ import {
   type RefDay,
   type RefOhlc,
   type RefStrategy,
+  type RefBacktestOptions,
 } from './index';
 
 // Explicit zero costs (omitted costs throw unless omittedCostsAsZero is passed).
@@ -1482,5 +1483,173 @@ describe('reference: covered days (docs/indicators.md "Returns", "Cash", "Synthe
         refBacktest(strategy('X'), decide('X', sessions), { X: early, G }, () => NaN, usd('1000')),
       ).toThrow(/unknown cash rate/);
     });
+  });
+});
+
+describe('reference: base currency, CASH_BASE, FX spread (docs/indicators.md)', () => {
+  const D = ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05'];
+  const mkH = (closes: number[], opens = closes): RefBar[] =>
+    closes.map((close, i) => ({
+      date: D[i]!,
+      open: opens[i]!,
+      close,
+      divCash: 0,
+      splitFactor: 1,
+      closeIsSplitAdjusted: false,
+    }));
+  const H = mkH([100, 100, 100, 100]);
+  const hold = (...h: [string, number][]) => h.map(([ticker, weight]) => ({ ticker, weight }));
+  const CB = hold(['CASH_BASE', 100]);
+  const HH = hold(['H', 100]);
+  const decide = (list: RefDay['holdings'][]): RefDay[] =>
+    list.map((holdings, i) => ({ date: D[i]!, signals: {}, allocation: `a${i}`, holdings }));
+  const strategy = (
+    execution: 'next_close' | 'next_open',
+    costs: { slippageBps?: number; feePct?: number; fxSpreadPct?: number } = {
+      ...ZERO,
+      fxSpreadPct: 0.2,
+    },
+  ) => ({
+    execution,
+    costs,
+    allocations: [
+      { name: 'cb', holdings: CB },
+      { name: 'h', holdings: HH },
+    ],
+  });
+  const table = (m: Record<string, number | undefined>) => (d: string) => m[d];
+  const fx150to160 = table({ [D[0]!]: 150, [D[1]!]: 150, [D[2]!]: 160, [D[3]!]: 160 });
+  const near = (xs: (number | null)[], ys: number[]) => {
+    expect(xs.length).toBe(ys.length);
+    xs.forEach((x, i) => expect(x).toBeCloseTo(ys[i]!, 12));
+  };
+
+  it('CASH_BASE earns its deposit rate and moves with FX; entering it pays the FX spread', () => {
+    const r = refBacktest(strategy('next_close'), decide([CB, CB, CB, CB]), { H }, () => 0, {
+      baseCurrency: 'JPY',
+      fxRate: fx150to160,
+      depositRate: () => 25.2,
+    });
+    // D1 entry at the close: 1 - 1 x 0.2% = 0.998. D2: x (1 + 0.001) x 150 / 160. D3: x 1.001.
+    const eq = [1, 0.998, 0.998 * 1.001 * 0.9375, 0.998 * 1.001 ** 2 * 0.9375];
+    near(r.equity, eq);
+    expect(r.conversions).toEqual({ count: 1, fxSpread: 0.002, tax: 'not_applied' });
+    // The base investor sees the deposit rate only: equity x FX.
+    near(r.base!.equity, [150, 0.998 * 150, 0.998 * 1.001 * 150, 0.998 * 1.001 ** 2 * 150]);
+    expect(r.base!.currency).toBe('JPY');
+    expect(r.base!.unknownFx).toEqual([]);
+  });
+
+  it('the FX spread is on the change in the CASH_BASE weight after drift', () => {
+    // fxSpreadPct 1. D1: 50/50 H and CASH_BASE: 1 - 0.5 x 1% = 0.995, 0.4975 each.
+    // D2: H +10%: 0.54725 + 0.4975 = 1.04475. D3: to H: converted 0.4975, spread 0.004975.
+    const bars = { H: mkH([100, 100, 110, 110]) };
+    const M = hold(['H', 50], ['CASH_BASE', 50]);
+    const s = { ...strategy('next_close', { ...ZERO, fxSpreadPct: 1 }) };
+    s.allocations = [...s.allocations, { name: 'm', holdings: M }];
+    const r = refBacktest(s, decide([M, M, HH, HH]), bars, () => 0, {
+      baseCurrency: 'JPY',
+      fxRate: () => 150,
+      depositRate: () => 0,
+    });
+    near(r.equity, [1, 0.995, 1.04475, 1.04475 - 0.004975]);
+    expect(r.conversions!.count).toBe(2);
+    expect(r.conversions!.fxSpread).toBeCloseTo(0.005 + 0.004975 / 1.04475, 15);
+  });
+
+  it('next_open: the FX move is in the night part, nothing in the day part', () => {
+    // D1 open: enter CASH_BASE (0.998); day part 0. D2 night: x 150 / 160 = 0.935625; switch to
+    // H at the open: spread 0.2% of 0.935625; day part H 100 -> 105.
+    const bars = { H: mkH([100, 100, 105, 105], [100, 100, 100, 105]) };
+    const r = refBacktest(strategy('next_open'), decide([CB, HH, HH, HH]), bars, () => 0, {
+      baseCurrency: 'JPY',
+      fxRate: fx150to160,
+      depositRate: () => 0,
+    });
+    const d2 = 0.998 * 0.9375 * (1 - 0.002) * 1.05;
+    near(r.equity, [1, 0.998, d2, d2]);
+  });
+
+  it('a USD base: FX is 1 and never read, no spread, the base series is the USD one', () => {
+    const r = refBacktest(strategy('next_close', ZERO), decide([CB, CB, CB, CB]), { H }, () => 0, {
+      baseCurrency: 'USD',
+      fxRate: () => {
+        throw new Error('FX read');
+      },
+      depositRate: () => 25.2,
+    });
+    near(r.equity, [1, 1, 1.001, 1.001 ** 2]);
+    expect(r.conversions).toBeUndefined();
+    expect(r.base!.equity).toEqual(r.equity);
+  });
+
+  it('base series: unknown FX and invalid FX give null and are listed; the USD curve is unchanged', () => {
+    const usdOnly = { execution: 'next_close' as const, costs: ZERO };
+    const plain = refBacktest(usdOnly, decide([HH, HH, HH, HH]), { H }, () => 0);
+    const r = refBacktest(usdOnly, decide([HH, HH, HH, HH]), { H }, () => 0, {
+      baseCurrency: 'EUR',
+      fxRate: table({ [D[0]!]: 0.9, [D[2]!]: 0, [D[3]!]: Infinity }),
+    });
+    expect(r.equity).toEqual(plain.equity);
+    expect(r.base!.equity).toEqual([0.9, null, null, null]);
+    expect(r.base!.unknownFx).toEqual([D[1]]);
+    expect(r.base!.invalidFx).toEqual([D[2], D[3]]);
+    // Without a base currency nothing is added.
+    expect(Object.keys(plain).sort()).toEqual(['dates', 'equity', 'switches']);
+  });
+
+  it('whole shares: the base series converts value with its currency; CASH_BASE is refused', () => {
+    const s = { execution: 'next_close' as const, costs: ZERO };
+    const ws = { wholeShares: { initialAmount: '1000', currency: 'USD' } };
+    const r = refBacktest(s, decide([HH, HH, HH, HH]), { H }, () => 0, {
+      ...ws,
+      baseCurrency: 'JPY',
+      fxRate: () => 150,
+    });
+    expect(r.base!.value![3]).toEqual({ amount: 150000, currency: 'JPY' });
+    expect(() =>
+      refBacktest(strategy('next_close'), decide([CB, CB, CB, CB]), { H }, () => 0, {
+        ...ws,
+        baseCurrency: 'JPY',
+        fxRate: () => 150,
+        depositRate: () => 0,
+      }),
+    ).toThrow(/CASH_BASE is refused/);
+  });
+
+  it('refusals: base code, CASH_BASE without a base, omitted spread, unknown rates and FX', () => {
+    const run = (
+      o: RefBacktestOptions,
+      costs?: { slippageBps?: number; feePct?: number; fxSpreadPct?: number },
+    ) => refBacktest(strategy('next_close', costs), decide([CB, CB, CB, CB]), { H }, () => 0, o);
+    const ok = { baseCurrency: 'JPY', fxRate: () => 150, depositRate: () => 0 };
+    for (const code of ['jpy', 'JP', 'JPYY', '', 'J1Y']) {
+      expect(() => run({ ...ok, baseCurrency: code }), code).toThrow(/ISO/);
+    }
+    expect(() => run({})).toThrow(/no base currency/);
+    expect(() => run(ok, ZERO)).toThrow(/costs not resolved: fxSpreadPct/);
+    // A USD base never reads the spread; omittedCostsAsZero reads it as 0.
+    expect(() => run({ ...ok, baseCurrency: 'USD' }, ZERO)).not.toThrow();
+    expect(run({ ...ok, omittedCostsAsZero: true }, ZERO).conversions).toEqual({
+      count: 1,
+      fxSpread: 0,
+      tax: 'not_applied',
+    });
+    // The deposit rate is read only on covered days CASH_BASE is held (from D1's close).
+    expect(() => run({ ...ok, depositRate: table({ [D[2]!]: 1, [D[3]!]: 1 }) })).not.toThrow();
+    expect(() => run({ ...ok, depositRate: table({ [D[2]!]: 1 }) })).toThrow(
+      /unknown deposit rate on 2026-11-05/,
+    );
+    expect(() => run({ ...ok, depositRate: () => NaN })).toThrow(/invalid deposit rate/);
+    expect(() =>
+      run({ ...ok, fxRate: table({ [D[0]!]: 150, [D[1]!]: 150, [D[3]!]: 150 }) }),
+    ).toThrow(/unknown FX on 2026-11-04/);
+    expect(() => run({ ...ok, fxRate: () => 0 })).toThrow(/invalid FX/);
+  });
+
+  it('the ticker grammar: CASH_BASE takes no parameters', () => {
+    expect(refParseTicker('CASH_BASE')).toEqual({ base: 'CASH_BASE', L: 1, E: 0 });
+    expect(refParseTicker('CASH_BASE?E=0.1')).toBeUndefined();
+    expect(refParseTicker('CASH_BASE?L=1')).toBeUndefined();
   });
 });

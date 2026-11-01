@@ -53,7 +53,7 @@ const isDerived = (sig: RefSignal) => sig.type === 'not' || sig.type === 'and' |
 
 export interface RefStrategy {
   execution?: 'next_open' | 'next_close' | 'same_close';
-  costs?: { slippageBps?: number; feePct?: number };
+  costs?: { slippageBps?: number; feePct?: number; fxSpreadPct?: number };
   signals: RefSignal[];
   allocations: {
     name: string;
@@ -537,6 +537,28 @@ export function refBacktest(
     );
   };
   const costRate = costOf('slippageBps') / 1e4 + costOf('feePct') / 100;
+  // Base currency (docs/indicators.md "Base currency"): three capital letters, or left out.
+  const baseCurrency = options?.baseCurrency;
+  if (baseCurrency !== undefined && !/^[A-Z]{3}$/.test(baseCurrency)) {
+    throw new Error(`reference: base currency ${JSON.stringify(baseCurrency)} is not an ISO code`);
+  }
+  const foreign = baseCurrency !== undefined && baseCurrency !== 'USD';
+  /** The session's FX (base units per USD), checked; 1 for a USD base (never read). */
+  const fxOf = (date: string): number => {
+    if (!foreign) return 1;
+    const fx = options?.fxRate?.(date);
+    if (fx === undefined) throw new Error(`reference: unknown FX on ${date}`);
+    if (!Number.isFinite(fx) || !(fx > 0))
+      throw new Error(`reference: invalid FX ${fx} on ${date}`);
+    return fx;
+  };
+  /** A covered day's deposit rate for CASH_BASE, checked. */
+  const depositOf = (day: string): number => {
+    const r = options?.depositRate?.(day);
+    if (r === undefined) throw new Error(`reference: unknown deposit rate on ${day}`);
+    if (!Number.isFinite(r)) throw new Error(`reference: invalid deposit rate ${r} on ${day}`);
+    return r;
+  };
   // One ticker grammar (./ticker); a ticker outside it throws, never a silent 0 or NaN.
   const parse = (ticker: string) => {
     const t = refParseTicker(ticker);
@@ -557,6 +579,8 @@ export function refBacktest(
    */
   const dailyReturn = (ticker: string, day: string, kind: 'night' | 'day' | 'whole'): number => {
     if (ticker === 'CASH_USD') return kind === 'day' ? 0 : rate(day);
+    // CASH_BASE: its deposit rate per covered day; its FX move is applied once per step (move).
+    if (ticker === 'CASH_BASE') return kind === 'day' ? 0 : depositOf(day) / 100 / 252;
     const { base, L, E } = parse(ticker);
     const b = steps().barOn(base, day);
     let r = 0;
@@ -577,11 +601,12 @@ export function refBacktest(
 
   let value: Record<string, number> = {}; // money per holding
   let switches = 0;
+  const conversions = { count: 0, fxSpread: 0 };
   const total = () => Object.values(value).reduce((a, b) => a + b, 0);
   const move = (prevDate: string, date: string, part: 'night' | 'day' | 'whole') => {
     const covered = part === 'day' ? [date] : steps().covered(prevDate, date);
     for (const t of Object.keys(value)) {
-      if (t !== 'CASH_USD') {
+      if (t !== 'CASH_USD' && t !== 'CASH_BASE') {
         const base = parse(t).base;
         // A step starts at the held ticker's bar on the previous session (never credited before).
         if (part !== 'day' && !steps().barOn(base, prevDate)) {
@@ -593,6 +618,15 @@ export function refBacktest(
         const growth = 1 + dailyReturn(t, day, day === date ? part : 'whole');
         if (!Number.isFinite(growth) || !(growth > 0)) {
           throw new Error(`reference: growth ${growth} for ${t} on ${day} (equity at or below 0)`);
+        }
+        value[t] = value[t]! * growth;
+      }
+      // CASH_BASE: its USD value moves with the base currency, fx(prev) / fx(date), once per step
+      // in the night part or the whole day (nothing in the open-to-close part).
+      if (t === 'CASH_BASE' && part !== 'day') {
+        const growth = fxOf(prevDate) / fxOf(date);
+        if (!Number.isFinite(growth) || !(growth > 0)) {
+          throw new Error(`reference: FX growth ${growth} for CASH_BASE on ${date}`);
         }
         value[t] = value[t]! * growth;
       }
@@ -609,7 +643,15 @@ export function refBacktest(
       traded += Math.abs((goal[t] ?? 0) - (value[t] ?? 0));
     }
     if (start) traded = wealth;
-    const after = wealth - traded * costRate;
+    // FX spread (docs/indicators.md "FX spread"): |change in CASH_BASE weight| x value x spread;
+    // the start is in USD (weight 0 before), and a USD base converts nothing.
+    const converted = foreign ? Math.abs((goal.CASH_BASE ?? 0) - (value.CASH_BASE ?? 0)) : 0;
+    const spread = converted > 0 ? converted * fxSpread() : 0;
+    if (converted > 0) {
+      conversions.count++;
+      conversions.fxSpread += spread / wealth;
+    }
+    const after = wealth - traded * costRate - spread;
     value = {};
     for (const h of holdings) value[h.ticker] = (after * h.weight) / 100;
     if (!start) switches++;
@@ -627,8 +669,14 @@ export function refBacktest(
   const decided = new Map(days.map((d) => [d.date, d.holdings]));
   const mayHold = new Set<string>();
   const addHoldings = (h: { ticker: string }[]) => {
-    for (const x of h) if (x.ticker !== 'CASH_USD') mayHold.add(parse(x.ticker).base);
+    for (const x of h) {
+      if (x.ticker === 'CASH_BASE') holdsBase = true;
+      // Cash (USD or base) gives no session dates.
+      if (x.ticker !== 'CASH_USD' && x.ticker !== 'CASH_BASE') mayHold.add(parse(x.ticker).base);
+      else parse(x.ticker);
+    }
   };
+  let holdsBase = false;
   for (const a of s.allocations ?? []) addHoldings(a.holdings);
   if (s.safeState) addHoldings(s.safeState.holdings);
   for (const d of days) addHoldings(d.holdings);
@@ -657,6 +705,21 @@ export function refBacktest(
       throw new Error(`reference: ${date} is not evaluated and there is no safe state`);
     return s.safeState.holdings;
   };
+
+  if (holdsBase && baseCurrency === undefined) {
+    throw new Error('reference: the strategy may hold CASH_BASE but no base currency is given');
+  }
+  // The FX spread is read only when the strategy may hold CASH_BASE and the base is not USD.
+  let spreadRate: number | undefined;
+  const fxSpread = (): number => {
+    if (spreadRate !== undefined) return spreadRate;
+    const v = s.costs?.fxSpreadPct;
+    if (v !== undefined) spreadRate = v / 100;
+    else if (options?.omittedCostsAsZero === true) spreadRate = 0;
+    else throw new Error('reference: costs not resolved: fxSpreadPct is not given');
+    return spreadRate;
+  };
+  if (holdsBase && foreign) fxSpread();
 
   // Every target the strategy may trade (for the whole-share refusals).
   const targets: RefDay['holdings'][] = [
@@ -709,8 +772,63 @@ export function refBacktest(
     if (ws) ws.point(d.date);
     else equity.push(Object.keys(value).length === 0 ? 1 : total());
   }
-  if (ws) return { ...ws.result(), dates: sessions, switches };
-  return { equity, dates: sessions, switches };
+  const out: RefBacktestResult = ws
+    ? { ...ws.result(), dates: sessions, switches }
+    : { equity, dates: sessions, switches };
+  if (!ws && conversions.count > 0) {
+    out.conversions = { ...conversions, tax: 'not_applied' };
+  }
+  if (baseCurrency !== undefined) out.base = refBaseSeries(out, sessions, baseCurrency, options!);
+  return out;
+}
+
+/**
+ * The base-currency series (docs/indicators.md "Base currency"): equity (and whole-share value)
+ * x the session's FX. An unknown FX gives null and lists the date in unknownFx; an FX that is not
+ * finite or not above 0 gives null and lists it in invalidFx. A USD base is the USD series.
+ */
+function refBaseSeries(
+  r: RefBacktestResult,
+  sessions: string[],
+  currency: string,
+  options: RefBacktestOptions,
+): RefBaseSeries {
+  const unknownFx: string[] = [];
+  const invalidFx: string[] = [];
+  const fx = sessions.map((date): number | null => {
+    if (currency === 'USD') return 1;
+    const x = options.fxRate?.(date);
+    if (x === undefined) {
+      unknownFx.push(date);
+      return null;
+    }
+    if (!Number.isFinite(x) || !(x > 0)) {
+      invalidFx.push(date);
+      return null;
+    }
+    return x;
+  });
+  const series: RefBaseSeries = {
+    currency,
+    equity: r.equity.map((e, i) => (fx[i] === null ? null : e * fx[i]!)),
+    unknownFx,
+    invalidFx,
+  };
+  if (r.value) {
+    series.value = r.value.map((v, i) =>
+      fx[i] === null ? null : { amount: v.amount * fx[i]!, currency },
+    );
+  }
+  return series;
+}
+
+export interface RefBaseSeries {
+  currency: string;
+  equity: (number | null)[];
+  /** Whole shares only. */
+  value?: ({ amount: number; currency: string } | null)[];
+  unknownFx: string[];
+  invalidFx: string[];
 }
 
 export interface RefWholeShares {
@@ -721,8 +839,14 @@ export interface RefWholeShares {
 
 export interface RefBacktestOptions {
   wholeShares?: RefWholeShares;
-  /** Read an omitted slippageBps or feePct as 0 (otherwise the backtest throws). */
+  /** Read an omitted slippageBps, feePct (or a needed fxSpreadPct) as 0 (otherwise it throws). */
   omittedCostsAsZero?: boolean;
+  /** ISO 4217 code; without it nothing changes and CASH_BASE is refused. */
+  baseCurrency?: string;
+  /** Base-currency units per USD for a session, as known before it opens; undefined if unknown. */
+  fxRate?: (date: string) => number | undefined;
+  /** CASH_BASE deposit rate (percent a year) in force on a date; undefined if unknown. */
+  depositRate?: (date: string) => number | undefined;
 }
 
 export interface RefMoney {
@@ -752,6 +876,10 @@ export interface RefBacktestResult {
   trades?: RefTrade[];
   /** Whole shares only: the sum of cost / V per trade. */
   costs?: number;
+  /** When a trade converts currency: count, FX spread paid (cost / value, summed), no tax. */
+  conversions?: { count: number; fxSpread: number; tax: 'not_applied' };
+  /** With a base currency: the base-currency series. */
+  base?: RefBaseSeries;
 }
 
 const USD = (amount: number): RefMoney => ({ amount, currency: 'USD' });
@@ -851,8 +979,13 @@ export function refWholeShareBook(
         `reference: whole shares: a target lists a ticker twice (${names.join(', ')})`,
       );
     }
-    // A synthetic ticker (one with parameters) has no traded price.
+    // A synthetic ticker (one with parameters) has no traded price; CASH_BASE is not modeled.
     for (const h of t) {
+      if (h.ticker === 'CASH_BASE') {
+        throw new Error(
+          'reference: whole shares: CASH_BASE is refused (no base-currency residual)',
+        );
+      }
       if (h.ticker.includes('?')) {
         throw new Error(
           `reference: whole shares: synthetic ticker ${h.ticker} has no traded price`,

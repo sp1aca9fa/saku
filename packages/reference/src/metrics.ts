@@ -213,11 +213,11 @@ function cagrOf(list: readonly RefEquitySample[]): RefMetric<number> {
   return ok((list[list.length - 1]!.equity / list[0]!.equity) ** (1 / years) - 1);
 }
 
-/** The `L` parameter of a ticker (one grammar, ./ticker): 0 for cash; undefined when unreadable. */
+/** The `L` parameter of a ticker (one grammar, ./ticker): 0 for cash (USD or base); undefined when unreadable. */
 function leverageOf(ticker: string): number | undefined {
   const t = refParseTicker(ticker);
   if (t === undefined) return undefined;
-  return t.base === 'CASH_USD' ? 0 : t.L;
+  return t.base === 'CASH_USD' || t.base === 'CASH_BASE' ? 0 : t.L;
 }
 
 /** The calendar period before / after a year ('YYYY') or month ('YYYY-MM'). */

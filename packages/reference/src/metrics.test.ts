@@ -478,7 +478,7 @@ describe('reference metrics: holdings', () => {
     const r = refMetrics({
       points: [
         { date: '2024-01-02', equity: 1, weights: { SPY: 0.5, 'SPY?L=3&E=0.9': 0.5 } },
-        { date: '2024-01-03', equity: 1, weights: { CASH_USD: 1 } },
+        { date: '2024-01-03', equity: 1, weights: { CASH_USD: 0.5, CASH_BASE: 0.5 } },
         { date: '2024-01-04', equity: 1, weights: { 'QQQ?E=0.9&L=0.5': 1 } },
         { date: '2024-01-05', equity: 1, weights: {} },
         { date: '2024-01-08', equity: 1 }, // the last point's weights are not needed
@@ -508,6 +508,7 @@ describe('reference metrics: holdings', () => {
       'SH?E=0.9&L=-1',
       'X?E=-1',
       'CASH_USD?L=2',
+      'CASH_BASE?E=0.1',
     ]) {
       const bad = refMetrics({
         points: [
