@@ -158,6 +158,7 @@ describe('reference normal distribution', () => {
     expect(refPhiInv(1)).toBe(Infinity);
     expect(() => refPhiInv(1.5)).toThrow();
     expect(() => refPhiInv(Number.NaN)).toThrow();
+    expect(() => refPhi(Number.NaN)).toThrow();
   });
 });
 
@@ -488,6 +489,18 @@ describe('reference PBO (CSCV)', () => {
       refPbo({ trials: [make(up), make(down)], cashReturn: zeroCash, partitions: 0 }),
     ).toThrow();
   });
+  it('caller errors first, then fewer than 2 trials before any per-trial reason', () => {
+    // Odd partitions throw even when the trials would give a no-value reason.
+    expect(() => refPbo({ trials: [], partitions: 3 })).toThrow();
+    expect(() => refPbo({ trials: [make(up, 5)], partitions: 1 })).toThrow();
+    // One wiped-out trial: tooFewTrials, not equityNotPositive.
+    const wiped = make(up).map((p, i) => (i === 4 ? { ...p, equity: 0 } : p));
+    expect(reason(refPbo({ trials: [wiped], cashReturn: zeroCash, partitions: 2 }))).toBe(
+      'tooFewTrials',
+    );
+    // A malformed series throws before tooFewTrials.
+    expect(() => refPbo({ trials: [[{ date: '2024-02-30', equity: 1 }]] })).toThrow();
+  });
 });
 
 describe('reference walk-forward folds', () => {
@@ -542,12 +555,28 @@ describe('reference walk-forward folds', () => {
     expect(() =>
       refWalkForward({ points: pts, benchmark: pts, cashReturn: cash, folds: 0 }),
     ).toThrow();
+    // folds below 2 throws, before the tooShort of an empty series.
+    expect(() =>
+      refWalkForward({ points: pts, benchmark: pts, cashReturn: cash, folds: 1 }),
+    ).toThrow();
+    expect(() =>
+      refWalkForward({ points: [], benchmark: pts, cashReturn: cash, folds: 1 }),
+    ).toThrow();
     // cashReturn is required.
     expect(() =>
       refWalkForward({ points: pts, benchmark: pts } as unknown as Parameters<
         typeof refWalkForward
       >[0]),
     ).toThrow();
+  });
+  it('a fold with no point of its own: end undefined, no value', () => {
+    // Nothing dated 2020-12-31 .. 2021-12-30 (fold 1); D and K stay 1095 and 3.
+    const gap = pts.filter((p) => p.date < '2020-12-31' || p.date >= '2021-12-31');
+    const w = value(refWalkForward({ points: gap, benchmark: gap, cashReturn: cash }));
+    expect(w.folds[1]!.end).toBeUndefined();
+    expect(reason(w.folds[1]!.strategy)).toBe('tooShort');
+    expect(w.folds[1]!.beat).toBeUndefined();
+    expect(w.measured).toBe(2);
   });
   it('nothing measured: no value with the first fold reason (strategy, else benchmark)', () => {
     const noCash = () => undefined;
@@ -996,6 +1025,22 @@ describe('reference goal projection', () => {
       }),
     ).toThrow(/look-ahead/);
   });
+  it('equity <= 0 at h waits for every path: a later path missing a session still throws', () => {
+    let calls = 0;
+    const run = (bars: Record<string, RefBar[]>) => {
+      calls++;
+      const out = runA(bars).map((p, i) => (i === 0 ? { ...p, equity: 0 } : p));
+      return calls === 1 ? out : out.slice(0, -1);
+    };
+    const base = { history, future, initial: 1, monthly: 0, goal: 1, currency: 'XYZ', seed: 1 };
+    expect(() => refGoalProjection({ ...base, run, paths: 2 })).toThrow(/no equity/);
+    // Every path complete: equityNotPositive.
+    const complete = (bars: Record<string, RefBar[]>) =>
+      runA(bars).map((p, i) => (i === 0 ? { ...p, equity: 0 } : p));
+    expect(reason(refGoalProjection({ ...base, run: complete, paths: 2 }))).toBe(
+      'equityNotPositive',
+    );
+  });
   it('refuses malformed input', () => {
     const base = {
       history,
@@ -1026,6 +1071,21 @@ describe('reference goal projection', () => {
       { sampleFrom: '2024-02-30' },
       { run: (bars) => runA(bars).slice(0, -1) },
       { run: (bars) => runA(bars).map((p, i) => (i === 2 ? { ...p, equity: Infinity } : p)) },
+      { history: { A: history.A.map((x, i) => (i === 5 ? { ...x, divCash: -0.1 } : x)) } },
+      {
+        history: {
+          A: history.A.map((x, i) =>
+            i === 5 ? ({ ...x, closeIsSplitAdjusted: 'no' } as unknown as RefBar) : x,
+          ),
+        },
+      },
+      // A session missing from the run's output throws even with equity <= 0 at h.
+      {
+        run: (bars) =>
+          runA(bars)
+            .slice(0, -1)
+            .map((p, i) => (i === 0 ? { ...p, equity: 0 } : p)),
+      },
     ];
     for (const b of bad) expect(() => refGoalProjection({ ...base, ...b })).toThrow();
   });

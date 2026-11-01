@@ -80,8 +80,8 @@ export function refWalkForward(input: {
   refCheckEquity('points', input.points);
   refCheckEquity('benchmark', input.benchmark);
   const wanted = input.folds ?? 10;
-  if (!Number.isInteger(wanted) || wanted < 1) {
-    throw new Error('reference walk-forward: folds is not an integer >= 1');
+  if (!Number.isInteger(wanted) || wanted < 2) {
+    throw new Error('reference walk-forward: folds is not an integer >= 2');
   }
   const pts = input.points;
   if (pts.length === 0) return not('tooShort');
@@ -470,7 +470,9 @@ function checkProjection(input: RefProjectionInput): string {
       if (!finite(bar.splitFactor) || bar.splitFactor <= 0) {
         throw new Error(`reference projection: ${id} split factor on ${bar.date} is not positive`);
       }
-      if (!finite(bar.divCash)) throw new Error(`reference projection: ${id} dividend not finite`);
+      if (!finite(bar.divCash) || bar.divCash < 0) {
+        throw new Error(`reference projection: ${id} dividend on ${bar.date} is not finite >= 0`);
+      }
       for (const f of [bar.open, bar.high, bar.low]) {
         if (f !== undefined && !finite(f)) {
           throw new Error(
@@ -560,6 +562,7 @@ export function refGoalProjection(input: RefProjectionInput): RefStatistic<RefPr
   const ends: number[] = [];
   let reached = 0;
   let pastOfPath0: RefProjectionSample[] = [];
+  let notPositiveAtH = false;
   for (let path = 0; path < paths; path++) {
     const rng = new RefRandom(input.seed, path);
     const draws = refStationaryBootstrap(rng, sampleDates.length, L, meanBlock);
@@ -620,7 +623,12 @@ export function refGoalProjection(input: RefProjectionInput): RefStatistic<RefPr
       if (!finite(v)) throw new Error(`reference projection: the run's equity on ${d} not finite`);
       e.push(v);
     }
-    if (e[0]! <= 0) return not('equityNotPositive');
+    // The equity at h is the same on every path (the guard above); its no-value reason waits
+    // until every path ran, so a caller error on a later path still throws first.
+    if (e[0]! <= 0) {
+      notPositiveAtH = true;
+      continue;
+    }
 
     let W = input.initial;
     let lost = false;
@@ -639,6 +647,7 @@ export function refGoalProjection(input: RefProjectionInput): RefStatistic<RefPr
     if (!lost && W >= input.goal) reached++;
   }
 
+  if (notPositiveAtH) return not('equityNotPositive');
   const sorted = [...ends].sort((a, b) => a - b);
   const nearestRank = (q: number) => sorted[Math.floor((q * paths + 99) / 100) - 1]!;
   const { low, high } = refWilson(reached, paths);
