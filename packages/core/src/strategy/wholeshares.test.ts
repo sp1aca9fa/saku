@@ -62,10 +62,11 @@ describe('whole shares', () => {
         },
       ],
     });
-    expect(r.points[0]).toMatchObject({ equity: 1, value: 1000, traded: true });
+    expect(r.points[0]).toMatchObject({ equity: 1, value: usd(1000), traded: true });
     expect(r.points[0]!.weights).toEqual({ X: 0.9, CASH_USD: 0.1 });
     // D1: 3 x 330 + 100 x (1 + 2.52% / 252).
-    expect(r.points[1]!.value).toBeCloseTo(990 + 100.01, 9);
+    expect(r.points[1]!.value!.amount).toBeCloseTo(990 + 100.01, 9);
+    expect(r.points[1]!.value!.currency).toBe('USD');
     expect(r.points[1]!.equity).toBeCloseTo(1.09001, 12);
     expect(r.switches).toBe(0);
     expect(r.costs).toBe(0);
@@ -81,7 +82,7 @@ describe('whole shares', () => {
     const exact = run('same_close', ['X', 'X'], { X: [bar(D[0]!, 100), bar(D[1]!, 110)] }, '1000', {
       cashRate: unknown,
     });
-    expect(exact.points[1]!.value).toBe(1100);
+    expect(exact.points[1]!.value).toEqual(usd(1100));
     expect(exact.points[1]!.weights).toEqual({ X: 1 });
   });
 
@@ -118,6 +119,32 @@ describe('whole shares', () => {
     );
     expect(r.wholeShares!.trades[0]!.shares).toEqual({ X: 1 });
     expect(r.wholeShares!.trades[0]!.residualCash).toEqual(usd(700));
+  });
+
+  it('sizing: a quotient within float noise of a whole number is that number', () => {
+    // 58 x 100 / (100 x 2) = 29 (0.58 x 100 / 2 would be 28.999...: 28 shares).
+    const at = (weight: number, amount: string, p: number, costs = {}) =>
+      run(
+        'same_close',
+        [
+          [
+            { ticker: 'X', weight },
+            { ticker: 'CASH_USD', weight: 100 - weight },
+          ],
+        ],
+        { X: [bar(D[0]!, p)] },
+        amount,
+        { costs },
+      ).wholeShares!.trades[0]!;
+    expect(at(58, '100', 2).shares).toEqual({ X: 29 });
+    expect(at(58, '100', 2).residualCash).toEqual(usd(42));
+    expect(at(29, '100', 1).shares).toEqual({ X: 29 });
+    // With c = 0.002, 30 x 10.02 / (100 x 1 x 1.002) is 3 exactly, 2.9999999999999996 in
+    // float64: the snap keeps 3 shares; costs 0.002 x 3, residual 10.02 - 3 - 0.006.
+    const t = at(30, '10.02', 1, { slippageBps: 10, feePct: 0.1 });
+    expect(t.shares).toEqual({ X: 3 });
+    expect(t.residualCash.amount).toBeCloseTo(7.014, 12);
+    expect(t.residualCash.amount).toBeGreaterThanOrEqual(0);
   });
 
   it('costs on the shares traded; sizing leaves room for them', () => {
@@ -190,7 +217,7 @@ describe('whole shares', () => {
       shares: { Y: 10 },
       residualCash: usd(66),
     });
-    expect(r.points.map((p) => p.value)).toEqual([1000, 1030, 1116, 1166]);
+    expect(r.points.map((p) => p.value!.amount)).toEqual([1000, 1030, 1116, 1166]);
     expect(r.points[0]!.weights).toEqual({});
   });
 
@@ -204,7 +231,7 @@ describe('whole shares', () => {
       },
       '1000',
     );
-    expect(r.points[1]!.value).toBe(4 * 210 + 100 + 105);
+    expect(r.points[1]!.value).toEqual(usd(4 * 210 + 100 + 105));
     expect(r.points[1]!.weights.X).toBeCloseTo(840 / 1045, 15);
     // 90 x 0.7 is 62.99999999999999 in float64: 63 shares, no cash in lieu.
     const rev = run(
@@ -215,31 +242,114 @@ describe('whole shares', () => {
       },
       '9000',
     );
-    expect(rev.points[1]!.value).toBe(63 * 140);
+    expect(rev.points[1]!.value).toEqual(usd(63 * 140));
     expect(rev.points[1]!.weights).toEqual({ X: 1 });
   });
 
-  it("a synthetic ticker's price is its own series from the base's first close", () => {
-    // X?L=2 starts at 100 (X's close on D0) and gains 2 x 10% on D1: 120 when bought there.
-    const x = { X: [bar(D[0]!, 100), bar(D[1]!, 110), bar(D[2]!, 121)] };
-    const r = run('same_close', ['X', 'X?L=2', 'X?L=2'], x, '1000');
-    const sw = r.wholeShares!.trades[1]!;
-    expect(sw.value).toEqual(usd(1100));
-    expect(sw.shares).toEqual({ 'X?L=2': 9 });
-    expect(sw.residualCash.amount).toBeCloseTo(20, 9);
-    expect(r.points[2]!.value).toBeCloseTo(9 * 144 + 20, 9);
-    // Its series needs the rate for financing on D1 although it is not held then; the
-    // fractional run does not read it (only X, unlevered, is held on D1).
-    const rate = (d: string) => (d === D[1] ? undefined : 0);
-    expect(() => run('same_close', ['X', 'X?L=2', 'X?L=2'], x, '1000', { cashRate: rate })).toThrow(
-      /No cash rate known for 2026-01-06/,
+  it('a reverse split can leave 0 shares: the fraction is cash, no dividend on it', () => {
+    // 1 share x 0.1 = 0.1: 0 kept, 0.1 x 1000 paid as cash; the dividend of 5 is on 0 shares.
+    const r = run(
+      'same_close',
+      ['X', 'X', 'X'],
+      {
+        X: [bar(D[0]!, 100), bar(D[1]!, 1000, { splitFactor: 0.1, divCash: 5 }), bar(D[2]!, 1010)],
+      },
+      '150',
     );
+    expect(r.points[1]!.value).toEqual(usd(150));
+    expect(r.points[1]!.weights).toEqual({ CASH_USD: 1 });
+    expect(r.points[2]!.value).toEqual(usd(150));
+    expect(r.wholeShares!.trades).toHaveLength(1);
+  });
+
+  it('next open: a split fraction is paid at the open, before the trade', () => {
+    // D2's night: 3 X x 1.5 = 4.5: 4 kept, 0.5 x 200 (the open) paid as cash, so
+    // V = 100 + 100 + 4 x 200 = 1000 (at the close, 220, it would be 1010): 10 Y, residual 0.
+    const r = run(
+      'next_open',
+      ['X', 'Y', 'Y'],
+      {
+        X: [
+          bar(D[0]!, 300),
+          bar(D[1]!, 300, { open: 300 }),
+          bar(D[2]!, 220, { open: 200, splitFactor: 1.5 }),
+        ],
+        Y: [bar(D[0]!, 100), bar(D[1]!, 100, { open: 100 }), bar(D[2]!, 100, { open: 100 })],
+      },
+      '1000',
+    );
+    expect(r.wholeShares!.trades[1]).toMatchObject({
+      date: D[2],
+      at: 'open',
+      value: usd(1000),
+      shares: { Y: 10 },
+      residualCash: usd(0),
+    });
+  });
+
+  it('next close: a trade on an ex-date sells the split shares, the dividend in cash', () => {
+    // Bought at D1's close: 3 X at 300, residual 100. D2 (ex-date): 3 x 2 = 6 shares, dividend
+    // 6 x 1; at the close V = 106 + 6 x 160 = 1066: 10 Y at 100, residual 66.
+    const r = run(
+      'next_close',
+      ['X', 'Y', 'Y'],
+      {
+        X: [bar(D[0]!, 300), bar(D[1]!, 300), bar(D[2]!, 160, { splitFactor: 2, divCash: 1 })],
+        Y: [bar(D[0]!, 100), bar(D[1]!, 100), bar(D[2]!, 100)],
+      },
+      '1000',
+    );
+    expect(r.wholeShares!.trades.map((t) => [t.date, t.at, t.shares, t.residualCash])).toEqual([
+      [D[1], 'close', { X: 3 }, usd(100)],
+      [D[2], 'close', { Y: 10 }, usd(66)],
+    ]);
+    expect(r.wholeShares!.trades[1]!.value).toEqual(usd(1066));
+    expect(r.points[2]!.value).toEqual(usd(1066));
+  });
+
+  it('a missing open at a next_open trade fails, never a guessed price', () => {
+    expect(() =>
+      run('next_open', ['X', 'X'], { X: [bar(D[0]!, 300), bar(D[1]!, 310)] }, '1000'),
+    ).toThrow(/X has no open on 2026-01-06/);
+  });
+
+  it('refuses a strategy that may hold a synthetic ticker', () => {
+    const x = { X: [bar(D[0]!, 100), bar(D[1]!, 110)] };
+    expect(() => run('same_close', ['X?L=2', 'X?L=2'], x, '1000')).toThrow(
+      /synthetic ticker \(X\?L=2\)/,
+    );
+    // Also when only an allocation or the safe state lists it.
+    const days = decide(['X', 'X']);
+    for (const strategy of [
+      {
+        allocations: [
+          { name: 'A', holdings: [{ ticker: 'X', weight: 100 }] },
+          { name: 'B', holdings: [{ ticker: 'X?E=0.5', weight: 100 }] },
+        ],
+      },
+      { safeState: { holdings: [{ ticker: 'X?L=1', weight: 100 }] } },
+    ]) {
+      expect(() =>
+        backtest({
+          strategy: {
+            execution: 'same_close',
+            costs: {},
+            ...strategy,
+          } as BacktestInput['strategy'],
+          days,
+          bars: x,
+          cashRate: none,
+          wholeShares: { initialAmount: '1000', currency: 'USD' },
+        }),
+      ).toThrow(/synthetic ticker/);
+    }
+    // The fractional run holds it as before.
     expect(() =>
       backtest({
         strategy: { execution: 'same_close', costs: {} },
-        days: decide(['X', 'X?L=2', 'X?L=2']),
+        days: decide(['X?L=2', 'X?L=2']),
         bars: x,
-        cashRate: rate,
+        cashRate: none,
       }),
     ).not.toThrow();
   });
@@ -264,21 +374,14 @@ describe('whole shares', () => {
     expect(() =>
       run('same_close', ['X'], { X: [bar(D[0]!, 100, { closeIsSplitAdjusted: true })] }, '1000'),
     ).toThrow(/split-adjusted/);
-    // A synthetic's base too.
-    expect(() =>
-      run(
-        'same_close',
-        ['X?L=2'],
-        { X: [bar(D[0]!, 100, { closeIsSplitAdjusted: true })] },
-        '1000',
-      ),
-    ).toThrow(/split-adjusted/);
     // A cost rate of 100% or more.
     expect(() =>
       run('same_close', ['X'], { X: [bar(D[0]!, 100)] }, '1000', { costs: { feePct: 100 } }),
     ).toThrow(/cost rate/);
-    // A synthetic priced at or below 0 at a trade (3 x -40%).
-    expect(() => run('same_close', ['X?L=3', 'CASH_USD'], x, '1000')).toThrow(/priced -20/);
+    // A price at or below 0 at a trade.
+    expect(() =>
+      run('same_close', ['CASH_USD', 'X'], { X: [bar(D[0]!, 100), bar(D[1]!, 0)] }, '1000'),
+    ).toThrow(/priced 0/);
     // A ticker listed twice.
     expect(() =>
       run(
@@ -322,7 +425,7 @@ describe('whole shares', () => {
       ],
       'Y',
       [
-        { ticker: 'X?L=2', weight: 70 },
+        { ticker: 'X', weight: 70 },
         { ticker: 'CASH_USD', weight: 30 },
       ],
       'X',
@@ -344,10 +447,9 @@ describe('whole shares', () => {
     }
   });
 
-  it('property: the residual cash is never below 0 and share counts are whole', () => {
+  it('property: residual = V - bought - costs, never below 0; counts whole and maximal', () => {
     const targets: Holding[][] = [
       [{ ticker: 'X', weight: 100 }],
-      [{ ticker: 'Y', weight: 100 }],
       [
         { ticker: 'X', weight: 50 },
         { ticker: 'Y', weight: 50 },
@@ -356,9 +458,19 @@ describe('whole shares', () => {
         { ticker: 'Y', weight: 30 },
         { ticker: 'CASH_USD', weight: 70 },
       ],
-      [{ ticker: 'X?L=2', weight: 100 }],
       [{ ticker: 'CASH_USD', weight: 100 }],
     ];
+    // The target of a trade from its non-cash tickers (unique in this list).
+    const weightOf = (tickers: string[], k: string) =>
+      targets
+        .find(
+          (h) =>
+            h
+              .filter((x) => x.ticker !== 'CASH_USD')
+              .map((x) => x.ticker)
+              .join() === tickers.join(),
+        )!
+        .find((x) => x.ticker === k)!.weight;
     const price = fc.double({ min: 1, max: 2000, noNaN: true });
     fc.assert(
       fc.property(
@@ -375,26 +487,39 @@ describe('whole shares', () => {
             X: rows.map(([o, c], i) => bar(D[i]!, c, { open: o })),
             Y: rows.map(([, , o, c], i) => bar(D[i]!, c, { open: o })),
           };
-          let r;
-          try {
-            r = run(
-              execution,
-              rows.map((row) => targets[row[4]]!),
-              bars,
-              String(amount),
-              { costs: { slippageBps, feePct }, cashRate: () => 2 },
-            );
-          } catch (e) {
-            // Only a synthetic priced at or below 0 may be refused here.
-            expect(String(e)).toMatch(/priced/);
-            return;
-          }
+          const days = rows.map((row) => targets[row[4]]!);
+          const r = run(execution, days, bars, String(amount), {
+            costs: { slippageBps, feePct },
+            cashRate: () => 2,
+          });
+          const c = slippageBps / 10_000 + feePct / 100;
+          const at = (t: string, date: string, open: boolean) => {
+            const b = bars[t as 'X' | 'Y'].find((x) => x.date === date)!;
+            return open ? b.open! : b.close;
+          };
+          // No splits here: the shares before a trade are the previous trade's.
+          let before: Record<string, number> = {};
           for (const t of r.wholeShares!.trades) {
+            const price = (k: string) => at(k, t.date, t.at === 'open');
+            const V = t.value.amount;
+            let held = 0;
+            for (const [k, n] of Object.entries(before)) held += n * price(k);
+            const B = V - c * held;
+            let bought = 0;
+            for (const [k, n] of Object.entries(t.shares)) {
+              expect(Number.isInteger(n) && n >= 0).toBe(true);
+              bought += n * price(k);
+              // Never over the ticker's share of the budget, and one more share would be.
+              const share = (weightOf(Object.keys(t.shares), k) / 100) * B;
+              expect(n * price(k) * (1 + c)).toBeLessThanOrEqual(share * (1 + 1e-9));
+              expect((n + 1) * price(k) * (1 + c)).toBeGreaterThan(share * (1 - 1e-9));
+            }
             expect(t.residualCash.amount).toBeGreaterThanOrEqual(0);
             expect(t.costs.amount).toBeGreaterThanOrEqual(0);
-            for (const n of Object.values(t.shares)) {
-              expect(Number.isInteger(n) && n >= 0).toBe(true);
-            }
+            expect(
+              Math.abs(t.residualCash.amount - (V - bought - t.costs.amount)),
+            ).toBeLessThanOrEqual(1e-9 * V);
+            before = t.shares;
           }
         },
       ),

@@ -88,8 +88,8 @@ export interface EquityPoint {
   equity: number;
   /** Weights held at the close, after any trade that day. */
   weights: Record<string, number>;
-  /** With whole shares only: the USD value at the date's close (initial amount until the first trade). */
-  value?: number;
+  /** With whole shares only: the value at the date's close (the initial amount until the first trade). */
+  value?: UsdAmount;
   traded: boolean;
 }
 
@@ -262,10 +262,7 @@ const usd = (amount: number): UsdAmount => ({ amount, currency: 'USD' });
 function wholeBook(deps: {
   initial: number;
   costRate: number;
-  /** The first session: a synthetic ticker's price starts at its base's close there. */
-  first: TradingDate;
   cashDay: (date: TradingDate) => number;
-  holdingReturn: (ticker: string, date: TradingDate, segment: Segment) => number;
   barOn: (ticker: string, date: TradingDate) => RawBar;
 }): Book & { trades: WholeShareTrade[] } {
   const { initial, costRate: c } = deps;
@@ -275,27 +272,7 @@ function wholeBook(deps: {
   let costs = 0;
   let switches = 0;
   const trades: WholeShareTrade[] = [];
-  // Every part of a session the backtest compounded, in order: a synthetic ticker's price
-  // follows them whether held or not, applied when its price is needed (so the cash rate for
-  // its financing is read only then).
-  const steps: { date: TradingDate; segment: Segment }[] = [];
-  const synthetic = new Map<string, { level: number; next: number }>();
-  const isSynthetic = (ticker: string) => ticker !== parseTicker(ticker).base;
-  const level = (ticker: string): number => {
-    let s = synthetic.get(ticker);
-    if (!s) {
-      s = { level: deps.barOn(parseTicker(ticker).base, deps.first).close, next: 0 };
-      synthetic.set(ticker, s);
-    }
-    while (s.next < steps.length) {
-      const step = steps[s.next]!;
-      s.level *= 1 + deps.holdingReturn(ticker, step.date, step.segment);
-      s.next++;
-    }
-    return s.level;
-  };
   const price = (ticker: string, date: TradingDate, at: ExecutionPoint): number => {
-    if (isSynthetic(ticker)) return level(ticker);
     const bar = deps.barOn(ticker, date);
     const p = at === 'open' ? bar.open : bar.close;
     if (p === undefined) throw new Error(`${ticker} has no open on ${date}.`);
@@ -305,19 +282,14 @@ function wholeBook(deps: {
   return {
     trades,
     grow(date, segment) {
-      steps.push({ date, segment });
-      if (!entered) return;
-      // The residual earns the cash rate per night, like CASH_USD; read only while above 0.
-      if (segment !== 'intraday' && cash > 0) cash *= 1 + deps.cashDay(date);
+      if (!entered || segment === 'intraday') return;
+      // The residual earns the cash rate per night, like CASH_USD; read only while the cash at
+      // the start of the part is above 0 (before this part's dividend or fraction arrives).
+      if (cash > 0) cash *= 1 + deps.cashDay(date);
       const next = new Map<string, number>();
       for (const [ticker, n] of shares) {
-        if (isSynthetic(ticker) || segment === 'intraday') {
-          if (isSynthetic(ticker)) level(ticker);
-          next.set(ticker, n);
-          continue;
-        }
-        // Ex-date (night part or whole day): split first, then the dividend per share after
-        // the split goes to cash; a split's fraction is paid as cash at the part's end price.
+        // Ex-date (night part or whole day): split first, then the dividend on the whole shares
+        // kept goes to cash; a split's fraction is paid as cash at the part's end price.
         const bar = deps.barOn(ticker, date);
         const end = segment === 'overnight' ? bar.open : bar.close;
         if (end === undefined) throw new Error(`${ticker} has no open on ${date}.`);
@@ -337,7 +309,7 @@ function wholeBook(deps: {
         if (target.has(h.ticker)) {
           throw new Error(`${h.ticker} is listed twice in the holdings traded on ${date}.`);
         }
-        target.set(h.ticker, h.weight / 100);
+        target.set(h.ticker, h.weight);
       }
       const tickers = [...new Set([...shares.keys(), ...target.keys()])]
         .filter((t) => t !== CASH_USD)
@@ -358,7 +330,14 @@ function wholeBook(deps: {
       const zeroShares: string[] = [];
       for (const [t, w] of target) {
         if (t === CASH_USD) continue;
-        const n = Math.max(0, Math.floor((w * budget) / (prices.get(t)! * (1 + c))));
+        // x = (weight x B) / (100 x p x (1 + c)); within 1e-9 (relative) of a whole number it is
+        // that number (float noise: 58 x 100 / 200 must give 29, not 28.999...), then floor.
+        const x = (w * budget) / (100 * prices.get(t)! * (1 + c));
+        const near = Math.round(x);
+        const n = Math.max(
+          0,
+          Math.floor(Math.abs(x - near) <= NEAR_WHOLE * Math.abs(x) ? near : x),
+        );
         next.set(t, n);
         if (n === 0) zeroShares.push(t);
       }
@@ -371,8 +350,8 @@ function wholeBook(deps: {
       const cost = c * traded;
       let residual = value - bought - cost;
       if (residual < 0) {
-        // Exact arithmetic keeps it at 0 or above (docs/indicators.md "Whole shares"); below 0
-        // by more than float noise is a fault, never a silent clamp.
+        // Exact arithmetic keeps it at 0 or above (docs/indicators.md "Whole shares"), up to the
+        // sizing's snap (at most 1e-9 x B); below 0 by more is a fault, never a silent clamp.
         if (residual < -NEAR_WHOLE * value) {
           throw new Error(`Whole shares on ${date}: the residual cash ${residual} is below 0.`);
         }
@@ -398,7 +377,7 @@ function wholeBook(deps: {
       let value = cash;
       const parts: [string, number][] = [];
       for (const [t, n] of shares) {
-        const v = n * (isSynthetic(t) ? level(t) : deps.barOn(t, date).close);
+        const v = n * deps.barOn(t, date).close;
         parts.push([t, v]);
         value += v;
       }
@@ -473,6 +452,18 @@ export function backtest(input: BacktestInput): BacktestResult {
 
   let whole: ReturnType<typeof wholeBook> | undefined;
   if (initial !== undefined) {
+    // A synthetic ticker has no traded price: one built from its returns would depend on the
+    // backtest's start date, so its share counts would mean nothing.
+    const synthetic = [
+      ...(strategy.allocations ?? []).flatMap((a) => a.holdings),
+      ...(strategy.safeState?.holdings ?? []),
+      ...input.days.flatMap((d) => d.holdings),
+    ].find((h) => h.ticker !== CASH_USD && h.ticker !== parseTicker(h.ticker).base);
+    if (synthetic) {
+      throw new Error(
+        `Whole shares are refused with a synthetic ticker (${synthetic.ticker}): it has no traded price, so its share count would depend on the backtest's start date.`,
+      );
+    }
     // Prices as traded: a share count on today's split basis is not one anyone held.
     for (const base of holdable) {
       if (input.bars[base]!.some((b) => b.closeIsSplitAdjusted)) {
@@ -484,7 +475,7 @@ export function backtest(input: BacktestInput): BacktestResult {
       throw new Error(`Whole shares need a cost rate from 0 to below 100% (${costRate}).`);
     }
     if (days.length > 0) {
-      whole = wholeBook({ initial, costRate, first: days[0]!.date, cashDay, holdingReturn, barOn });
+      whole = wholeBook({ initial, costRate, cashDay, barOn });
     }
   }
   const book: Book = whole ?? fractionalBook(costRate, holdingReturn);
@@ -497,7 +488,7 @@ export function backtest(input: BacktestInput): BacktestResult {
       decided: isDecided,
       equity: c.equity,
       weights: c.weights,
-      ...(c.value !== undefined && { value: c.value }),
+      ...(c.value !== undefined && { value: usd(c.value) }),
       traded,
     });
   };
