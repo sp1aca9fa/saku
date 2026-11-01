@@ -4,7 +4,7 @@
 // the doc, never by copying code. float64 analytics (requirements 06), 252-day annualization.
 // A metric that lacks data is "no value" with a reason, never 0 or a guess.
 import type { TradingDate } from '../domain';
-import { CASH_USD, parseTicker } from '../strategy/backtest';
+import { isCash, parseTicker } from '../strategy/backtest';
 import { isTradingDate } from '../time';
 
 export interface EquitySample {
@@ -312,14 +312,15 @@ function rolling5y(points: readonly EquitySample[], target: number | undefined) 
 }
 
 /**
- * The ticker's exposure per unit weight: its leverage `L`, 0 for cash. Read through the one
- * ticker grammar (`parseTicker`, docs/indicators.md "Synthetic leverage"); NaN when the ticker is
+ * The ticker's exposure per unit weight: its leverage `L`, 0 for cash (CASH_USD, CASH_BASE).
+ * Read through the one ticker grammar (`parseTicker`, docs/indicators.md "Synthetic leverage");
+ * NaN when the ticker is
  * malformed (`holdingsMissing`): an `L` given without a number (`?L=`, `?L`), with an exponent,
  * twice, or not above 0 is unknown, never the 0 that `Number('')` would read (docs/analytics.md,
  * `averageExposure`).
  */
 function leverageOf(ticker: string): number {
-  if (ticker === CASH_USD) return 0;
+  if (isCash(ticker)) return 0;
   try {
     return parseTicker(ticker).leverage;
   } catch {

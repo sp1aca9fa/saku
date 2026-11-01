@@ -8,6 +8,10 @@
 // - Every cost is known: the strategy's own, or the install's `broker_costs` for one it omits
 //   (`effectiveCosts`, requirements 05 "Costs"); omitted with no usable setting refuses, never 0.
 //   The effective costs are what gets registered (`RegistrationReport.costs`).
+// - A strategy that may hold CASH_BASE (base-currency cash; docs/indicators.md "Base-currency
+//   cash") needs what its forward equity reads: `base_currency` set, a deposit rate in force on
+//   `through` (`depositRateAsOf`; unknown or invalid refuses, never 0), and, unless the base
+//   currency is USD, a primary FX source (the valuation rate USD<base>). Each missing one refuses.
 // - `same_close` execution is refused: it trades at a close not yet known when the signal is
 //   computed; it exists only for testfol parity tests (05 "Execution model").
 // - A range volatility (parkinson, garman_klass, yang_zhang) is refused: it reads opens, highs
@@ -47,12 +51,14 @@
 // freshness only on each run's own target date, not per date over the full history, so there is
 // no full-history grade to read; the daily run grades the series on each recorded day.
 import {
-  CASH_USD,
+  CASH_BASE,
   comparisonsOf,
   type Strategy,
   type TradingDate,
   dependencies,
+  isCash,
   isTradingDate,
+  mayHoldCashBase,
   parseTicker,
 } from '@saku/core';
 import { CLOSED_DAY_EVENT, NOT_A_SESSION, type Sessions } from '@saku/data';
@@ -60,6 +66,7 @@ import {
   type Db,
   activeSymbols,
   closedEventResolutionsOf,
+  depositRateAsOf,
   getSetting,
   resolutionOf,
   schema,
@@ -102,7 +109,7 @@ export function readsRangeVolatility(strategy: Strategy): boolean {
 export function registrationTickers(strategy: Strategy): string[] {
   const safe = strategy.safeState.holdings
     .map((h) => h.ticker)
-    .filter((t) => t !== CASH_USD)
+    .filter((t) => !isCash(t))
     .map((t) => parseTicker(t).base);
   return [...new Set([...dependencies(strategy), ...safe])].sort();
 }
@@ -144,6 +151,7 @@ export async function registrationReport(
   }
   const costs = await effectiveCosts(db, strategy);
   if ('problem' in costs) problems.push(costs.problem);
+  if (mayHoldCashBase(strategy)) problems.push(...(await cashBaseProblems(db, o.through)));
   if (strategy.execution === 'same_close') problems.push(SAME_CLOSE_REFUSAL);
   if (readsRangeVolatility(strategy)) problems.push(RANGE_VOLATILITY_REFUSAL);
 
@@ -181,6 +189,38 @@ export async function registrationReport(
     notes.push(...r.notes);
   }
   return { problems, notes, ...('problem' in costs ? {} : { costs }) };
+}
+
+/** What a strategy that may hold CASH_BASE needs before its forward record starts (see above). */
+async function cashBaseProblems(db: Db, through: TradingDate): Promise<string[]> {
+  const base = await getSetting(db, 'base_currency');
+  if (!base) {
+    return [
+      `The strategy may hold ${CASH_BASE} (base-currency cash) and base_currency is not set: ` +
+        'pnpm settings set base_currency <code> first.',
+    ];
+  }
+  const problems: string[] = [];
+  const rate = await depositRateAsOf(db, through);
+  if ('unknown' in rate) {
+    problems.push(
+      `The strategy may hold ${CASH_BASE} and no ${base} deposit rate is in force on ${through} ` +
+        '(never read as 0): pnpm settings deposit-rate add <ratePct> <from> ' +
+        `${base} first.`,
+    );
+  } else if ('invalid' in rate) {
+    problems.push(
+      `The strategy may hold ${CASH_BASE} and the ${base} deposit rate in force on ${through} is ` +
+        `invalid (${rate.invalid.join('; ')}): correct it with pnpm settings deposit-rate correct.`,
+    );
+  }
+  if (base !== 'USD' && !(await roles(db, 'fx')).primary) {
+    problems.push(
+      `The strategy may hold ${CASH_BASE} and no primary FX source is set: its value in USD ` +
+        `needs the valuation rate USD${base}.`,
+    );
+  }
+  return problems;
 }
 
 interface Pass {

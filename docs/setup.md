@@ -88,7 +88,7 @@ unknown or missing key, or a key given twice, is refused with every reason.
 | `issuer_nav_tolerance` | JSON map | `docs/data-pipeline.md` |
 | `forward_records_from` | date | Set when the A1 gate passes |
 | `tax_regime` | regime key | `pnpm plugins tax-regime <key>`; refused while the stored benchmarks name an account type the regime does not define |
-| `broker_costs` | `{"slippageBps":"5","feePct":"0.1","fxSpreadPct":"0.2"}` | Your broker's costs: slippage in basis points (at most 1000), fee and FX spread in percent of the amount traded (each below 100; a strategy's own costs have the same limits). All three required (write `"0"` for none). The FX spread is stored but not applied yet: backtests are in USD until the base-currency layer |
+| `broker_costs` | `{"slippageBps":"5","feePct":"0.1","fxSpreadPct":"0.2"}` | Your broker's costs: slippage in basis points (at most 1000), fee and FX spread in percent of the amount traded (each below 100; a strategy's own costs have the same limits). All three required (write `"0"` for none). The FX spread applies only to conversions between USD holdings and `CASH_BASE` (none with base currency USD) |
 | `benchmarks` | JSON list | `pnpm plugins benchmarks <file>` (below) |
 
 **Costs.** A strategy's `costs` may leave out any of `slippageBps`, `feePct`, `fxSpreadPct`; each

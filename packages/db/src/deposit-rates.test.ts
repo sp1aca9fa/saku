@@ -6,6 +6,7 @@ import {
   correctDepositRate,
   depositRateAsOf,
   depositRateEntries,
+  depositRateReader,
 } from './deposit-rates';
 import { depositRateRevisions, depositRates } from './schema';
 import { setSetting } from './settings';
@@ -191,5 +192,32 @@ describe('deposit rates', () => {
     expect(await depositRateAsOf(db, '2026-02-01')).toEqual({
       invalid: [expect.stringMatching(/^the rate must be a decimal/)],
     });
+    expect((await depositRateReader(db))('2026-02-01')).toEqual(
+      await depositRateAsOf(db, '2026-02-01'),
+    );
+  });
+
+  it('the in-memory reader answers every date as depositRateAsOf does', async () => {
+    const db = await withBase();
+    expect((await depositRateReader(db))('2026-01-05')).toEqual({ unknown: true });
+    await addDepositRate(db, entry('0.1', '2026-01-05'), { now });
+    await addDepositRate(db, entry('0.25', '2026-07-01'), { now });
+    await addDepositRate(db, entry('0.05', '2025-06-02'), { now });
+    await correctDepositRate(db, { from: '2026-01-05', ratePct: '0.15', reason: 'typo' });
+    await correctDepositRate(db, { from: '2026-01-05', ratePct: '0.12', reason: 'bank letter' });
+    const read = await depositRateReader(db);
+    for (const d of [
+      '2025-06-01',
+      '2025-06-02',
+      '2026-01-04',
+      '2026-01-05',
+      '2026-06-30',
+      '2026-07-01',
+      '2030-01-01',
+    ]) {
+      expect(read(d)).toEqual(await depositRateAsOf(db, d));
+    }
+    expect(read('2026-03-02')).toEqual({ entry: entry('0.12', '2026-01-05') });
+    expect(() => read('2026-13-01')).toThrow(/Not a date/);
   });
 });

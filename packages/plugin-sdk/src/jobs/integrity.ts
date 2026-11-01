@@ -19,8 +19,9 @@ import {
 import type { CheckResult, Sessions } from '@saku/data';
 import { type Db, allVersions } from '@saku/db';
 import { type RefStrategy, refBacktest, refEvaluate } from '@saku/reference';
+import { type BaseCurrencyInputs, baseCurrencyInputs } from './base-currency';
 import { cashRateReader } from './cash';
-import { reader, signalsDiffer } from './forward';
+import { cashBaseInputs, reader, signalsDiffer } from './forward';
 
 export const INTEGRITY_TOLERANCE = 1e-9;
 /** Sampled days for incremental vs full: the latest sessions, then one a year back to the start. */
@@ -42,6 +43,7 @@ export async function integrity(
   const out: IntegrityResult[] = [];
   const { loadRows, barsOf } = await reader(db, o.sessions);
   const cashRate = await cashRateReader(db);
+  const baseInputs = await baseCurrencyInputs(db);
 
   for (const version of await allVersions(db)) {
     const result = (check: string, problems: string[], deviation = 0): IntegrityResult => ({
@@ -62,17 +64,19 @@ export async function integrity(
     // Only a version registered before C2's cost freeze reads an omitted cost as 0 (as when it
     // was recorded); for any other an omitted cost fails (docs/indicators.md "Costs").
     const omittedCostsAsZero = !version.costsResolved;
+    let base: BaseCurrencyInputs = {};
     try {
       // Read as registered (`StoredStrategy`, as forward.ts `parseVersion`).
       strategy = StoredStrategy.parse(JSON.parse(version.canonicalJson).strategy);
       // Every ticker it may hold, the safe state's included (backtest sessions).
       bars = barsOf(await loadRows(strategyTickers(strategy), o.to));
       core = evaluate(strategy, bars);
+      // The base currency, FX and deposit rate as the forward record reads them (CASH_BASE only).
+      base = cashBaseInputs(strategy, baseInputs);
       equity = new Map(
-        backtest({ strategy, days: core, bars, cashRate, omittedCostsAsZero }).points.map((p) => [
-          p.date,
-          p.equity,
-        ]),
+        backtest({ strategy, days: core, bars, cashRate, omittedCostsAsZero, ...base }).points.map(
+          (p) => [p.date, p.equity],
+        ),
       );
     } catch (e) {
       // Neither check can run: both are red, and the other versions are still checked.
@@ -83,7 +87,7 @@ export async function integrity(
     }
     out.push(compareReference(strategy, core, equity, bars, cashRate, omittedCostsAsZero, result));
     out.push(
-      compareIncremental(strategy, core, equity, bars, cashRate, omittedCostsAsZero, result),
+      compareIncremental(strategy, core, equity, bars, cashRate, omittedCostsAsZero, result, base),
     );
   }
   return out;
@@ -117,6 +121,9 @@ function compareReference(
         const signals = signalsDiffer(d.signals, r.signals);
         if (signals.length) problems.push(`${d.date}: signals ${signals.join(', ')}`);
       });
+      // A version that may hold CASH_BASE: the reference gets no base-currency inputs until it
+      // implements them from the contract (spec 2026-11-02 base-currency), so it fails here and
+      // the check is red, never skipped.
       // Core succeeded, so no day it valued needed an unknown rate; the reference reads the rate
       // on every day (times a zero weight where unused), so an unknown one is passed as 0 there.
       // Matched by date: both value every session, those without a decision included.
@@ -148,6 +155,7 @@ function compareIncremental(
   cashRate: (date: TradingDate) => number | undefined,
   omittedCostsAsZero: boolean,
   result: Result,
+  base: BaseCurrencyInputs,
 ): IntegrityResult {
   const problems: string[] = [];
   let worst = 0;
@@ -177,6 +185,7 @@ function compareIncremental(
         bars: upTo,
         cashRate,
         omittedCostsAsZero,
+        ...base,
       }).points.at(-1)!;
       const full = equity.get(date);
       if (point.date !== date || full === undefined) {

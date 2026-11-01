@@ -2,6 +2,7 @@ import { type HealthStatus, type JobType, type RawBar, Strategy } from '@saku/co
 import { Sessions } from '@saku/data';
 import {
   type Db,
+  addDepositRate,
   createUser,
   finishRun,
   schema,
@@ -156,6 +157,31 @@ describe('registrationProblems', () => {
     const { db, pass } = await setup();
     await pass({ rows: [{ ticker: 'AAA', date: D[1], status: 'yellow', reasons: ['A.x'] }] });
     expect(await check(db)).toEqual([]);
+  });
+
+  it('a strategy that may hold CASH_BASE needs the base currency, a deposit rate and FX', async () => {
+    const { db, pass } = await setup();
+    await pass();
+    // A strategy that cannot hold it needs none of them.
+    expect(await check(db)).toEqual([]);
+    const s = strategy({ safe: 'CASH_BASE' });
+    expect(registrationTickers(s)).toEqual(['AAA']);
+    expect(await check(db, s)).toEqual([
+      'The strategy may hold CASH_BASE (base-currency cash) and base_currency is not set: pnpm settings set base_currency <code> first.',
+    ]);
+    await setSetting(db, 'base_currency', 'XXX');
+    expect(await check(db, s)).toEqual([
+      `The strategy may hold CASH_BASE and no XXX deposit rate is in force on ${LAST} (never read as 0): pnpm settings deposit-rate add <ratePct> <from> XXX first.`,
+      'The strategy may hold CASH_BASE and no primary FX source is set: its value in USD needs the valuation rate USDXXX.',
+    ]);
+    // A rate in force only after `through` is not in force on it.
+    await addDepositRate(db, { ratePct: '0.1', from: '2026-01-09', currency: 'XXX' });
+    expect((await check(db, s))[0]).toMatch(/no XXX deposit rate is in force on 2026-01-08/);
+    await addDepositRate(db, { ratePct: '0.2', from: D[0], currency: 'XXX' });
+    await db
+      .insert(schema.sourceRoles)
+      .values({ dataKind: 'fx', pluginKey: 'fp', role: 'primary', position: 0 });
+    expect(await check(db, s)).toEqual([]);
   });
 
   it('refuses same_close, and lists every reason at once', async () => {

@@ -505,5 +505,10 @@ describe('metrics: trading', () => {
     expect(metrics({ points: lastBare }).averageExposure.ok).toBe(true);
     const unreadable = points.map((p, i) => (i === 2 ? { ...p, weights: { 'SPY?L=x': 1 } } : p));
     expect(reason(metrics({ points: unreadable }).averageExposure)).toBe('holdingsMissing');
+    // Base-currency cash is cash: 0, like CASH_USD.
+    const base = points.map((p, i) =>
+      i === 2 ? { ...p, weights: { SPY: 0.5, CASH_BASE: 0.5 } } : p,
+    );
+    expect(v(metrics({ points: base }).averageExposure)).toBeCloseTo(3.5 / 3, 14);
   });
 });

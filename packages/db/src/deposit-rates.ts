@@ -262,3 +262,45 @@ export async function depositRateAsOf(
   const problems = valueProblems(entry, await getSetting(db, 'base_currency'));
   return problems.length > 0 ? { invalid: problems } : { entry };
 }
+
+/** What `depositRateAsOf` returns for a date. */
+export type DepositRateRead = Awaited<ReturnType<typeof depositRateAsOf>>;
+
+/**
+ * `depositRateAsOf` (without `knownBy`: the latest entries and corrections) for many dates, read
+ * once and answered in memory, for a backtest that reads a date at a time (docs/indicators.md
+ * "Base-currency cash"). Each date's answer equals `depositRateAsOf`'s: the entry with the latest
+ * `from` on or before it, with its latest correction; unknown before the first entry; invalid when
+ * the value read does not pass the rules. Throws on a `date` that is not a date (a caller error).
+ */
+export async function depositRateReader(db: Db): Promise<(date: TradingDate) => DepositRateRead> {
+  const rows = await db.select().from(depositRates).orderBy(asc(depositRates.fromDate));
+  const revisions = await db
+    .select()
+    .from(depositRateRevisions)
+    .orderBy(asc(depositRateRevisions.id));
+  const latest = new Map<number, string>();
+  for (const v of revisions) latest.set(v.entryId, v.newRatePct);
+  const base = await getSetting(db, 'base_currency');
+  const reads: DepositRateRead[] = rows.map((row) => {
+    const entry = {
+      ratePct: latest.get(row.id) ?? row.ratePct,
+      from: row.fromDate,
+      currency: row.currency,
+    };
+    const problems = valueProblems(entry, base);
+    return problems.length > 0 ? { invalid: problems } : { entry };
+  });
+  return (date) => {
+    if (!isTradingDate(date)) throw new Error(`Not a date: ${JSON.stringify(date)}.`);
+    // The last entry starting on or before the date (from dates are unique and sorted).
+    let lo = 0;
+    let hi = rows.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (rows[mid]!.fromDate <= date) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo === 0 ? { unknown: true } : reads[lo - 1]!;
+  };
+}

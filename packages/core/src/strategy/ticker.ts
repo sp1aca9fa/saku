@@ -9,11 +9,19 @@
 //   decimal = ["-"] digits [ "." digits ]    no exponent, no "+", no spaces, no escapes
 //   base    = one or more characters, none of them whitespace or ? & = %
 //
-// L (leverage) is finite and > 0; E (expense, percent a year) is finite and >= 0. CASH_USD takes
-// no parameters (it accrues the cash rate; a leverage or an expense on it means nothing defined).
+// L (leverage) is finite and > 0; E (expense, percent a year) is finite and >= 0. CASH_USD and
+// CASH_BASE take no parameters (they accrue a cash or deposit rate; a leverage or an expense on
+// them means nothing defined).
 // Assumed (spec): L > 0, since a short or 0x synthetic is not in the requirements.
 
 export const CASH_USD = 'CASH_USD';
+/**
+ * The base currency's cash, earning its deposit rate (requirements 05 "Cash"; docs/indicators.md
+ * "Base-currency cash"). A holding only: it has no bars.
+ */
+export const CASH_BASE = 'CASH_BASE';
+/** Whether the ticker is one of the cash holdings (no bars; no parameters). */
+export const isCash = (ticker: string): boolean => ticker === CASH_USD || ticker === CASH_BASE;
 
 const BASE = /^[^\s?&=%]+$/;
 const DECIMAL = /^-?\d+(\.\d+)?$/;
@@ -41,7 +49,7 @@ function read(ticker: string): Read {
   }
   const parsed: ParsedTicker = { base, leverage: 1, expensePct: 0 };
   if (q < 0) return { ok: true, value: parsed };
-  if (base === CASH_USD) return fail(`"${ticker}": ${CASH_USD} takes no parameters`);
+  if (isCash(base)) return fail(`"${ticker}": ${base} takes no parameters`);
   const query = ticker.slice(q + 1);
   const seen = new Set<string>();
   for (const part of query.split('&')) {

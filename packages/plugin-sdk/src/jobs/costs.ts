@@ -52,11 +52,11 @@ export async function effectiveCosts(db: Db, strategy: Strategy): Promise<Effect
 }
 
 /**
- * The FX spread is stored with the version but no backtest charges it yet: backtests are in USD
- * (no conversion to the base currency) until the base-currency layer. Said wherever it is shown.
+ * Where the FX spread applies (docs/indicators.md "FX spread"): only to the part of a trade that
+ * converts between USD holdings and CASH_BASE (none with base currency USD). Said wherever it is
+ * shown, so it is not read as a charge on every trade.
  */
-export const FX_SPREAD_NOT_APPLIED =
-  'not applied yet: backtests are in USD until the base-currency layer';
+export const FX_SPREAD_SCOPE = 'applies only to conversions to and from CASH_BASE';
 
 /** The effective costs in one line, naming those taken from the install's settings. */
 export function costsLine(e: { strategy: Strategy; fromInstall: CostField[] }): string {
@@ -67,6 +67,6 @@ export function costsLine(e: { strategy: Strategy; fromInstall: CostField[] }): 
       : '';
   return (
     `Costs: slippageBps ${c.slippageBps}, feePct ${c.feePct}, fxSpreadPct ${c.fxSpreadPct} ` +
-    `(${FX_SPREAD_NOT_APPLIED})${from}`
+    `(${FX_SPREAD_SCOPE})${from}`
   );
 }

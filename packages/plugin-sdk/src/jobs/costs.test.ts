@@ -4,7 +4,7 @@ import { type RawBar, type StrategyDay, Strategy } from '@saku/core';
 import { registerVersion } from '@saku/db';
 import { testDb } from '@saku/db/testing';
 import { describe, expect, it } from 'vitest';
-import { FX_SPREAD_NOT_APPLIED, costsLine } from './costs';
+import { FX_SPREAD_SCOPE, costsLine } from './costs';
 import { forwardEquity, parseVersion } from './forward';
 
 const D = ['2026-01-05', '2026-01-06', '2026-01-07'] as const;
@@ -69,13 +69,13 @@ describe('a version registered before C2 (costs omitted)', () => {
 });
 
 describe('costsLine', () => {
-  it('says the FX spread is not applied yet', () => {
+  it('says the FX spread applies only to conversions to and from CASH_BASE', () => {
     const strategy = Strategy.parse({
       ...definition,
       costs: { slippageBps: 5, feePct: 0.1, fxSpreadPct: 0.2 },
     });
     expect(costsLine({ strategy, fromInstall: ['fxSpreadPct'] })).toBe(
-      `Costs: slippageBps 5, feePct 0.1, fxSpreadPct 0.2 (${FX_SPREAD_NOT_APPLIED}) (from the install's broker_costs: fxSpreadPct)`,
+      `Costs: slippageBps 5, feePct 0.1, fxSpreadPct 0.2 (${FX_SPREAD_SCOPE}) (from the install's broker_costs: fxSpreadPct)`,
     );
   });
 });

@@ -10,7 +10,7 @@
 // registered versions are immutable; spec 2026-11-01 yaml-strategies). Registration stores the
 // parsed output, so stored versions carry only known keys and re-parse unchanged.
 import { z } from 'zod';
-import { tickerProblem } from './ticker';
+import { CASH_BASE, tickerProblem } from './ticker';
 
 /**
  * A ticker in the one grammar (`./ticker`, docs/indicators.md "Synthetic leverage"): `BASE` or
@@ -25,9 +25,18 @@ const ticker = z.string().superRefine((t, ctx) => {
 /**
  * An indicator operand's ticker: well-formed and without parameters. An indicator reads the
  * ticker's own bars by its plain name, so `SPY?L=3` would read bars no ticker has (never a value);
- * L and E apply to holdings only (docs/indicators.md "Synthetic leverage"). Refused at parse.
+ * L and E apply to holdings only (docs/indicators.md "Synthetic leverage"). Refused at parse, as
+ * is `CASH_BASE` (a holding only).
  */
 const operandTicker = ticker.superRefine((t, ctx) => {
+  // CASH_BASE is a holding only (docs/indicators.md "Base-currency cash"): it has no bars to read.
+  if (t === CASH_BASE) {
+    ctx.addIssue({
+      code: 'custom',
+      message: `"${t}": base-currency cash is a holding only; an indicator has no bars to read for it`,
+    });
+    return;
+  }
   if (tickerProblem(t) === undefined && t.includes('?')) {
     ctx.addIssue({
       code: 'custom',

@@ -17,7 +17,7 @@ Written without web access. Every citation is marked **to verify**, with the exa
 | Evaluation | `daily` | The only frequency the engine runs today; weekly and monthly wait for C31 (1). |
 | Costs | `slippageBps: 5`, fees and FX spread from the install's broker settings | As in Setup 1's template; never tuned. |
 | Signal series | Total return (`totalReturn: true`) | Dividends count, and a split cannot flip a signal (C18). |
-| Cash | `CASH_USD` | The only cash the engine has today; `CASH_BASE` versions are a decision-card choice, not separate variants. |
+| Cash | `CASH_USD` | Library strategies hold `CASH_USD`; `CASH_BASE` versions are a decision-card choice, not separate variants. |
 | Ensemble threshold | 0.5 (2 of 3 members) | A majority; the same in every family so it adds no trials. |
 | Moving-average sets | E1 = SMA 150, 200, 250; E2 = SMA 100, 200, 300 | Both centered on 200 days (about the 10 months of Faber 2007 and the 200 days of Gayed and Bilello 2016); E2 is wider. Not chosen from any backtest. |
 | Tolerance | 0 (the papers' plain rule) or 3% (Setup 1's) | Used only where the reference value is always positive (a fund against its own average, a volatility against a positive level); see Q4. |

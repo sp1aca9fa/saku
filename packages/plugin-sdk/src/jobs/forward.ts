@@ -19,6 +19,7 @@ import {
   canonicalJson,
   evaluate,
   forwardDecision,
+  mayHoldCashBase,
   NEAR_TIE,
   zonedInstant,
 } from '@saku/core';
@@ -51,6 +52,7 @@ import {
   standInOn,
   unresolvedStandIns,
 } from '@saku/db';
+import { type BaseCurrencyInputs, baseCurrencyInputs } from './base-currency';
 import { cashRateReader } from './cash';
 import { DAILY_OVERLAP } from './ingest';
 import { firstGrading, recheckDeadline, regrade } from './recheck';
@@ -195,6 +197,8 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
 
   const { symbolIds, loadRows, barsOf } = await reader(db, o.sessions);
   const cashRate = await cashRateReader(db);
+  // Read only for a version that may hold CASH_BASE (`forwardEquity`).
+  const base = await baseCurrencyInputs(db);
   const clock = o.now ?? new Date();
   const clockIso = clock.toISOString();
   const startMs = (o.start ?? clock).getTime();
@@ -335,6 +339,7 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
         !version.costsResolved,
         // Recorded with an unknown equity, and reported: the run is not a silent success.
         (reason) => summary.problems.push(`${name} ${date}: equity unknown: ${reason}`),
+        base,
       );
       const input = {
         date,
@@ -1125,7 +1130,10 @@ const asDay = (e: ForwardEntry): StrategyDay => ({
  * omitted cost is charged as 0, as when it was recorded; for any other an omitted cost fails
  * (docs/indicators.md "Costs"). When the backtest fails (a holding without a bar that day, an
  * unresolved cost) the equity is unknown, never guessed: null, and `onUnknown` gets the reason so
- * the run reports it (exported for those tests).
+ * the run reports it (exported for those tests). `base`: the base currency, FX and deposit rate
+ * (`baseCurrencyInputs`), passed to the backtest only for a version that may hold CASH_BASE, so
+ * the FX never touches a USD-only version's equity (requirements 04: FX health affects only
+ * base-currency valuation); an unknown one while CASH_BASE is held makes the equity unknown.
  */
 export function forwardEquity(
   strategy: Strategy,
@@ -1135,14 +1143,33 @@ export function forwardEquity(
   today: StrategyDay,
   omittedCostsAsZero: boolean,
   onUnknown?: (reason: string) => void,
+  base?: BaseCurrencyInputs,
 ): number | null {
   const days = [...prior, today];
   try {
-    return backtest({ strategy, days, bars, cashRate, omittedCostsAsZero }).points.at(-1)!.equity;
+    return backtest({
+      strategy,
+      days,
+      bars,
+      cashRate,
+      omittedCostsAsZero,
+      ...cashBaseInputs(strategy, base),
+    }).points.at(-1)!.equity;
   } catch (e) {
     onUnknown?.(e instanceof Error ? e.message : String(e));
     return null;
   }
+}
+
+/**
+ * The base-currency inputs a version's backtest gets: all of them when it may hold CASH_BASE,
+ * none otherwise (its USD equity never reads FX). The USD equity is what the record stores.
+ */
+export function cashBaseInputs(
+  strategy: Strategy,
+  base: BaseCurrencyInputs | undefined,
+): BaseCurrencyInputs {
+  return base && mayHoldCashBase(strategy) ? base : {};
 }
 
 // --- Which days a version records (shared by forward() and `pnpm drill`) ---

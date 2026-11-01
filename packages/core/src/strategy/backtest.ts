@@ -1,14 +1,15 @@
 // Equity curves (requirements 05, execution model): the strategy's daily decisions traded at the
 // next open (default), the next close, or the same close (testfol parity only, not achievable).
 // float64 analytics; the whole-share option (docs/indicators.md "Whole shares") gives USD amounts
-// as float64 estimates.
+// as float64 estimates. Base currency (docs/indicators.md "Base currency", "Base-currency cash",
+// "FX spread"): an optional base-currency series, CASH_BASE and the FX spread on conversions.
 import { totalReturn } from '../adjusted';
 import type { RawBar, TradingDate } from '../domain';
 import type { StrategyDay } from './engine';
 import type { Holding, Strategy } from './schema';
-import { CASH_USD, parseTicker } from './ticker';
+import { CASH_BASE, CASH_USD, isCash, parseTicker } from './ticker';
 
-export { CASH_USD, parseTicker };
+export { CASH_BASE, CASH_USD, isCash, parseTicker };
 
 /**
  * Whether the backtest reads the cash rate for a holding (requirements 05, execution model):
@@ -51,6 +52,22 @@ export interface BacktestInput {
    * drafts or analytics: resolve with the install's `broker_costs` first.
    */
   omittedCostsAsZero?: boolean;
+  /**
+   * The install's base currency, an ISO 4217 code (docs/indicators.md "Base currency"). With it the
+   * result has the base-currency series (`base`); without it nothing changes, and a strategy that
+   * may hold CASH_BASE is refused.
+   */
+  baseCurrency?: string;
+  /**
+   * The valuation rate USD to base (base-currency units per USD) for a session, as known before
+   * the session opens (read through asOf). Undefined when unknown. Never read with base USD (1).
+   */
+  fxRate?: (date: TradingDate) => number | undefined;
+  /**
+   * The base currency's deposit rate in percent a year in force on the date (`depositRateAsOf`).
+   * Undefined when unknown: a covered day CASH_BASE is held on then fails, never 0.
+   */
+  depositRate?: (date: TradingDate) => number | undefined;
 }
 
 /** Where a trade executes: the session's open (`next_open`) or its close. */
@@ -101,6 +118,34 @@ export interface EquityPoint {
   traded: boolean;
 }
 
+/** A base-currency point (docs/indicators.md "Base currency"): the USD point x the session's FX. */
+export interface BasePoint {
+  date: TradingDate;
+  /** `equity` x FX; null when the session's FX is unknown or invalid. */
+  equity: number | null;
+  /** With whole shares only: `value` x FX in the base currency; null as `equity`. */
+  value?: { amount: number; currency: string } | null;
+}
+
+export interface BaseCurrencyResult {
+  currency: string;
+  /** One per USD point, same dates. */
+  points: BasePoint[];
+  /** Sessions without an FX rate known before their open: no base value there. */
+  unknownFx: TradingDate[];
+  /** Sessions whose FX is not finite or not above 0: no base value there. */
+  invalidFx: TradingDate[];
+}
+
+/** Trades that converted between USD and CASH_BASE (docs/indicators.md "FX spread"). */
+export interface Conversions {
+  count: number;
+  /** FX spread paid, cost / value per trade, summed (also in `costs`). */
+  fxSpreadCosts: number;
+  /** Tax on currency conversion is not modeled (the tax engine is blocked, C34); displays say so. */
+  tax: 'not_applied';
+}
+
 export interface BacktestResult {
   points: EquityPoint[];
   /** Trades after the first entry. */
@@ -109,6 +154,10 @@ export interface BacktestResult {
   costs: number;
   /** With whole shares only: the initial amount and each trade's shares, residual cash and costs. */
   wholeShares?: WholeShareResult;
+  /** With `baseCurrency` only: the base-currency series. */
+  base?: BaseCurrencyResult;
+  /** Only when a trade converted between USD holdings and CASH_BASE. */
+  conversions?: Conversions;
 }
 
 type Segment = 'overnight' | 'intraday' | 'day';
@@ -168,14 +217,15 @@ export function sameHoldings(a: readonly Holding[], b: readonly Holding[]): bool
 
 /**
  * The base tickers of every holding the strategy may take (any allocation's and the safe
- * state's): cash has no bars (it reads the rate), a synthetic ticker reads its base's bars.
+ * state's): cash (CASH_USD, CASH_BASE) has no bars (it reads a rate), a synthetic ticker reads its
+ * base's bars.
  */
 export function heldTickers(holdings: readonly Holding[]): string[] {
   return [
     ...new Set(
       holdings
         .map((h) => h.ticker)
-        .filter((t) => t !== CASH_USD)
+        .filter((t) => !isCash(t))
         .map((t) => parseTicker(t).base),
     ),
   ].sort();
@@ -219,17 +269,26 @@ interface Book {
   close(date: TradingDate): { equity: number; weights: Record<string, number>; value?: number };
   costs(): number;
   switches(): number;
+  /** Trades that converted between USD and CASH_BASE (fractional book only). */
+  conversions?(): Conversions | undefined;
 }
 
-/** The fractional book (docs/indicators.md "Equity curves": weights, costs on turnover). */
+/**
+ * The fractional book (docs/indicators.md "Equity curves": weights, costs on turnover; "FX
+ * spread": `spreadRate`, fxSpreadPct / 100, on |change in CASH_BASE weight|; undefined when
+ * nothing converts: base currency USD, or no CASH_BASE).
+ */
 function fractionalBook(
   costRate: number,
   holdingReturn: (ticker: string, prev: TradingDate, date: TradingDate, segment: Segment) => number,
+  spreadRate?: number,
 ): Book {
   let equity = 1;
   let weights: Record<string, number> = {};
   let costs = 0;
   let switches = 0;
+  let converted = 0;
+  let spreadCosts = 0;
   return {
     grow(prev, date, segment) {
       const entries = Object.entries(weights);
@@ -248,7 +307,18 @@ function fractionalBook(
       const tickers = new Set([...Object.keys(weights), ...Object.keys(target)]);
       let turnover = 0;
       for (const t of tickers) turnover += Math.abs((target[t] ?? 0) - (weights[t] ?? 0));
-      const cost = turnover * costRate;
+      let cost = turnover * costRate;
+      // The converted part pays the FX spread on top (|change in CASH_BASE weight| x value).
+      // Without CASH_BASE before or after, nothing converts: the cost is exactly as before.
+      if (spreadRate !== undefined && (CASH_BASE in target || CASH_BASE in weights)) {
+        const change = Math.abs((target[CASH_BASE] ?? 0) - (weights[CASH_BASE] ?? 0));
+        if (change > 0) {
+          const spread = change * spreadRate;
+          cost += spread;
+          spreadCosts += spread;
+          converted++;
+        }
+      }
       equity *= 1 - cost;
       costs += cost;
       if (Object.keys(weights).length > 0) switches++;
@@ -257,6 +327,10 @@ function fractionalBook(
     close: () => ({ equity, weights: { ...weights } }),
     costs: () => costs,
     switches: () => switches,
+    conversions: () =>
+      converted > 0
+        ? { count: converted, fxSpreadCosts: spreadCosts, tax: 'not_applied' as const }
+        : undefined,
   };
 }
 
@@ -508,11 +582,57 @@ export function rateReadDates(
   return out;
 }
 
+/**
+ * Whether the strategy may hold CASH_BASE (any allocation's or the safe state's holdings): its
+ * backtest then needs the base currency, the deposit rate and, unless the base currency is USD,
+ * the FX rate (docs/indicators.md "Base-currency cash").
+ */
+export function mayHoldCashBase(
+  strategy: Partial<Pick<Strategy, 'safeState' | 'allocations'>>,
+): boolean {
+  return allHoldings({ strategy, days: [] }).some((h) => h.ticker === CASH_BASE);
+}
+
+/** An ISO 4217 code as the base currency is given: three capital letters. */
+const CURRENCY_CODE = /^[A-Z]{3}$/;
+
+/** Every holding a backtest of these inputs may take: allocations, the safe state and the days. */
+function allHoldings(input: {
+  strategy: Partial<Pick<Strategy, 'safeState' | 'allocations'>>;
+  days: readonly StrategyDay[];
+}): Holding[] {
+  return [
+    ...(input.strategy.allocations ?? []).flatMap((a) => a.holdings),
+    ...(input.strategy.safeState?.holdings ?? []),
+    ...input.days.flatMap((d) => d.holdings),
+  ];
+}
+
 export function backtest(input: BacktestInput): BacktestResult {
   const { strategy } = input;
+  const baseCurrency = input.baseCurrency;
+  if (baseCurrency !== undefined && !CURRENCY_CODE.test(baseCurrency)) {
+    throw new Error(
+      `The base currency ${JSON.stringify(baseCurrency)} is not an ISO 4217 code (three capital letters).`,
+    );
+  }
+  // CASH_BASE (docs/indicators.md "Base-currency cash") needs the base currency, and converts
+  // (FX and the FX spread) unless the base currency is USD.
+  const holdsBase = allHoldings(input).some((h) => h.ticker === CASH_BASE);
+  if (holdsBase && baseCurrency === undefined) {
+    throw new Error(
+      `${CASH_BASE} needs the base currency: the strategy may hold it and no base currency is given.`,
+    );
+  }
+  const converts = holdsBase && baseCurrency !== 'USD';
   // An omitted cost is unknown, not 0, unless the caller says so (stored pre-C2 versions, parity).
+  // The FX spread is read only where a trade can convert.
   if (input.omittedCostsAsZero !== true) {
-    for (const field of ['slippageBps', 'feePct'] as const) {
+    for (const field of [
+      'slippageBps',
+      'feePct',
+      ...(converts ? (['fxSpreadPct'] as const) : []),
+    ] as const) {
       if (strategy.costs[field] === undefined) {
         throw new Error(
           `costs not resolved: ${field}; resolve with the install's broker_costs first`,
@@ -565,6 +685,28 @@ export function backtest(input: BacktestInput): BacktestResult {
     if (rate === undefined) throw new Error(`No cash rate known for ${date}.`);
     return rate / 100 / 252;
   };
+  // CASH_BASE's day: the deposit rate in force on the date / 100 / 252, as CASH_USD's.
+  const depositDay = (date: TradingDate) => {
+    const rate = input.depositRate?.(date);
+    if (rate === undefined) {
+      throw new Error(`No deposit rate known for ${date}: ${CASH_BASE} is held (never 0).`);
+    }
+    if (!Number.isFinite(rate)) {
+      throw new Error(`The deposit rate for ${date} is ${rate}, not a finite number.`);
+    }
+    return rate / 100 / 252;
+  };
+  /** The session's FX as CASH_BASE's valuation needs it: known, finite and above 0, or a failure. */
+  const fxHeld = (date: TradingDate): number => {
+    const fx = input.fxRate?.(date);
+    if (fx === undefined) {
+      throw new Error(`No FX rate (USD${baseCurrency}) known for ${date}: ${CASH_BASE} is held.`);
+    }
+    if (!Number.isFinite(fx) || fx <= 0) {
+      throw new Error(`The FX rate (USD${baseCurrency}) for ${date} is ${fx}: not above 0.`);
+    }
+    return fx;
+  };
   // One covered day of a holding (requirements 05: synthetic leverage is daily): L x the base's
   // return that day, minus (L - 1) x that day's cash rate / 252 and E / 100 / 252.
   const dayReturn = (
@@ -589,7 +731,7 @@ export function backtest(input: BacktestInput): BacktestResult {
     segment: Segment,
   ): number => {
     if (segment === 'intraday') {
-      if (ticker === CASH_USD) return 0;
+      if (isCash(ticker)) return 0;
       const t = parseTicker(ticker);
       const bar = barOn(t.base, date);
       return t.leverage * assetReturn(bar, bar, 'intraday', t.base);
@@ -599,6 +741,14 @@ export function backtest(input: BacktestInput): BacktestResult {
       if (days.length === 1) return cashDay(date);
       let growth = 1;
       for (const d of days) growth *= growthOf(ticker, d, cashDay(d));
+      return growth - 1;
+    }
+    if (ticker === CASH_BASE) {
+      // The deposit rate per covered day, then the step's FX move: (product of 1 + rate / 100 /
+      // 252) x (fx(prev) / fx(date)). With base USD the FX factor is 1 and nothing is read.
+      let growth = 1;
+      for (const d of days) growth *= growthOf(ticker, d, depositDay(d));
+      if (converts) growth *= fxHeld(prev) / fxHeld(date);
       return growth - 1;
     }
     const t = parseTicker(ticker);
@@ -627,13 +777,18 @@ export function backtest(input: BacktestInput): BacktestResult {
 
   let whole: ReturnType<typeof wholeBook> | undefined;
   if (initial !== undefined) {
+    // Assumed (spec 2026-11-02 base-currency): a base-currency residual next to the USD one would
+    // need its own sizing, conversion and FX rules; refused rather than modeled.
+    if (holdsBase) {
+      throw new Error(
+        `Whole shares are refused with ${CASH_BASE}: a base-currency cash balance is not modeled with whole shares yet.`,
+      );
+    }
     // A synthetic ticker has no traded price: one built from its returns would depend on the
     // backtest's start date, so its share counts would mean nothing.
-    const synthetic = [
-      ...(strategy.allocations ?? []).flatMap((a) => a.holdings),
-      ...(strategy.safeState?.holdings ?? []),
-      ...input.days.flatMap((d) => d.holdings),
-    ].find((h) => h.ticker !== CASH_USD && h.ticker !== parseTicker(h.ticker).base);
+    const synthetic = allHoldings(input).find(
+      (h) => h.ticker !== CASH_USD && h.ticker !== parseTicker(h.ticker).base,
+    );
     if (synthetic) {
       throw new Error(
         `Whole shares are refused with a synthetic ticker (${synthetic.ticker}): it has no traded price, so its share count would depend on the backtest's start date.`,
@@ -662,7 +817,10 @@ export function backtest(input: BacktestInput): BacktestResult {
       whole = wholeBook({ initial, costRate, cashDay, barOn, span, covered });
     }
   }
-  const book: Book = whole ?? fractionalBook(costRate, holdingReturn);
+  // Only a strategy that may convert reads the FX spread (an omitted one is 0 only for callers
+  // that read omitted costs as 0).
+  const spreadRate = converts ? (strategy.costs.fxSpreadPct ?? 0) / 100 : undefined;
+  const book: Book = whole ?? fractionalBook(costRate, holdingReturn, spreadRate);
 
   const points: EquityPoint[] = [];
   const pushPoint = (date: TradingDate, isDecided: boolean, traded: boolean) => {
@@ -713,6 +871,7 @@ export function backtest(input: BacktestInput): BacktestResult {
     }
     pushPoint(day.date, day.decided, traded);
   });
+  const conversions = book.conversions?.();
   return {
     points,
     switches: book.switches(),
@@ -723,7 +882,44 @@ export function backtest(input: BacktestInput): BacktestResult {
         trades: whole?.trades ?? [],
       },
     }),
+    ...(baseCurrency !== undefined && { base: baseSeries(points, baseCurrency, input.fxRate) }),
+    ...(conversions && { conversions }),
   };
+}
+
+/**
+ * The base-currency series (docs/indicators.md "Base currency"): each point's equity (and whole-
+ * share value) x the session's FX, known before its open. Unknown or invalid FX gives that point
+ * no base value (null), listed; it never fails the run (FX health affects only base-currency
+ * valuation). With base USD the FX is 1 and the series equals the USD one.
+ */
+function baseSeries(
+  points: readonly EquityPoint[],
+  currency: string,
+  fxRate: BacktestInput['fxRate'],
+): BaseCurrencyResult {
+  const unknownFx: TradingDate[] = [];
+  const invalidFx: TradingDate[] = [];
+  const out: BasePoint[] = points.map((p) => {
+    let fx: number | undefined = 1;
+    if (currency !== 'USD') {
+      fx = fxRate?.(p.date);
+      if (fx === undefined) unknownFx.push(p.date);
+      else if (!Number.isFinite(fx) || fx <= 0) {
+        invalidFx.push(p.date);
+        fx = undefined;
+      }
+    }
+    if (fx === undefined) {
+      return { date: p.date, equity: null, ...(p.value && { value: null }) };
+    }
+    return {
+      date: p.date,
+      equity: p.equity * fx,
+      ...(p.value && { value: { amount: p.value.amount * fx, currency } }),
+    };
+  });
+  return { currency, points: out, unknownFx, invalidFx };
 }
 
 /** Compound annual growth over calendar time, and the deepest fall from a previous peak. */
