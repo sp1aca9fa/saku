@@ -479,12 +479,12 @@ describe('reference metrics: holdings', () => {
       points: [
         { date: '2024-01-02', equity: 1, weights: { SPY: 0.5, 'SPY?L=3&E=0.9': 0.5 } },
         { date: '2024-01-03', equity: 1, weights: { CASH_USD: 1 } },
-        { date: '2024-01-04', equity: 1, weights: { 'SH?E=0.9&L=-1': 1 } },
+        { date: '2024-01-04', equity: 1, weights: { 'QQQ?E=0.9&L=0.5': 1 } },
         { date: '2024-01-05', equity: 1, weights: {} },
         { date: '2024-01-08', equity: 1 }, // the last point's weights are not needed
       ],
     });
-    close(value(r.averageExposure), (2 + 0 - 1 + 0) / 4);
+    close(value(r.averageExposure), (2 + 0 + 0.5 + 0) / 4);
     const missing = refMetrics({
       points: [
         { date: '2024-01-02', equity: 1 },
@@ -492,7 +492,23 @@ describe('reference metrics: holdings', () => {
       ],
     });
     expect(reason(missing.averageExposure)).toBe('holdingsMissing');
-    for (const ticker of ['X?L=abc', 'X?L=', 'X?L=2&L=3']) {
+    // Outside the one ticker grammar (docs/indicators.md "Synthetic leverage"): unreadable.
+    for (const ticker of [
+      'X?L=abc',
+      'X?L=',
+      'X?L',
+      'X?L=1e1',
+      'X?L=0x3',
+      'X?L=%33',
+      'X?L= 3',
+      'X?L=+3',
+      'X?L=2&L=3',
+      'X?l=2',
+      'X?L=0',
+      'SH?E=0.9&L=-1',
+      'X?E=-1',
+      'CASH_USD?L=2',
+    ]) {
       const bad = refMetrics({
         points: [
           { date: '2024-01-02', equity: 1, weights: { [ticker]: 1 } },

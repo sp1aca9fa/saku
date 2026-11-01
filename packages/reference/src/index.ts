@@ -4,6 +4,8 @@
 // state machines). It never imports @saku/core. When the two disagree, find the root cause;
 // never copy one into the other.
 
+import { refParseTicker } from './ticker';
+
 export interface RefBar {
   date: string;
   open?: number;
@@ -520,16 +522,11 @@ export function refBacktest(
 ): { equity: number[]; dates: string[]; switches: number } {
   const execution = s.execution ?? 'next_open';
   const costRate = (s.costs?.slippageBps ?? 0) / 1e4 + (s.costs?.feePct ?? 0) / 100;
+  // One ticker grammar (./ticker); a ticker outside it throws, never a silent 0 or NaN.
   const parse = (ticker: string) => {
-    const q = ticker.includes('?') ? ticker.slice(ticker.indexOf('?') + 1) : '';
-    let L = 1;
-    let E = 0;
-    for (const part of q.split('&')) {
-      const [k, v] = part.split('=');
-      if (k === 'L') L = Number(v);
-      if (k === 'E') E = Number(v);
-    }
-    return { base: ticker.split('?')[0]!, L, E };
+    const t = refParseTicker(ticker);
+    if (t === undefined) throw new Error(`reference: malformed ticker ${JSON.stringify(ticker)}`);
+    return t;
   };
   const ret = (ticker: string, date: string, part: 'night' | 'day' | 'whole'): number => {
     const daily = cashRate(date) / 100 / 252;
@@ -650,3 +647,4 @@ export function refBacktest(
 }
 
 export * from './metrics';
+export * from './ticker';

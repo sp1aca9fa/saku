@@ -149,7 +149,7 @@ function makeEquity(
   return e;
 }
 
-const TICKERS = ['SPY', 'QQQ?L=3&E=0.9', 'SH?L=-1', 'CASH_USD', 'TLT?E=0.2', 'UPRO?L=2.5'];
+const TICKERS = ['SPY', 'QQQ?L=3&E=0.9', 'SH?L=0.5', 'CASH_USD', 'TLT?E=0.2', 'UPRO?L=2.5'];
 
 type Choice = {
   seed: number;

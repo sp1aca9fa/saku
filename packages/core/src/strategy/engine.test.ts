@@ -240,6 +240,20 @@ describe('tolerance band on a negative reference', () => {
     expect(compareStep(91, 100, c, true)).toEqual({ state: true, tie: false });
   });
 
+  it('the first valid day is a plain comparison, its tie the one with the reference', () => {
+    const c = { op: '>' as const, tolerancePct: 10 };
+    // 110 is on the upper bound (100 + 10) but clearly above the reference: true, not a tie.
+    expect(compareStep(110, 100, c, undefined)).toEqual({ state: true, tie: false });
+    // Exactly the reference: a tie, false.
+    expect(compareStep(100, 100, c, undefined)).toEqual({ state: false, tie: true });
+    expect(compareStep(100 * (1 + 5e-10), 100, c, undefined)).toEqual({ state: false, tie: true });
+    // 90 is on the lower bound, below the reference: false, not a tie.
+    expect(compareStep(90, 100, c, undefined)).toEqual({ state: false, tie: false });
+    const lt = { op: '<' as const, tolerancePct: 10 };
+    expect(compareStep(90, 100, lt, undefined)).toEqual({ state: true, tie: false });
+    expect(compareStep(100, 100, lt, undefined)).toEqual({ state: false, tie: true });
+  });
+
   it('a reference of 0 gives a band of no width (only exactly 0 is a tie)', () => {
     const c = { op: '>' as const, tolerancePct: 10 };
     expect(compareStep(1e-12, 0, c, false)).toEqual({ state: true, tie: false });

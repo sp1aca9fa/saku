@@ -312,15 +312,19 @@ function rolling5y(points: readonly EquitySample[], target: number | undefined) 
 }
 
 /**
- * The ticker's exposure per unit weight: its leverage, 0 for cash. NaN when unreadable
- * (`holdingsMissing`): an `L` given without a number (`?L=`, `?L`) is unknown, never the 0 that
- * `Number('')` would read (docs/analytics.md, `averageExposure`: every `L` a finite number).
+ * The ticker's exposure per unit weight: its leverage `L`, 0 for cash. Read through the one
+ * ticker grammar (`parseTicker`, docs/indicators.md "Synthetic leverage"); NaN when the ticker is
+ * malformed (`holdingsMissing`): an `L` given without a number (`?L=`, `?L`), with an exponent,
+ * twice, or not above 0 is unknown, never the 0 that `Number('')` would read (docs/analytics.md,
+ * `averageExposure`).
  */
 function leverageOf(ticker: string): number {
   if (ticker === CASH_USD) return 0;
-  const text = new URLSearchParams(ticker.split('?')[1] ?? '').get('L');
-  if (text !== null && text.trim() === '') return Number.NaN;
-  return parseTicker(ticker).leverage;
+  try {
+    return parseTicker(ticker).leverage;
+  } catch {
+    return Number.NaN;
+  }
 }
 
 function versus(

@@ -2,6 +2,7 @@
 // tickers and weights is no trade. Written against the reference only (no @saku/core).
 import { describe, expect, it } from 'vitest';
 import {
+  refParseTicker,
   refAnnualize,
   refBacktest,
   refDrawdown,
@@ -750,5 +751,77 @@ describe('reference: tolerance band right +- |right| x t/100', () => {
     //   m1: true, kept true, false, false, false, kept false
     //   m2: true, true, kept true, kept true, false, true
     expect(run(s, [100, 90, 81, 79, 77, 90], 'e')).toEqual([1, 1, 0.5, 0.5, 0, 0.5]);
+  });
+});
+
+describe('reference: one ticker grammar', () => {
+  it('reads the well-formed forms', () => {
+    expect(refParseTicker('SPY')).toEqual({ base: 'SPY', L: 1, E: 0 });
+    expect(refParseTicker('SPY?L=3&E=0.9')).toEqual({ base: 'SPY', L: 3, E: 0.9 });
+    expect(refParseTicker('SPY?E=0.9&L=3')).toEqual({ base: 'SPY', L: 3, E: 0.9 });
+    expect(refParseTicker('SPY?L=0.5')).toEqual({ base: 'SPY', L: 0.5, E: 0 });
+    expect(refParseTicker('SPY?E=0')).toEqual({ base: 'SPY', L: 1, E: 0 });
+    expect(refParseTicker('CASH_USD')).toEqual({ base: 'CASH_USD', L: 1, E: 0 });
+  });
+
+  it('refuses everything else', () => {
+    for (const t of [
+      '',
+      'X?',
+      'X?L=',
+      'X?L',
+      'X?L=1e1',
+      'X?L=0x3',
+      'X?L=%33',
+      'X?L= 3',
+      'X?L=+3',
+      'X?L=3.',
+      'X?L=.5',
+      'X?L=2&L=3',
+      'X?l=2',
+      'X?K=2',
+      'X?L=3&',
+      'X?L=3&E=1&E=1',
+      'X?L=0',
+      'X?L=-1',
+      'X?E=-0.1',
+      `X?L=${'9'.repeat(400)}`,
+      'CASH_USD?L=2',
+      'CASH_USD?E=0',
+      'X Y',
+      'X%41',
+      '?L=2',
+    ]) {
+      expect(refParseTicker(t), t).toBeUndefined();
+    }
+  });
+
+  it('the backtest throws on a malformed ticker, never a silent 0 or NaN', () => {
+    const bars: Record<string, RefBar[]> = {
+      X: ['2026-06-01', '2026-06-02'].map((date) => ({
+        date,
+        open: 10,
+        close: 10,
+        divCash: 0,
+        splitFactor: 1,
+        closeIsSplitAdjusted: false,
+      })),
+    };
+    for (const ticker of ['X?L=', 'X?L=1e1', 'X?L=2&L=3', 'X?L=-1', 'CASH_USD?L=2']) {
+      const days: RefDay[] = ['2026-06-01', '2026-06-02'].map((date) => ({
+        date,
+        signals: {},
+        allocation: 'a',
+        holdings: [{ ticker, weight: 100 }],
+      }));
+      expect(() => refBacktest({}, days, bars, () => 0), ticker).toThrow(/malformed ticker/);
+    }
+    const ok: RefDay[] = ['2026-06-01', '2026-06-02'].map((date) => ({
+      date,
+      signals: {},
+      allocation: 'a',
+      holdings: [{ ticker: 'X?L=2&E=0', weight: 100 }],
+    }));
+    expect(refBacktest({}, ok, bars, () => 0).equity).toEqual([1, 1]);
   });
 });

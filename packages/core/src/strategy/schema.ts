@@ -10,8 +10,33 @@
 // registered versions are immutable; spec 2026-11-01 yaml-strategies). Registration stores the
 // parsed output, so stored versions carry only known keys and re-parse unchanged.
 import { z } from 'zod';
+import { tickerProblem } from './ticker';
 
-const ticker = z.string().min(1);
+/**
+ * A ticker in the one grammar (`./ticker`, docs/indicators.md "Synthetic leverage"): `BASE` or
+ * `BASE?L=3&E=0.9`. A malformed one (`X?L=`, `X?L=0x3`, `X?L=1e1`, `X?L=%33`, `X?L=2&L=3`,
+ * `CASH_USD?L=2`, ...) is refused at parse with its path and the reason, never read loosely.
+ */
+const ticker = z.string().superRefine((t, ctx) => {
+  const problem = tickerProblem(t);
+  if (problem !== undefined) ctx.addIssue({ code: 'custom', message: problem });
+});
+
+/**
+ * An indicator operand's ticker: well-formed and without parameters. An indicator reads the
+ * ticker's own bars by its plain name, so `SPY?L=3` would read bars no ticker has (never a value);
+ * L and E apply to holdings only (docs/indicators.md "Synthetic leverage"). Refused at parse.
+ */
+const operandTicker = ticker.superRefine((t, ctx) => {
+  if (tickerProblem(t) === undefined && t.includes('?')) {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        `"${t}": an indicator reads the plain ticker's bars; parameters (L, E) apply to ` +
+        `holdings only. Use "${t.slice(0, t.indexOf('?'))}"`,
+    });
+  }
+});
 
 /** Range-based and close-based volatility methods (docs/indicators.md, B1); `close` when omitted. */
 export const VOLATILITY_METHODS = ['close', 'parkinson', 'garman_klass', 'yang_zhang'] as const;
@@ -22,14 +47,14 @@ const length = z.number().int().min(1);
 const totalReturn = z.boolean().default(false);
 
 export const IndicatorOperand = z.discriminatedUnion('indicator', [
-  z.strictObject({ indicator: z.literal('price'), ticker, totalReturn }),
-  z.strictObject({ indicator: z.literal('sma'), ticker, length, totalReturn }),
-  z.strictObject({ indicator: z.literal('ema'), ticker, length, totalReturn }),
-  z.strictObject({ indicator: z.literal('return'), ticker, length, totalReturn }),
+  z.strictObject({ indicator: z.literal('price'), ticker: operandTicker, totalReturn }),
+  z.strictObject({ indicator: z.literal('sma'), ticker: operandTicker, length, totalReturn }),
+  z.strictObject({ indicator: z.literal('ema'), ticker: operandTicker, length, totalReturn }),
+  z.strictObject({ indicator: z.literal('return'), ticker: operandTicker, length, totalReturn }),
   z
     .strictObject({
       indicator: z.literal('volatility'),
-      ticker,
+      ticker: operandTicker,
       length,
       // Optional without a default: a version stored before methods existed re-parses to itself
       // (registration stores the parsed output).
@@ -43,12 +68,12 @@ export const IndicatorOperand = z.discriminatedUnion('indicator', [
   /** Without `length`: from the all-time high (since the series' first value). */
   z.strictObject({
     indicator: z.literal('drawdown'),
-    ticker,
+    ticker: operandTicker,
     length: length.optional(),
     totalReturn,
   }),
-  z.strictObject({ indicator: z.literal('high'), ticker, length, totalReturn }),
-  z.strictObject({ indicator: z.literal('low'), ticker, length, totalReturn }),
+  z.strictObject({ indicator: z.literal('high'), ticker: operandTicker, length, totalReturn }),
+  z.strictObject({ indicator: z.literal('low'), ticker: operandTicker, length, totalReturn }),
 ]);
 export const Operand = z.union([IndicatorOperand, z.strictObject({ threshold: z.number() })]);
 

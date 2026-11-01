@@ -210,14 +210,17 @@ export function compareStep(
   const upper = ref < 0 ? b : a;
   const lower = ref < 0 ? a : b;
   const near = (a: number, b: number) => Math.abs(a - b) <= NEAR_TIE * Math.abs(b);
+  if (prev === undefined) {
+    // The first valid day: a plain comparison against the reference itself, so the tie is the
+    // one with the reference, not with the band's bounds (docs/indicators.md "Near-ties": on the
+    // first day a tie with the reference is false).
+    const plain = c.op === '>' ? value > ref : value < ref;
+    const tie = near(value, ref);
+    return { state: plain && !tie, tie };
+  }
   const tie = near(value, upper) || near(value, lower);
   const above = value > upper && !near(value, upper);
   const below = value < lower && !near(value, lower);
-  if (prev === undefined) {
-    // The first valid day: a plain comparison (a tie counts as not true).
-    const plain = c.op === '>' ? value > ref : value < ref;
-    return { state: plain && !near(value, ref), tie };
-  }
   if (c.op === '>') return { state: above ? true : below ? false : prev, tie };
   return { state: below ? true : above ? false : prev, tie };
 }

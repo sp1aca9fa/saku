@@ -4,28 +4,15 @@
 import type { RawBar, TradingDate } from '../domain';
 import type { StrategyDay } from './engine';
 import type { Holding, Strategy } from './schema';
+import { CASH_USD, parseTicker } from './ticker';
 
-export const CASH_USD = 'CASH_USD';
-
-/** A synthetic leveraged holding, e.g. `SPY?L=3&E=0.9` (leverage 3, expense 0.9% a year). */
-export function parseTicker(ticker: string): {
-  base: string;
-  leverage: number;
-  expensePct: number;
-} {
-  const [base, query] = ticker.split('?');
-  const params = new URLSearchParams(query ?? '');
-  return {
-    base: base!,
-    leverage: Number(params.get('L') ?? 1),
-    expensePct: Number(params.get('E') ?? 0),
-  };
-}
+export { CASH_USD, parseTicker };
 
 /**
  * Whether the backtest reads the cash rate for a holding (requirements 05, execution model):
- * CASH_USD accrues it, and any leverage other than 1 (an unparsable one included) pays
- * `(leverage - 1)` times it as financing. The one rule; parity's cash health check uses it too.
+ * CASH_USD accrues it, and any leverage other than 1 pays `(leverage - 1)` times it as financing.
+ * The one rule; parity's cash health check uses it too. Throws on a malformed ticker
+ * (`parseTicker`), which a parsed strategy does not have.
  */
 export function readsCashRate(ticker: string): boolean {
   return ticker === CASH_USD || parseTicker(ticker).leverage !== 1;

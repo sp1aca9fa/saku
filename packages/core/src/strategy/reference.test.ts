@@ -171,7 +171,7 @@ describe('core vs reference: tolerance bands on negative references', () => {
   for (const seed of [11, 12, 13]) {
     it(`agrees on seed ${seed}`, () => {
       const bars = { X: walk(seed, 500, 0.05) };
-      const members = [
+      const members: Record<string, unknown>[] = [
         { indicator: 'drawdown', ticker: 'X', totalReturn: true },
         { indicator: 'drawdown', ticker: 'X', length: 60, totalReturn: true },
         { indicator: 'return', ticker: 'X', length: 20, totalReturn: true },
@@ -185,6 +185,18 @@ describe('core vs reference: tolerance bands on negative references', () => {
           })),
         ),
       );
+      // A reference that changes sign (a 60-day return): the band flips with it.
+      const changing = { indicator: 'return', ticker: 'X', length: 60, totalReturn: true };
+      const sixty = periodReturn(totalReturnIndex(bars.X), 60).filter(
+        (v): v is number => v !== undefined,
+      );
+      expect(sixty.some((v) => v > 0) && sixty.some((v) => v < 0)).toBe(true);
+      members.push({
+        left: { indicator: 'return', ticker: 'X', length: 20, totalReturn: true },
+        op: '>',
+        right: changing,
+        tolerancePct: 25,
+      });
       const strategy = Strategy.parse({
         name: 'Negative references',
         account: 'taxable',

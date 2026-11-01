@@ -4,6 +4,8 @@
 // A doubtful or too short input gives no value with a reason, never a number; an unknown cash
 // return is never read as 0.
 
+import { refParseTicker } from './ticker';
+
 export type RefTradingDate = string;
 
 export interface RefEquitySample {
@@ -211,24 +213,11 @@ function cagrOf(list: readonly RefEquitySample[]): RefMetric<number> {
   return ok((list[list.length - 1]!.equity / list[0]!.equity) ** (1 / years) - 1);
 }
 
-/** The `L` parameter of a ticker: 1 without it, 0 for cash; undefined when unreadable. */
+/** The `L` parameter of a ticker (one grammar, ./ticker): 0 for cash; undefined when unreadable. */
 function leverageOf(ticker: string): number | undefined {
-  const q = ticker.indexOf('?');
-  const base = q < 0 ? ticker : ticker.slice(0, q);
-  if (base === 'CASH_USD') return 0;
-  if (q < 0) return 1;
-  const found: string[] = [];
-  for (const part of ticker.slice(q + 1).split('&')) {
-    const eq = part.indexOf('=');
-    const key = eq < 0 ? part : part.slice(0, eq);
-    if (key === 'L') found.push(eq < 0 ? '' : part.slice(eq + 1));
-  }
-  if (found.length === 0) return 1;
-  if (found.length > 1) return undefined;
-  const text = found[0]!;
-  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text)) return undefined;
-  const L = Number(text);
-  return Number.isFinite(L) ? L : undefined;
+  const t = refParseTicker(ticker);
+  if (t === undefined) return undefined;
+  return t.base === 'CASH_USD' ? 0 : t.L;
 }
 
 /** The calendar period before / after a year ('YYYY') or month ('YYYY-MM'). */
