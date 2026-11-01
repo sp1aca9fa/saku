@@ -644,3 +644,5 @@ export function refBacktest(
   }
   return { equity, dates: sessions, switches };
 }
+
+export * from './metrics';

@@ -155,7 +155,8 @@ export function calendarDays(a: TradingDate, b: TradingDate): number {
   return Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / DAY_MS);
 }
 
-function checkSeries(series: readonly EquitySample[], name: string): void {
+/** Refuses a malformed series (dates, order, finite equity); see "Input rules". */
+export function checkSeries(series: readonly EquitySample[], name: string): void {
   series.forEach((p, i) => {
     if (typeof p.date !== 'string' || !isTradingDate(p.date)) {
       throw new Error(`${name}: ${String(p.date)} is not a YYYY-MM-DD date.`);
@@ -310,9 +311,16 @@ function rolling5y(points: readonly EquitySample[], target: number | undefined) 
   });
 }
 
-/** The ticker's exposure per unit weight: its leverage, 0 for cash. */
+/**
+ * The ticker's exposure per unit weight: its leverage, 0 for cash. NaN when unreadable
+ * (`holdingsMissing`): an `L` given without a number (`?L=`, `?L`) is unknown, never the 0 that
+ * `Number('')` would read (docs/analytics.md, `averageExposure`: every `L` a finite number).
+ */
 function leverageOf(ticker: string): number {
-  return ticker === CASH_USD ? 0 : parseTicker(ticker).leverage;
+  if (ticker === CASH_USD) return 0;
+  const text = new URLSearchParams(ticker.split('?')[1] ?? '').get('L');
+  if (text !== null && text.trim() === '') return Number.NaN;
+  return parseTicker(ticker).leverage;
 }
 
 function versus(
