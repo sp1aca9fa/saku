@@ -482,3 +482,76 @@ describe('reference: days without a decision (docs/indicators.md, equity curves)
     expect(() => refBacktest(noSafe, days, bars, () => 0)).toThrow(/safe state/);
   });
 });
+
+describe('reference: a signal ticker without a bar is a session without a decision', () => {
+  // H is held; the signal reads S (close volatility, length 2, positive whenever defined). S has
+  // no bar on H's 150 day, so that date is not evaluated, but H has a bar: it is a session, H's
+  // return is compounded and the safe state (cash at 0%) is the decision.
+  const hs = [100, 101, 102, 103, 104, 150, 106, 107, 108, 109];
+  const ss = [50, 51, 50, 52, 51, undefined, 53, 52, 54, 53];
+  const ds = hs.map((_, i) => `2026-03-${String(2 + i).padStart(2, '0')}`);
+  const bar = (date: string, close: number): RefBar => ({
+    date,
+    open: close,
+    close,
+    divCash: 0,
+    splitFactor: 1,
+    closeIsSplitAdjusted: false,
+  });
+  const bars: Record<string, RefBar[]> = {
+    H: hs.map((c, i) => bar(ds[i]!, c)),
+    S: ss.flatMap((c, i) => (c === undefined ? [] : [bar(ds[i]!, c)])),
+  };
+  const s: RefStrategy = {
+    execution: 'next_close',
+    costs: { feePct: 0.1 },
+    signals: [
+      {
+        id: 'on',
+        type: 'compare',
+        left: { indicator: 'volatility', ticker: 'S', length: 2 },
+        op: '>',
+        right: { threshold: 0 },
+      },
+    ],
+    allocations: [
+      { name: 'in', when: { all: ['on'] }, holdings: [{ ticker: 'H', weight: 100 }] },
+      { name: 'out', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+    ],
+    safeState: { holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+  };
+
+  it('compounds the held ticker over the gap and trades the safe state', () => {
+    const days = refEvaluate(s, bars);
+    // S's volatility (2 returns) is defined from its third bar; the 150 day has no S bar.
+    expect(days.map((d) => d.date)).toEqual([2, 3, 4, 6, 7, 8, 9].map((i) => ds[i]!));
+    expect(days.every((d) => d.allocation === 'in')).toBe(true);
+    const r = refBacktest(s, days, bars, () => 0);
+    expect(r.dates).toEqual(ds.slice(2));
+    // Hand computation, next_close, cost 0.1% x turnover:
+    //   day 2: decide H; equity 1.   day 3: buy H at the close: 0.999.   day 4: x 104/103.
+    //   day 5 (150, no S bar): H moves to 150/103; decision: safe state (cash).
+    //   day 6: H moves to 106/103, switch to cash (turnover 2): x 0.998; decide H.
+    //   day 7: cash earns 0, switch back to H: x 0.998.   days 8-9: x 108/107, 109/107.
+    const w = ((0.999 * 106) / 103) * 0.998;
+    const want = [
+      1,
+      0.999,
+      (0.999 * 104) / 103,
+      (0.999 * 150) / 103,
+      w,
+      w * 0.998,
+      (w * 0.998 * 108) / 107,
+      (w * 0.998 * 109) / 107,
+    ];
+    expect(r.equity.length).toBe(want.length);
+    r.equity.forEach((e, i) => expect(e).toBeCloseTo(want[i]!, 12));
+    expect(r.switches).toBe(2);
+  });
+
+  it('missing bars for a ticker the strategy may hold is an error', () => {
+    const days = refEvaluate(s, bars);
+    const withSafeH = { ...s, safeState: { holdings: [{ ticker: 'G?L=2', weight: 100 }] } };
+    expect(() => refBacktest(withSafeH, days, bars, () => 0)).toThrow(/no bars loaded for G/);
+  });
+});

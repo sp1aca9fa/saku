@@ -37,6 +37,8 @@ const DATES = sessions.between('2024-06-03', TARGET);
 
 /** A wavy walk, so the trend signal switches several times. */
 const closes = DATES.map((_, i) => 100 * (1 + 0.15 * Math.sin(i / 15)) * 1.0003 ** i);
+/** A day whose bars come without a low (a range volatility has no value over it). */
+const NO_LOW = DATES[DATES.length - 8]!;
 const source = (key: string): BarSource => ({
   info: testInfo(key, 'bar'),
   async fetchBars(_ticker, from, to) {
@@ -47,7 +49,9 @@ const source = (key: string): BarSource => ({
               date,
               open: closes[i - 1] ?? closes[i]!,
               high: Math.max(closes[i]!, closes[i - 1] ?? 0) * 1.001,
-              low: Math.min(closes[i]!, closes[i - 1] ?? Infinity) * 0.999,
+              ...(date !== NO_LOW && {
+                low: Math.min(closes[i]!, closes[i - 1] ?? Infinity) * 0.999,
+              }),
               close: closes[i]!,
               closeIsSplitAdjusted: false,
               volume: 1000,
@@ -62,7 +66,10 @@ const source = (key: string): BarSource => ({
 
 async function setup(o: { cash?: boolean } = {}) {
   const db = await testDb();
-  await upsertSymbols(db, [{ ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' }]);
+  await upsertSymbols(db, [
+    { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD' },
+    { ticker: 'BBB', tier: 0, assetClass: 'equity', currency: 'USD' },
+  ]);
   const owner = await createUser(db, {
     username: 'alex',
     passwordHash: 'x',
@@ -179,5 +186,40 @@ describe('integrity (layer E)', () => {
       ['Always in', 'incremental_vs_full', 'green'],
     ]);
     expect(results[0]!.message).toMatch(/core could not evaluate/);
+  });
+
+  // docs/indicators.md "Days without a decision": a session without a decision holds the safe
+  // state, here a ticker no allocation holds; its bars are loaded (no "No bars for BBB").
+  it('a safe state no allocation holds, over a session without a decision', async () => {
+    const { db, owner } = await setup();
+    await registerVersion(db, {
+      ownerId: owner,
+      name: 'Range',
+      strategy: {
+        name: 'Range',
+        account: 'taxable',
+        safeState: { holdings: [{ ticker: 'BBB', weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [
+          {
+            id: 'A',
+            type: 'compare',
+            left: { indicator: 'volatility', method: 'parkinson', ticker: 'AAA', length: 1 },
+            op: '<',
+            right: { threshold: 1e6 },
+          },
+        ],
+        allocations: [
+          { name: 'In', when: { all: ['A'] }, holdings: [{ ticker: 'AAA', weight: 100 }] },
+          { name: 'Out', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        ],
+      },
+    });
+    const results = await integrity(db, { to: TARGET, sessions });
+    const range = results.filter((r) => r.message!.startsWith('Range'));
+    expect(range.map((r) => [r.check, r.status, r.message])).toEqual([
+      ['core_vs_reference', 'green', expect.not.stringMatching(/No bars/)],
+      ['incremental_vs_full', 'green', expect.not.stringMatching(/No bars/)],
+    ]);
   });
 });

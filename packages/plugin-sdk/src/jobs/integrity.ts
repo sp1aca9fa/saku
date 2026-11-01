@@ -12,8 +12,8 @@ import {
   type TradingDate,
   Strategy,
   backtest,
-  dependencies,
   evaluate,
+  strategyTickers,
 } from '@saku/core';
 import type { CheckResult, Sessions } from '@saku/data';
 import { type Db, allVersions } from '@saku/db';
@@ -60,7 +60,8 @@ export async function integrity(
     let equity: Map<TradingDate, number>;
     try {
       strategy = Strategy.parse(JSON.parse(version.canonicalJson).strategy);
-      bars = barsOf(await loadRows(dependencies(strategy), o.to));
+      // Every ticker it may hold, the safe state's included (backtest sessions).
+      bars = barsOf(await loadRows(strategyTickers(strategy), o.to));
       core = evaluate(strategy, bars);
       equity = new Map(
         backtest({ strategy, days: core, bars, cashRate }).points.map((p) => [p.date, p.equity]),

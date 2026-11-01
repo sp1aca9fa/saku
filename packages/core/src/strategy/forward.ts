@@ -6,7 +6,7 @@
 // a red or ungraded day of a signal ticker in the re-check window makes the day red, and every
 // unresolved stand-in price up to the day is moved by the margin test.
 import type { HealthStatus, RawBar, TradingDate } from '../domain';
-import { CASH_USD, parseTicker } from './backtest';
+import { heldTickers } from './backtest';
 import {
   type StrategyDay,
   evaluate,
@@ -72,12 +72,20 @@ const rank: Record<HealthStatus, number> = { green: 0, yellow: 1, red: 2 };
 
 /** Tickers whose data the strategy's decision depends on: its signals and what it may hold. */
 export function dependencies(strategy: Strategy): string[] {
-  const held = strategy.allocations
-    .flatMap((a) => a.holdings)
-    .map((h) => h.ticker)
-    .filter((t) => t !== CASH_USD)
-    .map((t) => parseTicker(t).base);
+  const held = heldTickers(strategy.allocations.flatMap((a) => a.holdings));
   return [...new Set([...signalTickers(strategy), ...held])].sort();
+}
+
+/**
+ * Every ticker whose bars a backtest of the strategy needs (`backtest` sessions, docs/indicators.md
+ * "Days without a decision"): its dependencies and its safe state's holdings, which it holds on a
+ * session without a decision. The safe state does not join `dependencies`: its data does not grade
+ * the strategy's day.
+ */
+export function strategyTickers(strategy: Strategy): string[] {
+  return [
+    ...new Set([...dependencies(strategy), ...heldTickers(strategy.safeState.holdings)]),
+  ].sort();
 }
 
 function dayOf(strategy: Strategy, bars: Record<string, RawBar[]>, date: TradingDate) {

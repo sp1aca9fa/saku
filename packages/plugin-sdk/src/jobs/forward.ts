@@ -14,6 +14,7 @@ import {
   type TradingDate,
   backtest,
   dependencies,
+  strategyTickers,
   canonicalJson,
   evaluate,
   forwardDecision,
@@ -243,14 +244,17 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     // One read per version and run: the bars up to the run's last date, each date then sees only
     // its prefix (dated <= that date), the same rows a read up to that date returns. The jobs lock
     // holds the bars still while this runs.
-    const all = dates.length > 0 ? await loadRows(deps, o.to) : {};
+    // The safe state's tickers too: the record's equity holds them on a session without a
+    // decision (core `strategyTickers`); only the dependencies grade the day.
+    const all = dates.length > 0 ? await loadRows(strategyTickers(strategy), o.to) : {};
     // The record so far, read once; each appended entry joins it as stored (the inserted row).
     const prior: StrategyDay[] =
       dates.length > 0 ? (await forwardRecord(db, version.id)).map(asDay) : [];
     for (const date of dates) {
       const rows = upTo(all, date);
       const bars = barsOf(rows);
-      let decision: Decision = forwardDecision(strategy, date, bars, await healthOn(rows, date));
+      const graded = Object.fromEntries(deps.map((t) => [t, rows[t]]).filter(([, r]) => r));
+      let decision: Decision = forwardDecision(strategy, date, bars, await healthOn(graded, date));
       /** The open re-check this entry closes, and how. */
       let closes: { row: Recheck; outcome: 'cleared' | 'safe_state' | 'late' } | undefined;
       /** A red first grading recorded at once (no hourly check left before its deadline). */

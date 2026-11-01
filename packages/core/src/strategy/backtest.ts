@@ -36,11 +36,12 @@ export interface BacktestInput {
    * The safe state is the decision of a session without an evaluated day (`sessions`); a
    * backtest that meets one without it fails rather than guess.
    */
-  strategy: Pick<Strategy, 'execution' | 'costs'> & { safeState?: Strategy['safeState'] };
+  strategy: Pick<Strategy, 'execution' | 'costs'> &
+    Partial<Pick<Strategy, 'safeState' | 'allocations'>>;
   days: StrategyDay[];
   /**
-   * Bars of every ticker the strategy depends on (what it reads and holds, as `dependencies`),
-   * sorted by date. Their common dates are the sessions (`sessions`).
+   * Bars sorted by date of every ticker the strategy reads or may hold, its safe state's included
+   * (`strategyTickers`). The dates every ticker it may hold has are the sessions (`sessions`).
    */
   bars: Record<string, RawBar[]>;
   /**
@@ -99,30 +100,59 @@ export function sameHoldings(a: readonly Holding[], b: readonly Holding[]): bool
 }
 
 /**
- * The sessions an equity curve runs over (docs/indicators.md "Equity curves", "Days without a
- * decision"): every date on which every ticker in `bars` has a bar, and every evaluated day, from
- * the first evaluated day on. A session that is not an evaluated day (an operand had no value, a
- * signal ticker had no bar) still counts: the holdings' returns of every session are compounded,
- * never skipped, and its decision is the strategy's safe state, traded like any decision (as the
- * forward record does on a day without a decision).
+ * The base tickers of every holding the strategy may take (any allocation's and the safe
+ * state's): cash has no bars (it reads the rate), a synthetic ticker reads its base's bars.
  */
-export function sessions(days: StrategyDay[], bars: Record<string, RawBar[]>): TradingDate[] {
+export function heldTickers(holdings: readonly Holding[]): string[] {
+  return [
+    ...new Set(
+      holdings
+        .map((h) => h.ticker)
+        .filter((t) => t !== CASH_USD)
+        .map((t) => parseTicker(t).base),
+    ),
+  ].sort();
+}
+
+/**
+ * The sessions an equity curve runs over (docs/indicators.md "Equity curves", "Days without a
+ * decision"): every date on which every ticker the strategy may hold (`held`: any allocation's
+ * holdings and the safe state's, through their base ticker) has a bar, from the first evaluated
+ * date on, and every evaluated day. A session that is not an evaluated day (an operand had no
+ * value, or a ticker the signals read had no bar) still counts: the holdings' returns of every
+ * session are compounded, never skipped, and its decision is the strategy's safe state, traded
+ * like any decision (as the forward record does on a day without a decision). A ticker it may
+ * hold without bars fails: callers load every one, the safe state's included.
+ */
+export function sessions(
+  days: StrategyDay[],
+  bars: Record<string, RawBar[]>,
+  held: readonly string[],
+): TradingDate[] {
   if (days.length === 0) return [];
   const first = days.reduce((a, d) => (d.date < a ? d.date : a), days[0]!.date);
-  const tickers = Object.keys(bars);
   const count = new Map<TradingDate, number>();
-  for (const t of tickers) {
-    for (const b of bars[t]!) count.set(b.date, (count.get(b.date) ?? 0) + 1);
+  for (const t of held) {
+    const list = bars[t];
+    if (!list) throw new Error(`No bars for ${t}.`);
+    for (const b of list) count.set(b.date, (count.get(b.date) ?? 0) + 1);
   }
   const out = new Set<TradingDate>(days.map((d) => d.date));
-  for (const [date, n] of count) if (n === tickers.length && date >= first) out.add(date);
+  for (const [date, n] of count) if (n === held.length && date >= first) out.add(date);
   return [...out].sort();
 }
 
 export function backtest(input: BacktestInput): BacktestResult {
   const { strategy } = input;
   const decided = new Map(input.days.map((d) => [d.date, d]));
-  const days = sessions(input.days, input.bars).map((date) => {
+  // What it may hold: every allocation and the safe state (the strategy's own lists), and what
+  // the days hold (for a caller passing days only).
+  const holdable = heldTickers([
+    ...(strategy.allocations ?? []).flatMap((a) => a.holdings),
+    ...(strategy.safeState?.holdings ?? []),
+    ...input.days.flatMap((d) => d.holdings),
+  ]);
+  const days = sessions(input.days, input.bars, holdable).map((date) => {
     const day = decided.get(date);
     if (day) return { date, holdings: day.holdings, decided: true };
     if (!strategy.safeState) {

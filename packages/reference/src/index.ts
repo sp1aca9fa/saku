@@ -470,13 +470,18 @@ export function refEvaluate(s: RefStrategy, bars: Record<string, RefBar[]>): Ref
  * Equity curve: a position is a set of share-like units per holding; each session is split into
  * the night (close to open, with the ex-date dividend and the split) and the day (open to close).
  *
- * Sessions (docs/indicators.md "Days without a decision"): every date on which every ticker in
- * `bars` has a bar, from the first evaluated day on. Each session's returns are compounded; a
- * session without an evaluated day takes the strategy's safe state as its decision, traded like
- * any other decision. One equity point per session (`dates` names them).
+ * Sessions (docs/indicators.md "Days without a decision"): every date on which every ticker the
+ * strategy may hold (any allocation's holdings, the safe state's, and the days' own holdings;
+ * synthetic tickers through their base; cash through its rate, so it adds no condition) has a
+ * bar, from the first evaluated day on. A date where only a signal's ticker has no bar is a
+ * session without a decision. Each session's returns are compounded; a session without an
+ * evaluated day takes the safe state as its decision, traded like any other decision. One equity
+ * point per session (`dates` names them).
  */
 export function refBacktest(
-  s: Pick<RefStrategy, 'execution' | 'costs' | 'safeState'>,
+  s: Pick<RefStrategy, 'execution' | 'costs' | 'safeState'> & {
+    allocations?: RefStrategy['allocations'];
+  },
   days: RefDay[],
   bars: Record<string, RefBar[]>,
   cashRate: (date: string) => number,
@@ -542,15 +547,26 @@ export function refBacktest(
       .sort()
       .join('\n');
 
-  // Sessions: dates every ticker in `bars` has, from the first evaluated day on.
+  // Sessions: dates every ticker the strategy may hold has a bar, from the first evaluated day on.
   const decided = new Map(days.map((d) => [d.date, d.holdings]));
+  const mayHold = new Set<string>();
+  const addHoldings = (h: { ticker: string }[]) => {
+    for (const x of h) if (x.ticker !== 'CASH_USD') mayHold.add(parse(x.ticker).base);
+  };
+  for (const a of s.allocations ?? []) addHoldings(a.holdings);
+  if (s.safeState) addHoldings(s.safeState.holdings);
+  for (const d of days) addHoldings(d.holdings);
   let sessions: string[] = [];
-  const tickers = Object.keys(bars);
-  if (tickers.length > 0) {
+  if (mayHold.size > 0) {
     const counts = new Map<string, number>();
-    for (const t of tickers)
-      for (const b of bars[t]!) counts.set(b.date, (counts.get(b.date) ?? 0) + 1);
-    sessions = [...counts].filter(([, n]) => n === tickers.length).map(([date]) => date);
+    for (const t of mayHold) {
+      if (!bars[t]) throw new Error(`reference: no bars loaded for ${t}, which may be held`);
+      for (const b of bars[t]) counts.set(b.date, (counts.get(b.date) ?? 0) + 1);
+    }
+    sessions = [...counts].filter(([, n]) => n === mayHold.size).map(([date]) => date);
+  } else {
+    // Only cash may be held: every date with any bar counts (no ticker to require).
+    sessions = [...new Set(Object.values(bars).flatMap((list) => list.map((b) => b.date)))];
   }
   // An evaluated day is never dropped: if a ticker lacks its bar, valuing it fails loudly.
   const known = new Set(sessions);

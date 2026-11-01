@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { RawBar } from '../domain';
 import { backtest, parseTicker, sameHoldings, summary } from './backtest';
 import { type StrategyDay, evaluate } from './engine';
+import { dependencies, strategyTickers } from './forward';
 import { type Holding, Strategy } from './schema';
 
 const D = ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08'];
@@ -205,6 +206,70 @@ describe('backtest', () => {
         cashRate: none,
       }),
     ).toThrow(/no decision/);
+  });
+
+  // A session is a date every ticker the strategy may hold has a bar; a date the signal ticker
+  // lacks is then a session without a decision (docs/indicators.md "Days without a decision").
+  it('a signal ticker without a bar on a session: the safe state, the held returns kept', () => {
+    const closes = [100, 101, 102, 103, 104, 150, 106, 107, 108, 109];
+    const dates = closes.map((_, i) =>
+      new Date(Date.UTC(2026, 0, 5) + i * 86_400_000).toISOString().slice(0, 10),
+    );
+    const h = closes.map((c, i) => bar(dates[i]!, c));
+    const sig = dates.flatMap((d, i) => (i === 5 ? [] : [bar(d, 50 + (i % 3))]));
+    const strategy = (safe: string) =>
+      Strategy.parse({
+        name: 'Signal elsewhere',
+        account: 'taxable',
+        execution: 'next_close',
+        safeState: { holdings: [{ ticker: safe, weight: 100 }] },
+        evaluation: { frequency: 'daily' },
+        signals: [
+          {
+            id: 'A',
+            type: 'compare',
+            left: { indicator: 'volatility', ticker: 'S', length: 2 },
+            op: '<',
+            right: { threshold: 1e6 },
+          },
+        ],
+        allocations: [
+          { name: 'In', when: { all: ['A'] }, holdings: [{ ticker: 'H', weight: 100 }] },
+          { name: 'Out', holdings: [{ ticker: 'CASH_USD', weight: 100 }] },
+        ],
+      });
+    const s = strategy('CASH_USD');
+    const days = evaluate(s, { S: sig, H: h });
+    // S's volatility of 2 needs 3 of its bars: from day 2; day 5 has no S bar.
+    expect(days.map((d) => d.date)).toEqual(dates.filter((_, i) => i >= 2 && i !== 5));
+    const r = backtest({ strategy: s, days, bars: { S: sig, H: h }, cashRate: none });
+    expect(r.points.map((p) => p.date)).toEqual(dates.slice(2));
+    expect(r.points.map((p) => p.decided)).toEqual(dates.slice(2).map((_, i) => i !== 3));
+    const want = [
+      1,
+      1,
+      104 / 103,
+      150 / 103,
+      106 / 103,
+      106 / 103,
+      (106 / 103) * (108 / 107),
+      (106 / 103) * (109 / 107),
+    ];
+    r.points.forEach((p, i) => expect(p.equity).toBeCloseTo(want[i]!, 12));
+    expect(r.switches).toBe(2);
+
+    // A safe state holding a ticker no allocation holds (B): its bars are needed, and
+    // `strategyTickers` names it for the callers to load.
+    const b = dates.map((d, i) => bar(d, 20 + i));
+    const withB = strategy('B');
+    expect(strategyTickers(withB)).toEqual(['B', 'H', 'S']);
+    expect(dependencies(withB)).toEqual(['H', 'S']);
+    expect(() =>
+      backtest({ strategy: withB, days, bars: { S: sig, H: h }, cashRate: none }),
+    ).toThrow('No bars for B.');
+    const rb = backtest({ strategy: withB, days, bars: { S: sig, H: h, B: b }, cashRate: none });
+    expect(rb.points[4]!.weights).toEqual({ B: 1 }); // day 6's close: into B
+    expect(rb.points[5]!.equity).toBeCloseTo((106 / 103) * (27 / 26), 12); // B on day 7
   });
 
   it('summarizes growth and the deepest drawdown', () => {

@@ -18,7 +18,7 @@ import {
   type TradingDate,
   Strategy,
   backtest,
-  dependencies,
+  strategyTickers,
   evaluate,
   isTradingDate,
   parseTicker,
@@ -95,7 +95,7 @@ export function parseCase(raw: unknown): { case: ParityCase } | { errors: string
         `strategy.execution: must be "same_close" (testfol's timing), not "${strategy.execution}"`,
       );
     }
-    for (const t of dependencies(strategy)) {
+    for (const t of strategyTickers(strategy)) {
       if (SIMULATED.test(parseTicker(t).base)) {
         errors.push(`strategy: ${t} is a simulated history; use the real ticker (SPY, not SPYSIM)`);
       }
@@ -328,7 +328,8 @@ export async function parity(
     const c = parsed.case;
 
     try {
-      const deps = dependencies(c.strategy);
+      // Every ticker it may hold, the safe state's included (backtest sessions).
+      const deps = strategyTickers(c.strategy);
       const rows = await loadRows(deps, c.to);
       // The stored history must cover the case: a later first bar would compare other years.
       const gaps: string[] = [];
