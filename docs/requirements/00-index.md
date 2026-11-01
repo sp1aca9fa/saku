@@ -12,7 +12,8 @@
 | A1 | Data spike (gate) | in progress (server run) |
 | A2 | Thin slice (forward records start) | in development (allowed during A1's observation window, see stage-a) |
 | A3 | Hardened pipeline | in development (synthetic and stored data only, nothing live before the A1 gate) |
-| B-F | See `stages/` | not started |
+| B | Evidence engine | in development (synthetic and stored data only; nothing goes live before stage A's gates, see the decisions log 2026-11-01) |
+| C-F | See `stages/` | not started |
 
 ## Global constraints (apply to every task)
 - Pillars in priority order: Reliability, Evidence, Decision clarity, Accessibility, Honesty and protection.
