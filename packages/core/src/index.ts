@@ -4,3 +4,4 @@ export * from './adjusted';
 export * from './strategy';
 export * from './pointintime';
 export * from './canonical';
+export * from './analytics';

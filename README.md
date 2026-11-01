@@ -47,6 +47,7 @@ full server setup is in `docs/setup.md`.
 | [docs/languages.md](docs/languages.md) | Languages and adding one |
 | [docs/data-pipeline.md](docs/data-pipeline.md) | How data is fetched, stored and checked |
 | [docs/indicators.md](docs/indicators.md) | The indicators and how they are computed |
+| [docs/analytics.md](docs/analytics.md) | The strategy metrics and how they are computed |
 | [docs/parity.md](docs/parity.md) | Parity cases against external tools |
 | [docs/system-design.md](docs/system-design.md) | The system design |
 

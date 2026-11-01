@@ -290,5 +290,149 @@
     "annualized": "Per year (annualized): daily volatility scaled to a year with the square root of 252 trading days, so periods of any length compare.",
     "intradayPrices": "Open, high and low: the day's first trade, highest and lowest price. Some volatility methods need them; a day without them gives no value, never an estimate.",
     "allTimeHigh": "All-time high: the highest value since the first day Saku stores for the fund, not necessarily the fund's first trading day."
+  },
+  "metrics": {
+    "cagr": {
+      "name": "Yearly growth (CAGR)",
+      "tooltip": "The steady yearly rate that turns the starting value into the ending value, over calendar time. Shown only for periods of at least one year.",
+      "why": "It puts strategies of any length on the same yearly footing, so they compare with each other and with a target.",
+      "example": "100 growing to 200 in 7 years is about 10.4% a year."
+    },
+    "cumulativeReturn": {
+      "name": "Total return",
+      "tooltip": "How much the value changed over the whole period: ending value / starting value - 1.",
+      "why": "The plain result of the whole period, before turning it into a yearly rate.",
+      "example": "100 growing to 250 is a total return of 150%."
+    },
+    "volatility": {
+      "name": "Volatility",
+      "tooltip": "How much the daily returns swing, as a yearly percentage (sample standard deviation of daily returns x the square root of 252). Needs at least 20 daily returns.",
+      "why": "Larger swings mean a rougher ride and larger possible losses on the way.",
+      "example": "Daily swings of about 1% give roughly 16% a year."
+    },
+    "downsideDeviation": {
+      "name": "Downside deviation",
+      "tooltip": "Like volatility, but counting only the days below a target (the cash return, or 0), as a yearly percentage. Days above the target count as 0.",
+      "why": "Most people mind falls, not rises; this measures only the bad swings.",
+      "example": "A strategy that jumps up often but rarely falls has a high volatility and a low downside deviation."
+    },
+    "sharpe": {
+      "name": "Sharpe ratio",
+      "tooltip": "The average return above cash per unit of volatility, per year: average daily excess return / its standard deviation x the square root of 252. No value when the cash rate is unknown on any day.",
+      "why": "It shows whether the extra return paid for the extra risk. A broad stock index has had roughly 0.5 over long periods.",
+      "example": "8% a year above cash with 16% volatility is a Sharpe ratio of 0.5."
+    },
+    "sortino": {
+      "name": "Sortino ratio",
+      "tooltip": "Like the Sharpe ratio, but dividing by the downside deviation below cash instead of the volatility.",
+      "why": "It does not punish a strategy for large gains, only for falls below cash.",
+      "example": "8% a year above cash with a 10% downside deviation is a Sortino ratio of 0.8."
+    },
+    "calmar": {
+      "name": "Calmar ratio",
+      "tooltip": "Yearly growth (CAGR) divided by the largest fall (maximum drawdown), over the whole period.",
+      "why": "It weighs the return against the worst loss you would have had to sit through.",
+      "example": "12% a year with a worst fall of 30% is a Calmar ratio of 0.4."
+    },
+    "maxDrawdown": {
+      "name": "Maximum drawdown",
+      "tooltip": "The largest fall from a previous high to a later low, in percent.",
+      "why": "It is the worst loss someone who bought at the top would have seen. Ask yourself whether you would have held on.",
+      "example": "From 120 down to 66: a maximum drawdown of -45%."
+    },
+    "averageDrawdown": {
+      "name": "Average drawdown",
+      "tooltip": "The average depth of all the falls from a high (each fall counted once, at its lowest point), including one still going on.",
+      "why": "The maximum drawdown is one event; this shows what a typical fall looked like.",
+      "example": "Falls of -10%, -20% and -30%: an average drawdown of -20%."
+    },
+    "longestDrawdown": {
+      "name": "Longest drawdown",
+      "tooltip": "The longest time below a previous high, in calendar days from the high to the first day back at it, and the recovery time from the lowest point back to the high. A fall not yet recovered counts its time so far.",
+      "why": "Long stretches below a high are when people give up on a strategy; the length matters as much as the depth.",
+      "example": "High in January 2000, back at it in May 2007: about 7.3 years.",
+      "unrecovered": "Not recovered yet: still below the high of {date}."
+    },
+    "ulcerIndex": {
+      "name": "Ulcer index",
+      "tooltip": "A measure of both the depth and the length of falls: the square root of the average squared drawdown over every day.",
+      "why": "Two strategies with the same worst fall can differ a lot in how long they stay down; this counts both.",
+      "example": "Being 10% below the high every day for the whole period gives an Ulcer index of 10%."
+    },
+    "beta": {
+      "name": "Beta",
+      "tooltip": "How much the strategy moved with a benchmark: its daily return's covariance with the benchmark's, divided by the benchmark's variance, on the dates both have.",
+      "why": "Beta near 1 means it largely follows the market; near 0 that it moves on its own; above 1 that it amplifies the market.",
+      "example": "Beta 1.5 vs an index: on a day the index fell 2%, the strategy tended to fall about 3%."
+    },
+    "correlation": {
+      "name": "Correlation",
+      "tooltip": "How closely the strategy's daily returns moved together with a benchmark's, from -1 (opposite) to 1 (in step), on the dates both have.",
+      "why": "A strategy with a low correlation to what you already hold spreads your risk more.",
+      "example": "Correlation 0.9: most days it rises and falls with the index."
+    },
+    "var95": {
+      "name": "Value at risk (95%)",
+      "tooltip": "A daily loss exceeded on about 1 day in 20 in the past: the return of the day ranking at the worst 5% (historical, no model).",
+      "why": "It gives a feel for a bad but ordinary day.",
+      "example": "Value at risk -2.5%: on 1 day in 20, it lost 2.5% or more."
+    },
+    "cvar95": {
+      "name": "Expected shortfall (95%)",
+      "tooltip": "The average daily return of the worst 5% of days in the past (also called conditional value at risk).",
+      "why": "Value at risk says where the bad days start; this says how bad they were on average.",
+      "example": "Expected shortfall -4%: the worst 1 day in 20 averaged a 4% loss."
+    },
+    "bestYear": {
+      "name": "Best year",
+      "tooltip": "The highest return of a complete calendar year (a partial first or last year is not counted).",
+      "why": "Together with the worst year it shows the range of yearly results you might live through.",
+      "example": "Best year 2013: +45%."
+    },
+    "worstYear": {
+      "name": "Worst year",
+      "tooltip": "The lowest return of a complete calendar year (a partial first or last year is not counted).",
+      "why": "A year like this will come again; check whether you could live with it.",
+      "example": "Worst year 2008: -38%."
+    },
+    "positiveMonths": {
+      "name": "Positive months",
+      "tooltip": "The share of complete calendar months that ended higher than the month before (a flat month is not positive).",
+      "why": "It shows how often the strategy rewards patience month to month.",
+      "example": "60% positive months: 3 months in 5 were gains."
+    },
+    "rolling5y": {
+      "name": "Rolling 5-year return",
+      "tooltip": "The yearly growth over every 5-year period in the history (one ending on each trading day): the median, the lowest, the highest, and the share meeting your target. The periods overlap, so they are not independent tries.",
+      "why": "Your result depends on when you start; this shows the range of 5-year outcomes, not just one lucky or unlucky start.",
+      "example": "Median 9% a year, lowest -2%, highest 18%; 70% of the periods met an 8% target."
+    },
+    "switchesPerYear": {
+      "name": "Switches per year",
+      "tooltip": "How many times a year the strategy changed what it holds, the first purchase not counted.",
+      "why": "Each switch costs trading costs and, in a taxable account, may realize tax.",
+      "example": "4 switches a year: about one change every three months."
+    },
+    "averageExposure": {
+      "name": "Average exposure",
+      "tooltip": "The average share of the money exposed to the market, with leverage counted: weight x leverage, cash counting 0.",
+      "why": "It shows how much market risk the strategy really carried on average; above 100% means borrowed or leveraged exposure.",
+      "example": "Half the time in a 3x fund and half in cash: an average exposure of 150%."
+    },
+    "costDrag": {
+      "name": "Cost drag",
+      "tooltip": "How much yearly growth trading costs took: CAGR without costs minus CAGR with costs.",
+      "why": "Frequent trading can eat a large part of a strategy's edge.",
+      "example": "12.0% a year without costs and 11.4% with them: a cost drag of 0.6 points a year."
+    },
+    "noValue": {
+      "tooShort": "No value: the history is too short for this measure.",
+      "equityNotPositive": "No value: the strategy lost everything (its value reached zero or below).",
+      "cashRateMissing": "No value: the cash rate is unknown on at least one day.",
+      "noDispersion": "No value: there were no swings to measure (for example, only cash was held).",
+      "noDrawdown": "No value: there was no fall from a high.",
+      "holdingsMissing": "No value: what the strategy held is missing on at least one day.",
+      "grossMissing": "No value: no run without costs to compare with."
+    }
   }
 }
