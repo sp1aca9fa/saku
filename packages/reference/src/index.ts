@@ -648,3 +648,5 @@ export function refBacktest(
 
 export * from './metrics';
 export * from './ticker';
+export * from './statistics';
+export * from './statistics-lab';
