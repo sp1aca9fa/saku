@@ -6,12 +6,14 @@ import { activityLog, jobRuns, sourceRoles } from './schema';
 /**
  * Records a run as started. `target`: the date it works for, stored from the start so a run that
  * never finishes still names its date (the A1 gate counts such a session as having no run).
+ * `recheck`: a daily run again for a day with an open red re-check (requirements 04).
  */
 export async function startRun(
   db: Db,
   jobType: JobType,
   now = new Date(),
   target?: string,
+  o: { recheck?: boolean } = {},
 ): Promise<string> {
   const [row] = await db
     .insert(jobRuns)
@@ -20,6 +22,7 @@ export async function startRun(
       startedAt: now.toISOString(),
       status: 'running',
       ...(target !== undefined && { datesProcessed: [target] }),
+      ...(o.recheck && { recheck: true }),
     })
     .returning({ id: jobRuns.id });
   return row!.id;

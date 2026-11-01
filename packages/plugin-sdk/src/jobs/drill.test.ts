@@ -192,8 +192,10 @@ function drill(url: string, dir: string, extra: Partial<DrillOptions> = {}) {
 }
 
 describe('pnpm drill red', () => {
-  it('sends the safe-state alert marked as a drill; the live database is not written', async () => {
-    const { dir, url, file } = await live();
+  it('sends the provisional message, then at the deadline "safe state stands", marked as a drill; the live database is not written', async () => {
+    const { dir, url, file } = await live({
+      after: async (db) => setSetting(db, 'time_zone', 'Asia/Tokyo'),
+    });
     const before = digest(file);
     const { run, sent, work } = drill(url, dir);
     const r = (await run) as DrillReport;
@@ -218,16 +220,32 @@ describe('pnpm drill red', () => {
         dataStatus: 'red',
         reasons: ['SPY:A.large_move@p', 'SPY:B.close_match@s1', 'SPY:B.close_match@s2'],
         // The owner's channel and their admin channel (an admin's channels get both).
-        delivered: 2,
+        provisional: 2,
+        outcome: 'safe_state',
+        final: 2,
       }),
     ]);
     expect(r.problems).toEqual([]);
+    // Friday's deadline: Monday's 09:30 New York open (EST) less the default 60 minutes.
+    expect(r.deadline).toBe('2026-01-19T13:30:00.000Z');
 
-    // The owner's alert: marked in its title, nothing recorded, then the real safe-state text.
-    const owner = sent.find((m) => m.target === 'me')!.text.split('\n');
-    expect(owner[0]).toBe(`[DRILL] Trend: safe state for ${TARGET}`);
-    expect(owner[1]).toMatch(/^This is a drill \(pnpm drill\): nothing was recorded/);
-    expect(owner).toContain('Target: Cash (USD) 100%.');
+    // The owner's messages: marked in their titles, nothing recorded, then the real texts: the
+    // provisional (the deadline in the install's time zone, the fallback safe state), then the
+    // final "safe state stands".
+    const [first, final] = sent.filter((m) => m.target === 'me').map((m) => m.text.split('\n'));
+    expect(first![0]).toBe(`[DRILL] Trend: data problem for ${TARGET}, re-checking`);
+    expect(first![1]).toMatch(/^This is a drill \(pnpm drill\): nothing was recorded/);
+    expect(first!.join('\n')).toContain('until 2026-01-19 22:30 (Asia/Tokyo)');
+    expect(first).toContain(
+      "If it is still not reliable then, the strategy's safe state applies. Safe-state target: Cash (USD) 100%.",
+    );
+    expect(final![0]).toBe(`[DRILL] Trend: safe state for ${TARGET}`);
+    expect(final![1]).toMatch(/^This is a drill \(pnpm drill\): nothing was recorded/);
+    expect(final).toContain(
+      `The data was still not reliable at the last re-check before 2026-01-19 22:30 (Asia/Tokyo), so the safe state stands. This is the final instruction for ${TARGET}.`,
+    );
+    expect(final).toContain('Target: Cash (USD) 100%.');
+    expect(final).toContain('Data health: red (no normal signal).');
     // The admins' data alert is marked too; every message the drill sent is.
     expect(sent.filter((m) => m.text.startsWith('[DRILL] Saku: data for'))).toHaveLength(1);
     expect(sent.every((m) => m.text.startsWith('[DRILL] '))).toBe(true);
@@ -248,7 +266,7 @@ describe('pnpm drill red', () => {
     expect(((await drill(url, dir).run) as DrillReport).ok).toBe(true);
     const again = drill(url, dir);
     expect(((await again.run) as DrillReport).ok).toBe(true);
-    expect(again.sent.filter((m) => m.target === 'me')).toHaveLength(1);
+    expect(again.sent.filter((m) => m.target === 'me')).toHaveLength(2);
     expect(again.sent.filter((m) => m.text.includes('Saku: data for'))).toHaveLength(1);
     expect(digest(file)).toBe(before);
   });
@@ -308,9 +326,10 @@ describe('pnpm drill red', () => {
     });
     const r = (await run) as DrillReport;
     expect(r.ok).toBe(false);
-    expect(r.versions[0]).toMatchObject({ safeStateApplied: true, delivered: 0 });
+    expect(r.versions[0]).toMatchObject({ safeStateApplied: true, provisional: 0, final: 0 });
     expect(r.problems.length).toBeGreaterThan(0);
-    expect(drillSummary(r)).toMatch(/Drill FAILED: .*no channel got Trend's alert/);
+    expect(drillSummary(r)).toMatch(/Drill FAILED: .*no channel got Trend's provisional message/);
+    expect(drillSummary(r)).toMatch(/no channel got Trend's final message/);
   });
 });
 
@@ -360,9 +379,10 @@ describe("pnpm drill red: the forward step's rules", () => {
         ),
       }),
     ]);
-    // Only the drilled version's alert (owner and admin channel) and the admins' data alert.
+    // Only the drilled version's messages (provisional and final, owner and admin channel) and the
+    // admins' data alert.
     expect(sent.filter((m) => m.text.includes('Late'))).toEqual([]);
-    expect(sent).toHaveLength(3);
+    expect(sent).toHaveLength(5);
     expect(drillSummary(r)).toMatch(/Not drilled: Late/);
     expect(drillSummary(r)).toMatch(/Drill FAILED: Late does not record 2026-01-16/);
   });
@@ -465,17 +485,17 @@ describe("pnpm drill red: the forward step's rules", () => {
     });
     const r = (await run) as DrillReport;
     expect(r.ok).toBe(true);
-    expect(r.versions.map((v) => [v.name, v.delivered])).toEqual([
-      ['Trend', 2],
-      ['Trend 2', 2],
+    expect(r.versions.map((v) => [v.name, v.provisional, v.final])).toEqual([
+      ['Trend', 2, 2],
+      ['Trend 2', 2, 2],
     ]);
     expect(made).toBe(1);
     const me = sends.filter((s) => s.target === 'me');
-    expect(me).toHaveLength(2);
-    expect(me[0]!.ctx).toBe(me[1]!.ctx);
-    // The admin channel: both versions' alerts and the data alert, on one context.
+    expect(me).toHaveLength(4);
+    expect(new Set(me.map((s) => s.ctx)).size).toBe(1);
+    // The admin channel: both versions' messages and the data alert, on one context.
     const ops = sends.filter((s) => s.target === 'ops');
-    expect(ops).toHaveLength(3);
+    expect(ops).toHaveLength(5);
     expect(new Set(ops.map((s) => s.ctx)).size).toBe(1);
   });
 
@@ -488,11 +508,9 @@ describe("pnpm drill red: the forward step's rules", () => {
         );
         const channels = await channelsOf(db, owner);
         for (const channel of channels) {
-          await recordAlertSent(db, channel, {
-            subject: version!.id,
-            date: TARGET,
-            type: 'data_red',
-          });
+          for (const type of ['data_red', 'recheck_provisional', 'recheck_final']) {
+            await recordAlertSent(db, channel, { subject: version!.id, date: TARGET, type });
+          }
         }
         await recordAlertSent(
           db,
@@ -531,9 +549,9 @@ describe("pnpm drill red: the forward step's rules", () => {
     });
     const r = (await run) as DrillReport;
     expect(r.ok).toBe(true);
-    expect(sentTo.sort()).toEqual(['me', 'ops', 'ops']);
+    expect(sentTo.sort()).toEqual(['me', 'me', 'ops', 'ops', 'ops']);
     expect(told).toBeGreaterThanOrEqual(3);
-    expect(counts).toEqual([told, told, told]);
+    expect(counts).toEqual([told, told, told, told, told]);
   });
 });
 

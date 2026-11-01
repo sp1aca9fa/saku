@@ -17,14 +17,19 @@ import {
   type AlertKey,
   type Channel,
   type Db,
+  type ForwardEntry,
   alertSent,
+  allRechecks,
   allVersions,
   annotationsOf,
   deliveryTargets,
+  entryOn,
   getSetting,
   isOpenStandIn,
   lastEntry,
   lastToldAllocation,
+  markRecheckSent,
+  recheckOf,
   recordAlertSent,
   schema,
   standInList,
@@ -32,7 +37,8 @@ import {
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { Logger, Notifier, PluginContext } from '../types';
 import { type DiskUsage, formatBytes } from './disk';
-import { instantOf, parseVersion } from './forward';
+import { instantOf, parseVersion, readKeptDecision } from './forward';
+import { recheckTimeZone, shownDeadline } from './recheck';
 
 export type AlertType =
   | 'state_change'
@@ -48,8 +54,11 @@ export type AlertType =
   | 'stand_in_closed'
   | 'stand_in_reopened'
   | 'disk_space'
-  | 'monthly_audit';
-const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red'];
+  | 'monthly_audit'
+  | 'recheck_provisional'
+  | 'recheck_final';
+/** Alerts that tell the allocation in force (the next state change is compared with the last). */
+const TOLD: AlertType[] = ['state_change', 'data_yellow', 'data_red', 'recheck_final'];
 
 /**
  * The admin alerts sent before the A1 gate (stage-a A2: admin-only operational alerts may go
@@ -107,6 +116,11 @@ export function strategyAlert(
     entry: DayEntry;
     nextSession: TradingDate;
     lastTold?: string;
+    /**
+     * The red day was graded with no hourly check left before its re-check deadline (requirements
+     * 04 "Red re-check before execution"): the deadline as shown, said in the safe-state alert.
+     */
+    notRechecked?: string;
   },
   max = Infinity,
 ): Alert | null {
@@ -145,6 +159,9 @@ export function strategyAlert(
     return alert('data_red', [
       keep(t('alerts.dataRed.title', values)),
       keep(t('alerts.dataRed.body')),
+      ...(o.notRechecked !== undefined
+        ? [keep(t('alerts.recheck.notRechecked', { deadline: o.notRechecked }))]
+        : []),
       keep(t('alerts.holdings', { holdings })),
       keep(timing),
       health,
@@ -213,6 +230,9 @@ export async function sendStrategyAlerts(
     if (!version.ownerId) continue;
     const entry = await lastEntry(db, version.id);
     if (!entry || entry.date !== o.date) continue;
+    // A re-checked day's final instruction is its alert (`sendRecheckAlerts`): never a second one.
+    const recheck = await recheckOf(db, version.id, entry.date);
+    if (recheck && recheck.outcome !== 'not_rechecked') continue;
     const parsed = parseVersion(version);
     if ('error' in parsed) {
       // Its timing is unknown: no alert is guessed; the run is incomplete. The admins are told
@@ -222,15 +242,22 @@ export async function sendStrategyAlerts(
       );
       continue;
     }
-    const day: DayEntry = {
-      date: entry.date,
-      allocation: entry.allocation,
-      holdings: entry.holdings as DayEntry['holdings'],
-      dataStatus: entry.dataStatus,
-      safeStateApplied: entry.safeStateApplied,
-      reasons: (JSON.parse(entry.payload) as { reasons?: string[] }).reasons ?? [],
-    };
-    await sendDayAlert(db, o, { version, strategy: parsed.strategy, day, owners }, summary);
+    if (recheck) {
+      const shown = shownDeadline(recheck.deadline, await recheckTimeZone(db));
+      await sendDayAlert(
+        db,
+        o,
+        { version, strategy: parsed.strategy, day: dayOf(entry), owners, notRechecked: shown },
+        summary,
+      );
+      continue;
+    }
+    await sendDayAlert(
+      db,
+      o,
+      { version, strategy: parsed.strategy, day: dayOf(entry), owners },
+      summary,
+    );
   }
   return summary;
 }
@@ -254,6 +281,8 @@ export async function sendDayAlert(
     strategy: Strategy;
     day: DayEntry;
     owners?: Owners;
+    /** The re-check deadline as shown, for a red day recorded with no re-check. */
+    notRechecked?: string;
   },
   summary: AlertSummary = { sent: 0, failed: [] },
 ): Promise<AlertSummary> {
@@ -273,10 +302,238 @@ export async function sendDayAlert(
         nextSession: o.sessions.after(day.date),
         // A drill reads nothing told before (the safe-state alert does not depend on it).
         lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
+        ...(d.notRechecked !== undefined && { notRechecked: d.notRechecked }),
       },
       roomOn(o, channel, t),
     );
     if (alert) await deliver(db, o, channel, alert, summary, t);
+  }
+  return summary;
+}
+
+/** A forward entry as the alerts read it. */
+function dayOf(entry: ForwardEntry): DayEntry {
+  return {
+    date: entry.date,
+    allocation: entry.allocation,
+    holdings: entry.holdings as DayEntry['holdings'],
+    dataStatus: entry.dataStatus,
+    safeStateApplied: entry.safeStateApplied,
+    reasons: (JSON.parse(entry.payload) as { reasons?: string[] }).reasons ?? [],
+  };
+}
+
+/** What a re-check message tells (requirements 04 "Red re-check before execution", 11). */
+export type RecheckMessage =
+  | { kind: 'provisional'; day: DayEntry }
+  | { kind: 'final'; outcome: 'cleared' | 'safe_state' | 'late'; day: DayEntry };
+
+/**
+ * A red re-check's message for one strategy and one recipient (requirements 04 "Red re-check
+ * before execution", 11 "Red re-check"), fitted to `max` (`fitMessage`) with every line but the
+ * reasons never cut (a channel too small for them gets nothing, `needed`):
+ * - provisional (`recheck_provisional`): the data problem (the reasons in words), that the day is
+ *   checked again every hour until the deadline (the install's time zone), the fallback safe-state
+ *   instruction with its exact holdings and timing, and the data health (red);
+ * - final (`recheck_final`, one per version and day whatever the outcome): `cleared`, the normal
+ *   instruction (the allocation, against what the channel was last told, its holdings, timing,
+ *   data health and, if yellow, the warning's reasons); `safe_state`, still red at the last check
+ *   before the deadline; `late`, not re-checked before the deadline (the machine missed it): the
+ *   safe state stands, with its holdings and timing.
+ * `day`: the provisional's fallback (the first red grading) or the entry finally recorded.
+ */
+export function recheckAlert(
+  t: Translate,
+  language: string,
+  o: {
+    versionId: string;
+    name: string;
+    execution: Strategy['execution'];
+    message: RecheckMessage;
+    /** The deadline as shown (`shownDeadline`). */
+    deadline: string;
+    nextSession: TradingDate;
+    lastTold?: string;
+  },
+  max = Infinity,
+): Alert {
+  const m = o.message;
+  const e = m.day;
+  const name = (allocation: string) =>
+    allocation === SAFE_STATE ? t('alerts.safeStateName') : allocation;
+  const percent = new Intl.NumberFormat(language, { style: 'percent', maximumFractionDigits: 2 });
+  const holdings = e.holdings
+    .map(
+      (h) =>
+        `${h.ticker === CASH_USD ? t('alerts.cash', { currency: 'USD' }) : h.ticker} ${percent.format(h.weight / 100)}`,
+    )
+    .join(', ');
+  const timing = t(`alerts.timing.${o.execution}`, {
+    date: o.execution === 'same_close' ? e.date : o.nextSession,
+  });
+  const keep = (line: string) => ({ keep: line });
+  const values = { strategy: o.name, date: e.date, deadline: o.deadline };
+  const reasons: Part[] = e.reasons.length
+    ? [
+        {
+          items: e.reasons.map((code) => describeReason(t, code)),
+          more: (count) => t('alerts.more', { count }),
+          inline: { join: REASONS_JOIN, line: (r) => t('alerts.reasons', { reasons: r }) },
+        },
+      ]
+    : [];
+  const health = keep(t(`alerts.health.${e.dataStatus}`));
+  let type: AlertType;
+  let lines: Part[];
+  if (m.kind === 'provisional') {
+    type = 'recheck_provisional';
+    lines = [
+      keep(t('alerts.recheck.provisional.title', values)),
+      keep(t('alerts.recheck.provisional.body', values)),
+      keep(t('alerts.recheck.provisional.fallback', { holdings })),
+      keep(timing),
+      keep(t('alerts.recheck.provisional.wait', values)),
+    ];
+  } else if (m.outcome === 'cleared') {
+    type = 'recheck_final';
+    const to = name(e.allocation);
+    lines = [
+      keep(t('alerts.recheck.cleared.title', values)),
+      keep(t('alerts.recheck.cleared.body', values)),
+      keep(
+        o.lastTold === undefined
+          ? t('alerts.stateChange.first', { to, date: e.date })
+          : o.lastTold === e.allocation
+            ? t('alerts.recheck.cleared.unchanged', { allocation: to, date: e.date })
+            : t('alerts.stateChange.body', { from: name(o.lastTold), to, date: e.date }),
+      ),
+      keep(t('alerts.holdings', { holdings })),
+      keep(timing),
+    ];
+  } else {
+    type = 'recheck_final';
+    lines = [
+      keep(t('alerts.dataRed.title', values)),
+      keep(t(`alerts.recheck.${m.outcome === 'late' ? 'late' : 'stands'}`, values)),
+      keep(t('alerts.holdings', { holdings })),
+      keep(timing),
+    ];
+  }
+  return {
+    key: { subject: o.versionId, date: e.date, type },
+    // The final tells the allocation in force; the provisional tells none (it is not final).
+    ...(type === 'recheck_final' && {
+      allocation: e.safeStateApplied ? SAFE_STATE : e.allocation,
+    }),
+    ...fitted(fitMessage([...lines, health, ...reasons], max)),
+  };
+}
+
+/**
+ * One version's re-check message to each of its owner's channels (none for a library version, as
+ * the day alerts). The daily run passes a stored re-check (`sendRecheckAlerts`); `pnpm drill`
+ * passes what it decided on a copy of the database without recording it (`o.drill`).
+ */
+export async function sendRecheckMessage(
+  db: Db,
+  o: AlertOptions & { sessions: Sessions },
+  d: {
+    version: { id: string; name: string; ownerId: string | null };
+    strategy: Strategy;
+    message: RecheckMessage;
+    deadline: string;
+    timeZone: string;
+    owners?: Owners;
+  },
+  summary: AlertSummary = { sent: 0, failed: [] },
+): Promise<AlertSummary> {
+  const { version, strategy } = d;
+  if (!version.ownerId) return summary;
+  const owner = await ownerOf(db, o, d.owners ?? new Map(), version.ownerId);
+  const { language, t } = owner;
+  for (const channel of owner.targets) {
+    const alert = recheckAlert(
+      t,
+      language,
+      {
+        versionId: version.id,
+        name: version.name,
+        execution: strategy.execution,
+        message: d.message,
+        deadline: shownDeadline(d.deadline, d.timeZone),
+        nextSession: o.sessions.after(d.message.day.date),
+        lastTold: o.drill ? undefined : await lastToldAllocation(db, channel, version.id, TOLD),
+      },
+      roomOn(o, channel, t),
+    );
+    await deliver(db, o, channel, alert, summary, t);
+  }
+  return summary;
+}
+
+/**
+ * Every re-check message not yet delivered (requirements 04 "Red re-check before execution", 11:
+ * idempotent per version, date and type; in the recipient's language; with the data health): the
+ * provisional of each open re-check, the final of each closed one (`not_rechecked` has none: its
+ * safe-state alert is the day's alert, `sendStrategyAlerts`). Driven by `red_rechecks` and
+ * `alerts_sent`, so a failed delivery is tried again at the next run; a re-check is marked as told
+ * (`provisional_sent_at`, `final_sent_at`) once a pass delivered to every channel, and is not
+ * looked at again (a channel added later gets the next day's alert, as with day alerts). A
+ * provisional not delivered before its re-check closed is not sent: the final supersedes it.
+ * Nothing before the A1 gate (no forward records); never in a drill (the drill sends its own).
+ */
+export async function sendRecheckAlerts(
+  db: Db,
+  o: AlertOptions & { sessions: Sessions },
+): Promise<AlertSummary> {
+  const summary: AlertSummary = { sent: 0, failed: [] };
+  if (o.drill || !(await getSetting(db, 'forward_records_from'))) return summary;
+  const owners: Owners = new Map();
+  const versions = new Map((await allVersions(db)).map((v) => [v.id, v]));
+  let timeZone: string | undefined;
+  for (const r of await allRechecks(db)) {
+    if (r.outcome === 'not_rechecked') continue;
+    const which = r.outcome === null ? 'provisional' : 'final';
+    if ((which === 'provisional' ? r.provisionalSentAt : r.finalSentAt) !== null) continue;
+    const version = versions.get(r.versionId);
+    const label = `${version?.name ?? 'unknown'} (${r.versionId}) ${r.date}`;
+    if (!version) {
+      summary.failed.push(`${label}: re-check of a version not found; not told`);
+      continue;
+    }
+    const parsed = parseVersion(version);
+    if ('error' in parsed) {
+      // Its timing is unknown: nothing is told on a guess (the forward step names the version).
+      summary.failed.push(`${label}: definition does not parse: ${parsed.error}`);
+      continue;
+    }
+    let message: RecheckMessage;
+    if (r.outcome === null) {
+      const kept = readKeptDecision(r.provisional);
+      if (!kept) {
+        summary.failed.push(`${label}: the re-check's provisional decision does not read back`);
+        continue;
+      }
+      message = { kind: 'provisional', day: { date: r.date, ...kept, safeStateApplied: true } };
+    } else {
+      const entry = await entryOn(db, version.id, r.date);
+      if (!entry) {
+        summary.failed.push(`${label}: re-check closed without its entry; the final is not told`);
+        continue;
+      }
+      message = { kind: 'final', outcome: r.outcome, day: dayOf(entry) };
+    }
+    timeZone ??= await recheckTimeZone(db);
+    const before = summary.failed.length;
+    await sendRecheckMessage(
+      db,
+      o,
+      { version, strategy: parsed.strategy, message, deadline: r.deadline, timeZone, owners },
+      summary,
+    );
+    if (summary.failed.length === before) {
+      await markRecheckSent(db, r.id, which, new Date().toISOString());
+    }
   }
   return summary;
 }

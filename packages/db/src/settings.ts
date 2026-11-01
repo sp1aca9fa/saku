@@ -30,7 +30,42 @@ export const SETTINGS = {
    * thresholds set in A3"); a fund without one is observed only (green, deviation recorded).
    */
   issuer_nav_tolerance: (v: string) => parseNavTolerances(v) !== null,
+  /**
+   * The red re-check deadline (requirements 04 "Red re-check before execution", decisions log
+   * 2026-11-01, C16): whole minutes before the next regular US open (09:30 New York) by which a
+   * day red at its first grading gets its final instruction. Default RECHECK_DEFAULT_MINUTES;
+   * 0 to RECHECK_MAX_MINUTES.
+   */
+  red_recheck_minutes_before_open: (v: string) => parseRecheckMinutes(v) !== null,
 } as const;
+
+/** The default re-check deadline: one hour before the next regular US open (C16). */
+export const RECHECK_DEFAULT_MINUTES = 60;
+/**
+ * The earliest deadline the setting accepts (10 hours before the open, 23:30 New York the evening
+ * before): earlier would end the re-check before most corrections can arrive (a typo, not a choice).
+ */
+export const RECHECK_MAX_MINUTES = 600;
+
+/** `red_recheck_minutes_before_open` as a number, or null when the text is not a valid one. */
+export function parseRecheckMinutes(text: string): number | null {
+  if (!/^\d{1,4}$/.test(text)) return null;
+  const n = Number(text);
+  return n <= RECHECK_MAX_MINUTES ? n : null;
+}
+
+/**
+ * The re-check deadline's minutes before the open: the default when unset. A stored value that no
+ * longer parses (only a hand edit can do that) is reported as `invalid`, never read as the default
+ * without saying so: the forward step then opens no re-check (the safe state at once, as before
+ * C16) and the run names it.
+ */
+export async function recheckMinutes(db: Db): Promise<{ minutes: number } | { invalid: string }> {
+  const text = await getSetting(db, 'red_recheck_minutes_before_open');
+  if (text === undefined) return { minutes: RECHECK_DEFAULT_MINUTES };
+  const n = parseRecheckMinutes(text);
+  return n === null ? { invalid: text } : { minutes: n };
+}
 
 /** The widest NAV tolerance the setting accepts (20%): wider would not catch a decimal error. */
 export const MAX_NAV_TOLERANCE = 0.2;

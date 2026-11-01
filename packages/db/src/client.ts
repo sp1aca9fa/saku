@@ -19,3 +19,6 @@ export function getDb(): Db {
   shared ??= createDb(dbConfigFromEnv());
   return shared;
 }
+
+/** A transaction on `Db` (its writes commit together or not at all). */
+export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];

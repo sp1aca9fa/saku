@@ -8,8 +8,11 @@ import { Sessions } from '@saku/data';
 import {
   type Db,
   appendForward,
+  closeRecheck,
   createUser,
   finishRun,
+  insertRecheck,
+  openRechecks,
   pruneProviderUsage,
   registerVersion,
   schema,
@@ -169,6 +172,53 @@ describe('months', () => {
     expect(await monthReady(db, MONTH, o)).toEqual({ ok: true });
     // A month the calendar does not cover needs no daily run (its days read "not known").
     expect(await monthReady(db, '2024-06', o)).toEqual({ ok: true });
+  });
+
+  // Requirements 04 "Red re-check before execution": the month's last day has no entry until its
+  // re-check's final, so the month waits for it (never a "missing" day for being open).
+  it('a month waits for an open red re-check of its days', async () => {
+    const { db } = await setup();
+    await dailyDone(db, '2026-03-31');
+    const version = await registerVersion(db, {
+      ownerId: null,
+      name: 'Lib',
+      strategy: { name: 'Lib' },
+      at: new Date('2026-03-01T00:00:00Z'),
+    });
+    const provisional = {
+      allocation: 'Safe state',
+      holdings: [{ ticker: 'AAA', weight: 100 }],
+      dataStatus: 'red' as const,
+      reasons: ['AAA:B.close_match@s'],
+      signals: null,
+      ties: [],
+    };
+    // Tuesday March 31's deadline: Wednesday April 1, 08:30 New York (12:30 UTC, EDT).
+    await insertRecheck(db, {
+      versionId: version.id,
+      date: '2026-03-31',
+      firstRedAt: '2026-04-01T00:30:00.000Z',
+      firstRunId: null,
+      deadline: '2026-04-01T12:30:00.000Z',
+      provisional,
+    });
+    const at = (now: string) =>
+      monthReady(db, MONTH, { now: new Date(now), timeZone: TZ, sessions, finalAfter: '20:00' });
+    // Before the deadline: the normal wait.
+    const waiting = await at('2026-04-01T03:00:00.000Z');
+    expect(waiting).toMatchObject({ ok: false, kind: 'clock' });
+    expect(!waiting.ok && waiting.why).toMatch(
+      /Red re-checks of 2026-03 still open: 2026-03-31 \(deadline 2026-04-01 21:30\) Asia\/Tokyo/,
+    );
+    // Past it: the daily job should have closed it (it may be stuck).
+    expect(await at('2026-04-01T13:00:00.000Z')).toMatchObject({ ok: false, kind: 'daily' });
+    const [row] = await openRechecks(db);
+    await closeRecheck(db, row!.id, {
+      finalAt: '2026-04-01T12:20:00.000Z',
+      finalRunId: null,
+      outcome: 'safe_state',
+    });
+    expect(await at('2026-04-01T13:00:00.000Z')).toEqual({ ok: true });
   });
 
   it('a calendar that does not cover now skips only the finality check, never the daily run', async () => {

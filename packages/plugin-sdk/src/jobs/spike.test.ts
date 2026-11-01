@@ -128,6 +128,38 @@ describe('spikeReport', () => {
     ]);
   });
 
+  // Requirements 04 "Red re-check before execution": a re-check run is the daily job again for a
+  // day already processed (after the gate); the gate counting leaves it out.
+  it('leaves red re-check runs out: the day is judged by its own runs', async () => {
+    const { db } = await setup();
+    const bad: Omit<Result, 'runId' | 'date'> = {
+      layer: 'B',
+      checkName: 'close_match',
+      source: 's',
+      status: 'red',
+    };
+    const own = await day(db, '2026-01-05', [ok('A', 'bar_valid', 'p'), bad]);
+    const recheck = await startRun(
+      db,
+      'daily',
+      new Date(Date.UTC(2026, 0, 1) + ++clock * 1000),
+      '2026-01-05',
+      { recheck: true },
+    );
+    await finishRun(db, recheck, { ok: true, datesProcessed: ['2026-01-05'] });
+    await db.insert(schema.checkResults).values(
+      [ok('A', 'bar_valid', 'p'), ok('B', 'close_match', 's')].map((r) => ({
+        ...r,
+        runId: recheck,
+        date: '2026-01-05',
+      })),
+    );
+    const report = await spikeReport(db, { sessions });
+    expect(report.days.map((d) => [d.date, d.runId, d.layerBPass])).toEqual([
+      ['2026-01-05', own, false],
+    ]);
+  });
+
   // A missing secondary bar is `secondary_missing` now; results stored before carry it as a
   // `close_match` with the message 'no secondary bar'. Both count the same: the secondary is not
   // available that day (also when another symbol's close was compared), and layer B is not passed.

@@ -14,8 +14,13 @@
 //    nothing is appended: no forward record, chain entry, annotation, timestamp, stamp or
 //    heartbeat, here or in the live database. A version that would not record the day is not
 //    drilled, and the drill does not pass while one is left out.
-// 5. The day's alerts (the owner's safe-state alert, the admins' data alert) go to the real
-//    channels, each marked as a drill in its title with a line saying nothing was recorded.
+// 5. The day's alerts go to the real channels, each marked as a drill in its title with a line
+//    saying nothing was recorded: the owner's provisional message (requirements 04 "Red re-check
+//    before execution": the data problem, the deadline, the fallback safe state) and the admins'
+//    data alert.
+// 6. The last hourly re-check is simulated at the deadline (the setting, the next session's
+//    open): layers A-C again on the copy (the fault is still stored), each version graded again;
+//    still red, the owner's final message "the safe state stands" goes out the same way.
 // The copy is deleted at the end, also on failure. The drill holds the jobs lock, so no job writes
 // while it copies, and it refuses to run on Vercel or in CI (jobs run only on the server).
 import {
@@ -33,6 +38,8 @@ import {
   allVersions,
   createDb,
   getSetting,
+  RECHECK_MAX_MINUTES,
+  recheckMinutes,
   schema,
   sourceRolesOf,
   startRun,
@@ -54,10 +61,16 @@ import {
 import { DATA_KIND, assignedOnly } from '../roles';
 import { assertServerOnly } from '../server-only';
 import type { Logger, Notifier, PluginContext } from '../types';
-import { type AlertOptions, type DayEntry, sendDataHealthAdmin, sendDayAlert } from './alerts';
+import {
+  type AlertOptions,
+  type DayEntry,
+  sendDataHealthAdmin,
+  sendRecheckMessage,
+} from './alerts';
 import { healthOf, parseVersion, reader, recordClose, recordsDay } from './forward';
 import { DAILY_OVERLAP, supportedBy } from './ingest';
 import { lock } from './lock';
+import { recheckDeadline, recheckTimeZone, regrade } from './recheck';
 import { declaredCalendars } from './run';
 import { verify } from './verify';
 
@@ -93,8 +106,12 @@ export interface DrillVersion {
   safeStateApplied: boolean;
   dataStatus: string;
   reasons: string[];
-  /** Channels that got this version's alert. */
-  delivered: number;
+  /** Channels that got this version's provisional message. */
+  provisional: number;
+  /** The last re-check before the deadline (`regrade`): `safe_state` when still red. */
+  outcome?: 'pending' | 'cleared' | 'safe_state' | 'late';
+  /** Channels that got this version's final message ("the safe state stands"). */
+  final: number;
 }
 
 /** A registered version the forward step would not record on the target date: not drilled. */
@@ -109,6 +126,10 @@ export interface DrillReport {
   /** The day's overall grade on the copy, after the fault. */
   grade: HealthStatus;
   reasons: string[];
+  /** The re-check deadline (ISO 8601 instant) the drill's last re-check is simulated at. */
+  deadline: string;
+  /** The install's time zone the messages show the deadline in. */
+  timeZone: string;
   /** Where the fault went: the primary's bar of each signal ticker on the target date. */
   faults: { ticker: string; source: string; close: number; faulted: number }[];
   versions: DrillVersion[];
@@ -118,8 +139,8 @@ export interface DrillReport {
   /** Deliveries that failed, versions that do not parse: each makes the drill fail. */
   problems: string[];
   /**
-   * Red, every registered version drilled, on its safe state with its alert on at least one
-   * channel, no problem.
+   * Red, every registered version drilled, on its safe state, still red at the last re-check, its
+   * provisional and final messages each on at least one channel, no problem.
    */
   ok: boolean;
 }
@@ -298,23 +319,25 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
   const infos = allInfos(o.plugins);
   const used = assignedOnly(o.plugins, roles);
   const active = (await activeSymbols(db)).map((s) => s.ticker);
-  const checked = await verify(db, {
-    runId,
-    sessions: o.sessions,
-    to: o.target,
-    seriesSessions,
-    now: o.now,
-    issuers: used.issuers.map((source) => ({
-      source: source.info.key,
-      supported: supportedBy(source, active).supported,
-      unavailable: [],
-    })),
-    sourceCalendars: declaredCalendars(o.plugins, infos, o.log),
-    issuerPublishes: issuerPublishesOf(used.issuers),
-    dividendListingLags: dividendListingLagsOf(o.plugins.bars),
-    mode: 'daily',
-    from: o.sessions.before(o.target, DAILY_OVERLAP),
-  });
+  const check = (now: Date) =>
+    verify(db, {
+      runId,
+      sessions: o.sessions,
+      to: o.target,
+      seriesSessions,
+      now,
+      issuers: used.issuers.map((source) => ({
+        source: source.info.key,
+        supported: supportedBy(source, active).supported,
+        unavailable: [],
+      })),
+      sourceCalendars: declaredCalendars(o.plugins, infos, o.log),
+      issuerPublishes: issuerPublishesOf(used.issuers),
+      dividendListingLags: dividendListingLagsOf(o.plugins.bars),
+      mode: 'daily',
+      from: o.sessions.before(o.target, DAILY_OVERLAP),
+    });
+  const checked = await check(o.now);
   o.log.info(`Drill: data health on ${o.target}: ${checked.health}`, { reasons: checked.reasons });
   if (checked.removedCanonical.length > 0) {
     o.log.info('Drill: canonical bars the checks no longer build (removed on the copy)', {
@@ -322,8 +345,41 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
     });
   }
 
-  // Each version decides the day as the forward step does, without appending.
+  // The red re-check (requirements 04 "Red re-check before execution"): the deadline as the
+  // forward step computes it. A setting that does not parse, or a calendar that does not cover the
+  // next session, leaves it unknown: the drill fails (the daily run would open no re-check).
+  const minutes = await recheckMinutes(db);
+  const deadline =
+    'minutes' in minutes ? recheckDeadline(o.target, o.sessions, minutes.minutes) : undefined;
+  if (deadline === undefined) {
+    return {
+      failed:
+        'minutes' in minutes
+          ? `The calendar does not cover the session after ${o.target}, so its re-check deadline is unknown.`
+          : `red_recheck_minutes_before_open is ${minutes.invalid}, not whole minutes from 0 to ` +
+            `${RECHECK_MAX_MINUTES}; set it again (pnpm settings set; docs/setup.md).`,
+    };
+  }
+  const timeZone = await recheckTimeZone(db);
+
   const { symbolIds, loadRows, barsOf } = await reader(db, o.sessions);
+  const decide = async (strategy: Strategy) => {
+    const rows = await loadRows(dependencies(strategy), o.target);
+    return forwardDecision(
+      strategy,
+      o.target,
+      barsOf(rows),
+      await healthOf(db, symbolIds, rows, o.target, o.sessions),
+    );
+  };
+  const dayOf = (d: Awaited<ReturnType<typeof decide>>): DayEntry => ({
+    date: o.target,
+    allocation: d.allocation,
+    holdings: d.holdings,
+    dataStatus: d.dataStatus,
+    safeStateApplied: d.safeStateApplied,
+    reasons: d.reasons,
+  });
   const alerts: DrillReport['alerts'] = [];
   // One context for the whole drill, as the daily run has one per run: a notifier's channels
   // share its pacing and counts across versions.
@@ -340,30 +396,29 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
       onDelivered?.(d);
     },
   });
+
+  // 1. The first grading: each version decides the day as the forward step does, without
+  // appending; red, the provisional message (the fallback safe state and the deadline).
+  const first = new Map<string, Awaited<ReturnType<typeof decide>>>();
   const decided: DrillVersion[] = [];
   for (const { version, strategy } of versions) {
-    const rows = await loadRows(dependencies(strategy), o.target);
-    const decision = forwardDecision(
-      strategy,
-      o.target,
-      barsOf(rows),
-      await healthOf(db, symbolIds, rows, o.target, o.sessions),
-    );
-    const day: DayEntry = {
-      date: o.target,
-      allocation: decision.allocation,
-      holdings: decision.holdings,
-      dataStatus: decision.dataStatus,
-      safeStateApplied: decision.safeStateApplied,
-      reasons: decision.reasons,
-    };
-    let delivered = 0;
-    const sent = await sendDayAlert(
-      db,
-      { ...alerting(() => delivered++), sessions: o.sessions },
-      { version, strategy, day },
-    );
-    problems.push(...sent.failed);
+    const decision = await decide(strategy);
+    first.set(version.id, decision);
+    let provisional = 0;
+    if (decision.safeStateApplied) {
+      const sent = await sendRecheckMessage(
+        db,
+        { ...alerting(() => provisional++), sessions: o.sessions },
+        {
+          version,
+          strategy,
+          message: { kind: 'provisional', day: dayOf(decision) },
+          deadline,
+          timeZone,
+        },
+      );
+      problems.push(...sent.failed);
+    }
     decided.push({
       name: version.name,
       id: version.id,
@@ -371,7 +426,8 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
       safeStateApplied: decision.safeStateApplied,
       dataStatus: decision.dataStatus,
       reasons: decision.reasons,
-      delivered,
+      provisional,
+      final: 0,
     });
   }
   // The admins' data alert, as the daily run sends it on a day that is not green.
@@ -384,15 +440,50 @@ async function onCopy(db: Db, o: DrillOptions): Promise<DrillResult> {
     problems.push(...sent.failed);
   }
 
+  // 2. The last hourly re-check, its simulated clock at the deadline: the checks again on the copy
+  // (the fault is still stored), each red version graded again; still red, the final "safe state
+  // stands" (as the forward step records it then).
+  const at = new Date(deadline);
+  const regraded = await check(at);
+  o.log.info(`Drill: re-check at the deadline ${deadline}: ${regraded.health}`);
+  for (const [i, { version, strategy }] of versions.entries()) {
+    const v = decided[i]!;
+    if (!first.get(version.id)!.safeStateApplied) continue;
+    const decision = await decide(strategy);
+    const outcome = regrade({
+      red: decision.safeStateApplied,
+      clock: at.getTime(),
+      deadline: at.getTime(),
+    });
+    v.outcome = outcome;
+    if (outcome !== 'safe_state') continue;
+    const sent = await sendRecheckMessage(
+      db,
+      { ...alerting(() => v.final++), sessions: o.sessions },
+      {
+        version,
+        strategy,
+        message: { kind: 'final', outcome, day: dayOf(decision) },
+        deadline,
+        timeZone,
+      },
+    );
+    problems.push(...sent.failed);
+  }
+
   const ok =
     checked.health === 'red' &&
     problems.length === 0 &&
     notDrilled.length === 0 &&
-    decided.every((v) => v.safeStateApplied && v.delivered > 0);
+    decided.every(
+      (v) => v.safeStateApplied && v.outcome === 'safe_state' && v.provisional > 0 && v.final > 0,
+    );
   return {
     target: o.target,
     grade: checked.health,
     reasons: checked.reasons,
+    deadline,
+    timeZone,
     faults,
     versions: decided,
     notDrilled,
@@ -413,9 +504,10 @@ export function drillSummary(r: DrillResult): string {
         `Fault: ${f.ticker} close from ${f.source} ${f.close} -> ${f.faulted} (x${DRILL_FACTOR})`,
     ),
     `Day's grade: ${r.grade}${r.reasons.length ? ` (${r.reasons.join('; ')})` : ''}`,
+    `Re-check deadline: ${r.deadline} (the last re-check is simulated there; shown in ${r.timeZone})`,
     ...r.versions.map(
       (v) =>
-        `${v.name} (${v.id}): ${v.allocation}${v.safeStateApplied ? ' (safe state applied)' : ' (NOT the safe state)'}, data ${v.dataStatus}${v.reasons.length ? ` (${v.reasons.join('; ')})` : ''}, alert on ${v.delivered} channel(s)`,
+        `${v.name} (${v.id}): ${v.allocation}${v.safeStateApplied ? ' (safe state applied)' : ' (NOT the safe state)'}, data ${v.dataStatus}${v.reasons.length ? ` (${v.reasons.join('; ')})` : ''}, provisional message on ${v.provisional} channel(s), re-check at the deadline: ${v.outcome ?? 'not run'}, final message on ${v.final} channel(s)`,
     ),
     ...r.notDrilled.map((v) => `Not drilled: ${notDrilledLine(v)}`),
     ...(r.alerts.length
@@ -424,17 +516,30 @@ export function drillSummary(r: DrillResult): string {
     ...r.problems.map((p) => `Problem: ${p}`),
   ];
   if (r.ok)
-    lines.push('Drill passed: the day was red, the safe state applied and the alert arrived.');
+    lines.push(
+      'Drill passed: the day was red, the safe state applied, the provisional message arrived, ' +
+        'and at the deadline the final "safe state stands" arrived.',
+    );
   else {
     const why = [
       ...(r.grade !== 'red' ? [`the day was ${r.grade}, not red`] : []),
       ...r.versions
         .filter((v) => !v.safeStateApplied)
         .map((v) => `${v.name} did not apply its safe state`),
+      ...r.versions
+        .filter((v) => v.safeStateApplied && v.outcome !== 'safe_state')
+        .map(
+          (v) => `${v.name} was ${v.outcome ?? 'not re-checked'} at the deadline, not still red`,
+        ),
       ...r.notDrilled.map((v) => `${v.name} does not record ${r.target}`),
       ...r.versions
-        .filter((v) => v.delivered === 0)
-        .map((v) => `no channel got ${v.name}'s alert (pnpm channel list --user <name>)`),
+        .filter((v) => v.safeStateApplied && v.provisional === 0)
+        .map(
+          (v) => `no channel got ${v.name}'s provisional message (pnpm channel list --user <name>)`,
+        ),
+      ...r.versions
+        .filter((v) => v.safeStateApplied && v.outcome === 'safe_state' && v.final === 0)
+        .map((v) => `no channel got ${v.name}'s final message (pnpm channel list --user <name>)`),
       ...(r.problems.length ? ['see the problems above'] : []),
     ];
     lines.push(`Drill FAILED: ${why.join('; ')}.`);

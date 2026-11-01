@@ -8,7 +8,7 @@ is set. Commands run from the repository folder. Setup is in `docs/setup.md`.
 | Command | What it does |
 |---|---|
 | `pnpm bootstrap` | Full history from every source, then the checks (layers A-C). First install, new symbols |
-| `pnpm daily` | Once per trading day, at the first check after the day's data is final (after 20:00 New York time by default); exits at once when the day is done. `--force` runs again for the latest final day |
+| `pnpm daily` | Once per trading day, at the first check after the day's data is final (after 20:00 New York time by default); exits at once when the day is done, unless a red day waits for its re-check (see "Red re-check runs" below). `--force` runs again for the latest final day |
 | `pnpm weekly` | Full-history refetch (changed values go to the revision log and the admins get a summary), checks, recompute of every recorded day, and layer E |
 | `pnpm monthly` | The audit report of the previous month (and of any earlier month not done since the first run, up to 12 back): stored in the activity log and, after the A1 gate, sent once in short form to the admin channels. A month is done once its report is stored and its alert delivered (or waiting for the gate); a done month is not produced again. A month that ended before `forward_records_from` (or any month while it is unset) is stored and done without an alert, so a catch-up after the gate sends no pre-gate month |
 | `pnpm verify` (alias `pnpm checks`) | The checks and layer E (core vs reference, incremental vs full) on stored data, no fetching |
@@ -37,7 +37,7 @@ last two only when every source answered for every item. Details: `docs/data-pip
 | `pnpm journal add\|list` | What you did with a signal |
 | `pnpm channel add\|list\|disable\|enable\|test` | Alert channels (Discord, Telegram) |
 | `pnpm backup`, `pnpm restore <file>` | See `docs/backups.md` |
-| `pnpm drill red [--date <D>]` | A simulated red day, to prove the safe-state alert arrives (see "Red-day drill" in `docs/troubleshooting.md`) |
+| `pnpm drill red [--date <D>]` | A simulated red day, to prove the provisional message and the final "safe state stands" arrive (see "Red-day drill" in `docs/troubleshooting.md`) |
 
 Run a command without arguments, or with a wrong one, to see its usage line.
 
@@ -67,6 +67,39 @@ happens at the next start. Services run at lower priority with a CPU cap.
   window of the next run, and by the weekly full-history run.
 - Jobs are safe to repeat: stored data is never overwritten, a changed value is a new revision.
 
+## Red re-check runs
+
+A strategy's day that is red at its first grading (after the A1 gate) is not recorded at once
+(requirements 04 "Red re-check before execution"). Its owner gets a provisional message: the data
+problem, that the day is checked again every hour, the deadline, and the safe state that applies if
+nothing changes. The deadline is the next session's regular US open (09:30 New York, daylight saving
+followed) less `red_recheck_minutes_before_open` (default 60; `docs/setup.md`), shown in the
+install's time zone.
+
+- While a re-check is open, the hourly check runs the daily job again for that day although it is
+  stamped: fetch of the 10-session window, checks, the forward step for the waiting day only,
+  alerts, backup. These runs are recorded as daily runs marked `recheck` (`job_runs.recheck`); they
+  write no stamp and send no heartbeat (the heartbeat stays the day's own run). A re-check run that
+  finished every step is complete whatever the day grades (red is data, not a failure); one that
+  did not is a failed run as any other (admins told, retried at the next check).
+- The day turns not red before the deadline: its normal decision is recorded (yellow rules if
+  yellow) and the owner gets one final message with the normal instruction. Still red at the last
+  check before the deadline (the check at :20 within the hour before it): the safe state is
+  recorded and the final message says it stands. Exactly one final message per strategy and day.
+- The entry stores what was finally signaled with the time the run sent it (`signaledAt` in the
+  hashed text); the first red grading (time, reasons, deadline) is a `red_recheck` annotation.
+  Corrections after the deadline are annotations, as before.
+- The machine was off at the deadline: the next run records the safe state as the provisional
+  message gave it (nothing known after the deadline is used) and the final message says it is late.
+  A first grading with no check left before the deadline (a late catch-up) records the safe state
+  at once, without a provisional message; its alert says so.
+- The next day's entry waits for the open day (the chain order); by construction the open day is
+  final before the next day's close. The monthly audit waits for an open re-check of its month
+  (after its deadline that counts as the daily job being stuck); `pnpm spike` leaves re-check runs
+  out.
+- Over a weekend the re-check runs hourly from Friday evening to Monday morning: about 60 runs,
+  each asking every source for the 10-session window (within the quota guard).
+
 ## Heartbeat
 
 After a fully successful daily run, Saku pings `HEALTHCHECK_URL` (healthchecks.io). When pings
@@ -95,10 +128,10 @@ is only not over or not final yet is the normal wait and still pings.
 
 | Command | 0 | 1 |
 |---|---|---|
-| `pnpm daily`, `bootstrap`, `weekly`, `monthly` | The run completed (or nothing was due, or another job holds the lock) | The run could not start or did not complete |
+| `pnpm daily`, `bootstrap`, `weekly`, `monthly` | The run completed (or nothing was due, or another job holds the lock); a re-check run that finds the day still red is complete | The run could not start or did not complete |
 | `pnpm health` (also `--summary`) | The report was produced, whatever the grades (its last line, `Verdict: ...`, says them) | An error: a wrong argument, no database, an unknown run, check, symbol or source, nothing graded yet |
 | `pnpm audit-report` | The report was produced, whatever it found (its last line, `Verdict: ...`, says it) | An error: a wrong argument, no database, no xnys calendar, a month not over yet or not processed by a daily run |
-| `pnpm drill red` | The day was red, every registered strategy applied its safe state and its alert reached a channel | Anything else, or a refusal (no registered strategy, CI or Vercel set, another job running) |
+| `pnpm drill red` | The day was red, every registered strategy applied its safe state, its provisional message reached a channel, and at the simulated last re-check before the deadline it was still red and its final "safe state stands" reached a channel | Anything else, or a refusal (no registered strategy, CI or Vercel set, another job running) |
 | Other commands | Done | An error or wrong usage, with a message |
 
 A command run against an unmigrated database stops and says to run `pnpm db:migrate`.

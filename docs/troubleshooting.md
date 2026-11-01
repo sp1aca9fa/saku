@@ -53,7 +53,8 @@ same rules apply to index series and the base-currency exchange rate.
 
 ## Red-day drill
 
-`pnpm drill red` proves that a red day produces the safe-state alert (stage A2 acceptance),
+`pnpm drill red` proves that a red day produces the provisional message and, at the deadline,
+the final "safe state stands" (stage A2 acceptance with the red re-check of requirements 04),
 without touching your data:
 
 1. It copies the database to a temporary file (the backups' method; the live database is only
@@ -63,14 +64,23 @@ without touching your data:
    is fetched.
 3. The checks run on the copy, each registered strategy decides the day as the daily run does,
    and the day's alerts go to the real channels, each titled `[DRILL]` (`[訓練]` in Japanese) and
-   saying nothing was recorded.
-4. The copy is deleted. No forward record, timestamp, stamp, heartbeat or run is written to the
+   saying nothing was recorded: the owner's provisional message (the data problem, the hourly
+   re-check, the deadline in the install's time zone, the fallback safe state) and the admins'
+   data alert.
+4. The last hourly re-check is simulated at the deadline (the next session's 09:30 New York open
+   less `red_recheck_minutes_before_open`): the checks run again on the copy (the fault is still
+   there), each strategy decides again, and the owner's final message, the safe state stands,
+   goes out the same way.
+5. The copy is deleted. No forward record, timestamp, stamp, heartbeat or run is written to the
    live database, and nothing needs to be done about the alert.
 
 The date is the latest completed session, or `--date <YYYY-MM-DD>` (a completed session the daily
-run fetched). The output lists the fault, the day's grade, each strategy's action (it must be the
-safe state) and the alerts sent; the command exits 0 only when the day was red, every strategy
-applied its safe state and its alert reached at least one channel. It refuses without a
+run fetched). The output lists the fault, the day's grade, the deadline, each strategy's action
+(it must be the safe state), its re-check at the deadline (it must be `safe_state`: still red) and
+the alerts sent; the command exits 0 only when the day was red, every strategy applied its safe
+state, its provisional message reached at least one channel, and its final message did too. A
+`red_recheck_minutes_before_open` that does not parse, or a calendar that does not cover the next
+session, fails the drill (the daily run would open no re-check). It refuses without a
 registered strategy (register one first), before forward records start (`forward_records_from`)
 or for a date before they start, on CI or Vercel, and while another job runs (try again when it
 has finished).
@@ -82,7 +92,7 @@ output lists it under "Not drilled" and the drill fails. Choose a later date.
 
 The drill's messages are real sends but are counted only in the copy, which is deleted: the live
 database's quota guard does not see them. A drill sends a few messages per channel (each
-strategy's alert and the admins' data alert); mind a channel whose provider has a small daily or
+strategy's provisional and final messages and the admins' data alert); mind a channel whose provider has a small daily or
 monthly cap, and do not run drills back to back on it.
 
 ## Alerts before the A1 gate

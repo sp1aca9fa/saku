@@ -11,6 +11,7 @@ import {
   createUser,
   type Db,
   forwardRecord,
+  openRechecks,
   recordProviderRequest,
   registerVersion,
   schema,
@@ -393,6 +394,7 @@ async function run(
     target: string,
     now: string,
     list: BarSource[],
+    recheck = false,
   ) => {
     const ctx = (info?: PluginInfo) => ({
       http:
@@ -431,6 +433,7 @@ async function run(
         tsa: { authorities: [] },
         code: 'test',
         onComplete: async () => true,
+        recheck,
       },
     );
   };
@@ -443,14 +446,34 @@ async function run(
   expect(before.ok).toBe(true);
   await daily.before?.(db);
   const result = await job(daily.job ?? 'daily', TARGET, '2026-01-17T01:30:00Z', bars);
+  // Requirements 04 "Red re-check before execution": a day red at its first grading has no entry
+  // until its final. The hourly check runs the daily job again for it; the last check before the
+  // deadline (the timer at :20, the deadline at :30) records the safe state when it is still red,
+  // on the same faulted sources (a fault is never cleared by waiting).
+  const open = await openRechecks(db);
+  const recheck =
+    open.length > 0
+      ? await job(
+          'daily',
+          TARGET,
+          new Date(Date.parse(open[0]!.deadline) - 10 * 60_000).toISOString(),
+          bars,
+          true,
+        )
+      : undefined;
   const today = (await forwardRecord(db, version.id)).find((e) => e.date === TARGET)!;
+  const told = sent.map((m) => m.text).filter((t) => t.startsWith('Trend 2x:'));
   return {
     db,
     result,
+    recheck,
     today,
     reasons: today ? (JSON.parse(today.payload) as { reasons: string[] }).reasons : [],
-    // The owner's alert for the strategy (the admin alerts on the same channel are separate).
-    alert: sent.map((m) => m.text).find((t) => t.startsWith('Trend 2x:')),
+    // The owner's alert for the strategy, the final one (the admin alerts on the same channel are
+    // separate): after a re-check, its final instruction.
+    alert: told.at(-1),
+    /** The provisional message of a day red at its first grading. */
+    provisional: told.find((t) => t.startsWith(`Trend 2x: data problem for ${TARGET}`)),
     adminAlerts: sent.map((m) => m.text).filter((t) => t.startsWith('Saku:')),
     /** A later daily run for the same target (a catch-up run) with these sources. */
     again: (list: BarSource[], now: string) => job('daily', TARGET, now, list),
@@ -570,6 +593,22 @@ const FAULTS: { name: string; fault: Fault; on?: Source; expect: 'red'; caught: 
 ];
 
 describe('fault injection (layer F)', () => {
+  // Requirements 04 "Red re-check before execution": the hourly re-check is a daily run of its
+  // own, complete when every step finished (a red result is data, not a failure); it keeps the
+  // heartbeat to the day's own run.
+  it('a red day: the re-check run is complete, recorded as one, without a heartbeat', async () => {
+    const { db, result, recheck } = await run(sources(decimalShift));
+    expect(result.ok).toBe(true);
+    expect(recheck?.ok).toBe(true);
+    const runs = await db.select().from(schema.jobRuns).where(eq(schema.jobRuns.jobType, 'daily'));
+    expect(
+      runs.map((r) => ({ id: r.id, recheck: r.recheck, status: r.status, hb: r.heartbeatSent })),
+    ).toEqual([
+      { id: result.runId, recheck: false, status: 'success', hb: true },
+      { id: recheck!.runId, recheck: true, status: 'success', hb: false },
+    ]);
+  });
+
   it('clean data is green (the control: otherwise the cases below prove nothing)', async () => {
     const { result, today, alert } = await run(sources());
     expect(result.ok).toBe(true);
@@ -583,12 +622,16 @@ describe('fault injection (layer F)', () => {
 
   for (const c of FAULTS) {
     it(`${c.name} (${c.on ?? 'p'}): red, safe state`, async () => {
-      const { today, reasons, alert } = await run(sources(c.fault, c.on));
+      const { today, reasons, alert, provisional, recheck } = await run(sources(c.fault, c.on));
       expect(today.dataStatus).toBe(c.expect);
       expect(reasons).toContain(c.caught);
-      // Never a normal signal: the record and the alert carry the safe state.
+      // Never a normal signal: the provisional message gives the safe state as the fallback, and
+      // the record and the final alert carry the safe state.
+      expect(provisional).toContain("the strategy's safe state applies");
+      expect(recheck).toBeDefined();
       expect(today).toMatchObject({ safeStateApplied: true, allocation: 'Safe state' });
       expect(alert).toMatch(new RegExp(`^Trend 2x: safe state for ${TARGET}`));
+      expect(alert).toContain('so the safe state stands');
     });
   }
 
@@ -716,13 +759,14 @@ describe('fault injection (layer F)', () => {
     it("SPY's dividend missing, a secondary sends adjusted closes: caught on the day by adj_return_match", async () => {
       // As Yahoo sends them: the secondary's adjusted closes come from its own books, which hold
       // the dividend; our adjusted series from the primary lacks it (production index timing).
-      const { db, today, reasons } = await run(
+      const { db, today, reasons, result } = await run(
         ['p', 's1', 's2'].map((key) =>
           source(key, { fault: missedDividend, adjusted: key === 's1' }),
         ),
       );
       expect(reasons).toContain('SPY:B.adj_return_match@s1');
       // SPY 0.245pp off against 0.02pp (more than 2x): red, as observed; SSO (no fault) green.
+      // The day's own run (its re-check runs grade it again alike).
       const spy = await symbolId(db, 'SPY');
       const adj = await db
         .select()
@@ -730,7 +774,7 @@ describe('fault injection (layer F)', () => {
         .where(eq(schema.checkResults.checkName, 'adj_return_match'));
       expect(
         adj
-          .filter((r) => r.date === TARGET)
+          .filter((r) => r.date === TARGET && r.runId === result.runId)
           .map((r) => `${r.symbolId === spy ? 'SPY' : 'SSO'} ${r.source} ${r.status}`)
           .sort(),
       ).toEqual(['SPY s1 red', 'SSO s1 green']);

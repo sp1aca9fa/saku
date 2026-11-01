@@ -1,0 +1,118 @@
+// Red re-checks (requirements 04 "Red re-check before execution", decisions log 2026-11-01, C16;
+// migration 0014). One row per version and date red at its first grading: opened by the forward
+// step, closed once when the day's entry is appended. What a row records is never changed; the
+// later columns are each set once (triggers refuse anything else), so these writes only fill
+// columns still empty.
+import type { Json } from '@saku/core';
+import { and, asc, eq, isNull } from 'drizzle-orm';
+import type { Db, Tx } from './client';
+import { type RecheckOutcome, redRechecks } from './schema';
+
+export type Recheck = typeof redRechecks.$inferSelect;
+
+/** The first red grading's decision, as the provisional message's fallback and the late final. */
+export interface RecheckDecision {
+  allocation: string;
+  holdings: { ticker: string; weight: number }[];
+  dataStatus: 'green' | 'yellow' | 'red';
+  reasons: string[];
+  signals: Record<string, boolean | number> | null;
+  ties: string[];
+}
+
+/** Opens a re-check (no final yet), or records one closed at once (`not_rechecked`). */
+export async function insertRecheck(
+  db: Db | Tx,
+  o: {
+    versionId: string;
+    date: string;
+    firstRedAt: string;
+    firstRunId: string | null;
+    deadline: string;
+    provisional: RecheckDecision;
+    /** Closed at once: the safe state was appended with no re-check (a late first grading). */
+    notRechecked?: { finalRunId: string | null };
+  },
+): Promise<Recheck> {
+  const [row] = await db
+    .insert(redRechecks)
+    .values({
+      versionId: o.versionId,
+      date: o.date,
+      firstRedAt: o.firstRedAt,
+      firstRunId: o.firstRunId,
+      reasons: o.provisional.reasons,
+      deadline: o.deadline,
+      provisional: o.provisional as unknown as Json,
+      ...(o.notRechecked && {
+        finalAt: o.firstRedAt,
+        finalRunId: o.notRechecked.finalRunId,
+        outcome: 'not_rechecked' as const,
+      }),
+    })
+    .returning();
+  return row!;
+}
+
+/** Re-checks still open (no final yet), oldest first. */
+export async function openRechecks(db: Db, versionId?: string): Promise<Recheck[]> {
+  return db
+    .select()
+    .from(redRechecks)
+    .where(
+      versionId === undefined
+        ? isNull(redRechecks.outcome)
+        : and(isNull(redRechecks.outcome), eq(redRechecks.versionId, versionId)),
+    )
+    .orderBy(asc(redRechecks.date), asc(redRechecks.id));
+}
+
+/** The re-check of a version's day, if the day was red at its first grading. */
+export async function recheckOf(
+  db: Db,
+  versionId: string,
+  date: string,
+): Promise<Recheck | undefined> {
+  const [row] = await db
+    .select()
+    .from(redRechecks)
+    .where(and(eq(redRechecks.versionId, versionId), eq(redRechecks.date, date)));
+  return row;
+}
+
+/** Every re-check, oldest first (for the senders, which pick those not told yet). */
+export async function allRechecks(db: Db): Promise<Recheck[]> {
+  return db.select().from(redRechecks).orderBy(asc(redRechecks.date), asc(redRechecks.id));
+}
+
+/** Closes an open re-check once; throws when it is not open (never overwrites a final). */
+export async function closeRecheck(
+  db: Db | Tx,
+  id: number,
+  o: {
+    finalAt: string;
+    finalRunId: string | null;
+    outcome: Exclude<RecheckOutcome, 'not_rechecked'>;
+  },
+): Promise<void> {
+  const done = await db
+    .update(redRechecks)
+    .set({ finalAt: o.finalAt, finalRunId: o.finalRunId, outcome: o.outcome })
+    .where(and(eq(redRechecks.id, id), isNull(redRechecks.outcome)))
+    .returning({ id: redRechecks.id });
+  if (done.length === 0) throw new Error(`Re-check ${id} is not open; its final is not changed.`);
+}
+
+/** Records when the provisional or the final message reached its channels (once). */
+export async function markRecheckSent(
+  db: Db,
+  id: number,
+  which: 'provisional' | 'final',
+  at: string,
+): Promise<void> {
+  const column = which === 'provisional' ? redRechecks.provisionalSentAt : redRechecks.finalSentAt;
+  await db
+    .update(redRechecks)
+    .set(which === 'provisional' ? { provisionalSentAt: at } : { finalSentAt: at })
+    .where(and(eq(redRechecks.id, id), isNull(column)));
+}

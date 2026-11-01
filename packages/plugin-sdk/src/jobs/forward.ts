@@ -4,6 +4,7 @@
 // (the A1 gate). Stand-ins the primary later corrected are annotated, never edited, by their own
 // step (`annotateStandInCorrections`), caught up from the database before every recompute.
 import {
+  SAFE_STATE,
   type LookbackFlag,
   type RawBar,
   type StandInPrice,
@@ -23,6 +24,9 @@ import { type SessionClose, type Sessions, TOLERANCE } from '@saku/data';
 import {
   type Db,
   type ForwardEntry,
+  type Recheck,
+  type RecheckDecision,
+  RECHECK_MAX_MINUTES,
   activeSymbols,
   allVersions,
   annotate,
@@ -30,12 +34,16 @@ import {
   appendForward,
   canonicalBars,
   closedStandIns,
+  closeRecheck,
   forwardRecord,
   getSetting,
+  insertRecheck,
   isOpenStandIn,
   lastEntry,
   latestCloseOf,
   latestHealth,
+  openRechecks,
+  recheckMinutes,
   resolvedStandIns,
   sha256,
   standInOn,
@@ -43,11 +51,18 @@ import {
 } from '@saku/db';
 import { cashRateReader } from './cash';
 import { DAILY_OVERLAP } from './ingest';
+import { firstGrading, recheckDeadline, regrade } from './recheck';
 
 export interface ForwardOptions {
   runId: string;
   sessions: Sessions;
   to: TradingDate;
+  /**
+   * The run's clock (requirements 04 "Red re-check before execution"): compared with a red day's
+   * re-check deadline and recorded as the time a re-checked day's final instruction was sent.
+   * Default: the system clock.
+   */
+  now?: Date;
 }
 
 export interface ForwardSummary {
@@ -63,6 +78,12 @@ export interface ForwardSummary {
    * once the definition parses again.
    */
   errors: { version: string; error: string }[];
+  /** Days red at their first grading waiting for a re-check (no entry yet), opened or still open. */
+  rechecks: { version: string; date: TradingDate; deadline: string; opened: boolean }[];
+  /** Re-checks this run closed, each with the entry it appended. */
+  finals: { version: string; date: TradingDate; outcome: 'cleared' | 'safe_state' | 'late' }[];
+  /** Anything else that kept a version's days from being recorded (the run is incomplete). */
+  problems: string[];
 }
 
 /**
@@ -101,18 +122,81 @@ const toRaw = (r: Awaited<ReturnType<typeof canonicalBars>>[number]): RawBar => 
   splitFactor: r.splitFactor,
 });
 
+type Decision = ReturnType<typeof forwardDecision>;
+
+/** A decision as a re-check row keeps it (the provisional message's fallback). */
+const keptDecision = (d: Decision): RecheckDecision => ({
+  allocation: d.allocation,
+  holdings: d.holdings,
+  dataStatus: d.dataStatus,
+  reasons: d.reasons,
+  signals: d.signals,
+  ties: d.ties,
+});
+
+/**
+ * A re-check row's kept decision read back, or null when it is not one `keptDecision` writes
+ * (never recorded on a guess): the safe state with its holdings, a red status and its reasons.
+ */
+export function readKeptDecision(value: unknown): RecheckDecision | null {
+  const d = value as Partial<Record<keyof RecheckDecision, unknown>> | null;
+  if (!d || typeof d !== 'object') return null;
+  if (d.allocation !== SAFE_STATE || d.dataStatus !== 'red') return null;
+  if (!Array.isArray(d.holdings) || d.holdings.length === 0) return null;
+  for (const h of d.holdings as unknown[]) {
+    const x = h as { ticker?: unknown; weight?: unknown } | null;
+    if (!x || typeof x.ticker !== 'string' || typeof x.weight !== 'number') return null;
+    if (!Number.isFinite(x.weight)) return null;
+  }
+  if (!Array.isArray(d.reasons) || !d.reasons.every((r) => typeof r === 'string')) return null;
+  if (!Array.isArray(d.ties) || !d.ties.every((r) => typeof r === 'string')) return null;
+  if (d.signals !== null && (typeof d.signals !== 'object' || Array.isArray(d.signals)))
+    return null;
+  return d as RecheckDecision;
+}
+
+/**
+ * The forward step (requirements 05): every registered version's days since its last entry, in
+ * order, each decided on the canonical bars up to it with its data health. A day red at its first
+ * grading (requirements 04 "Red re-check before execution"; the rules are in `recheck.ts`):
+ * - with a later hourly check before its deadline: a re-check is opened (no entry yet), and the
+ *   version's later days wait for it (the chain order);
+ * - otherwise (a late run): the safe-state entry at once, as before, the re-check recorded as
+ *   `not_rechecked` (its alert says so).
+ * An open re-check is graded again by every run: cleared, the normal decision; still red at the
+ * last check before the deadline, the safe state; past the deadline, the safe state as the
+ * provisional message gave it. The entry then carries `signaledAt` (the run's clock: the final
+ * instruction is sent by the same run right after) in its hashed text, and the first red grading
+ * is an annotation (`red_recheck`), never an edit; both commit together with the closed re-check.
+ */
 export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary> {
   const summary: ForwardSummary = {
     appended: 0,
     safeStateDays: 0,
     today: [],
     errors: [],
+    rechecks: [],
+    finals: [],
+    problems: [],
   };
   const from = await getSetting(db, 'forward_records_from');
   if (!from) return { ...summary, skipped: 'forward records not started (forward_records_from)' };
 
   const { symbolIds, loadRows, barsOf } = await reader(db, o.sessions);
   const cashRate = await cashRateReader(db);
+  const clock = o.now ?? new Date();
+  const clockIso = clock.toISOString();
+  // The deadline's setting: a stored value that does not parse opens no re-check (the safe
+  // state at once, as before C16), and the run names it.
+  const minutes = await recheckMinutes(db);
+  if ('invalid' in minutes) {
+    summary.problems.push(
+      `red_recheck_minutes_before_open is ${minutes.invalid}, not whole minutes from 0 to ` +
+        `${RECHECK_MAX_MINUTES}: a red day gets the safe state at once (no re-check) until it is fixed`,
+    );
+  }
+  const deadlineOf = (date: TradingDate) =>
+    'minutes' in minutes ? recheckDeadline(date, o.sessions, minutes.minutes) : undefined;
 
   const healthOn = (rows: Rows, date: TradingDate) =>
     healthOf(db, symbolIds, rows, date, o.sessions);
@@ -124,8 +208,22 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
       continue;
     }
     const { strategy } = parsed;
+    const name = `${version.name} (${version.id})`;
     const deps = dependencies(strategy);
     const last = await lastEntry(db, version.id);
+    // At most one open re-check, on the day after the last entry (the forward step opens one only
+    // there and appends nothing after it): anything else is not what this step writes, and the
+    // version is left for the admins rather than recorded around it.
+    const open = await openRechecks(db, version.id);
+    /** The open re-check, until this run closes it. */
+    let pending: Recheck | undefined = open[0];
+    if (open.length > 1 || (pending && last && pending.date <= last.date)) {
+      summary.problems.push(
+        `${name}: open red re-checks ${open.map((r) => r.date).join(', ')} do not follow the ` +
+          `last entry (${last?.date ?? 'none'}); nothing recorded for the version`,
+      );
+      continue;
+    }
     const start = last ? last.date : from;
     const dates = o.sessions
       .between(start, o.to)
@@ -144,7 +242,61 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
     for (const date of dates) {
       const rows = upTo(all, date);
       const bars = barsOf(rows);
-      const decision = forwardDecision(strategy, date, bars, await healthOn(rows, date));
+      let decision: Decision = forwardDecision(strategy, date, bars, await healthOn(rows, date));
+      /** The open re-check this entry closes, and how. */
+      let closes: { row: Recheck; outcome: 'cleared' | 'safe_state' | 'late' } | undefined;
+      /** A red first grading recorded at once (no hourly check left before its deadline). */
+      let notRechecked: { deadline: string; provisional: RecheckDecision } | undefined;
+      if (pending && date === pending.date) {
+        const outcome = regrade({
+          red: decision.safeStateApplied,
+          clock: clock.getTime(),
+          deadline: Date.parse(pending.deadline),
+        });
+        if (outcome === 'pending') {
+          summary.rechecks.push({ version: name, date, deadline: pending.deadline, opened: false });
+          break;
+        }
+        if (outcome === 'late') {
+          // The instruction in force at the deadline: the provisional message's fallback.
+          const kept = readKeptDecision(pending.provisional);
+          if (!kept) {
+            summary.problems.push(
+              `${name} ${date}: the re-check's provisional decision does not read back; ` +
+                'nothing recorded (never on a guess)',
+            );
+            break;
+          }
+          decision = { date, ...kept, safeStateApplied: true };
+        }
+        closes = { row: pending, outcome };
+        pending = undefined;
+      } else if (pending) {
+        // The open re-check is on the first day after the last entry, so it comes first and
+        // stops the loop until it is final; any other order is not what this step writes.
+        summary.problems.push(
+          `${name}: ${date} comes before the open red re-check of ${pending.date}; nothing recorded`,
+        );
+        break;
+      } else if (decision.safeStateApplied) {
+        const deadline = deadlineOf(date);
+        if (deadline !== undefined) {
+          const provisional = keptDecision(decision);
+          if (firstGrading({ clock: clock.getTime(), deadline: Date.parse(deadline) }) === 'open') {
+            await insertRecheck(db, {
+              versionId: version.id,
+              date,
+              firstRedAt: clockIso,
+              firstRunId: o.runId,
+              deadline,
+              provisional,
+            });
+            summary.rechecks.push({ version: name, date, deadline, opened: true });
+            break;
+          }
+          notRechecked = { deadline, provisional };
+        }
+      }
       const equity = forwardEquity(strategy, prior, bars, cashRate, {
         date,
         signals: decision.signals ?? {},
@@ -152,28 +304,59 @@ export async function forward(db: Db, o: ForwardOptions): Promise<ForwardSummary
         holdings: decision.holdings,
         ties: decision.ties,
       });
-      const entry = await appendForward(
-        db,
-        version,
-        {
-          date,
-          allocation: decision.allocation,
-          holdings: decision.holdings,
-          safeStateApplied: decision.safeStateApplied,
-          dataStatus: decision.dataStatus,
-          equity,
-          detail: {
-            signals: decision.signals,
-            reasons: decision.reasons,
-            ties: decision.ties,
-            execution: strategy.execution,
-          },
+      const input = {
+        date,
+        allocation: decision.allocation,
+        holdings: decision.holdings,
+        safeStateApplied: decision.safeStateApplied,
+        dataStatus: decision.dataStatus,
+        equity,
+        detail: {
+          signals: decision.signals,
+          reasons: decision.reasons,
+          ties: decision.ties,
+          execution: strategy.execution,
+          // What was finally signaled after a re-check, with when (C16; in the hashed text).
+          ...(closes && { signaledAt: clockIso }),
         },
-        o.runId,
-      );
+      };
+      // The entry and what records it elsewhere commit together (or neither does).
+      const entry = await db.transaction(async (tx) => {
+        const appended = await appendForward(tx, version, input, o.runId);
+        if (closes) {
+          const { row, outcome } = closes;
+          await closeRecheck(tx, row.id, { finalAt: clockIso, finalRunId: o.runId, outcome });
+          // The first red grading as a note (requirements 04: kept as a note, never an edit).
+          await annotate(tx, {
+            versionId: version.id,
+            date,
+            kind: 'red_recheck',
+            detail: {
+              firstRedAt: row.firstRedAt,
+              reasons: row.reasons,
+              deadline: row.deadline,
+              outcome,
+              signaledAt: clockIso,
+            },
+            runId: o.runId,
+          });
+        }
+        if (notRechecked) {
+          await insertRecheck(tx, {
+            versionId: version.id,
+            date,
+            firstRedAt: clockIso,
+            firstRunId: o.runId,
+            ...notRechecked,
+            notRechecked: { finalRunId: o.runId },
+          });
+        }
+        return appended;
+      });
       prior.push(asDay(entry));
       summary.appended++;
       if (decision.safeStateApplied) summary.safeStateDays++;
+      if (closes) summary.finals.push({ version: name, date, outcome: closes.outcome });
       if (date === o.to) {
         summary.today.push({
           version: version.name,

@@ -27,6 +27,22 @@
       "title": "{strategy}: safe state for {date}",
       "body": "Data is not reliable enough for a normal signal, so the strategy's safe state applies."
     },
+    "recheck": {
+      "provisional": {
+        "title": "{strategy}: data problem for {date}, re-checking",
+        "body": "Data is not reliable enough for a normal signal yet. Saku checks it again every hour until {deadline} and then sends one final instruction.",
+        "fallback": "If it is still not reliable then, the strategy's safe state applies. Safe-state target: {holdings}.",
+        "wait": "Wait for the final instruction before trading on the signal of {date}; it arrives by {deadline}."
+      },
+      "cleared": {
+        "title": "{strategy}: data cleared for {date}",
+        "body": "The re-check found the data reliable, so the normal signal applies. This is the final instruction for {date}.",
+        "unchanged": "Allocation unchanged: {allocation} (signal of {date})."
+      },
+      "stands": "The data was still not reliable at the last re-check before {deadline}, so the safe state stands. This is the final instruction for {date}.",
+      "late": "Saku could not re-check the data before the deadline ({deadline}), so the safe state stands, as the provisional message said. This is the final instruction for {date}.",
+      "notRechecked": "This day was graded too close to its re-check deadline ({deadline}) or after it, so it is not re-checked: this is the final instruction."
+    },
     "drill": {
       "mark": "[DRILL]",
       "body": "This is a drill (pnpm drill): nothing was recorded, no data was changed and nothing needs to be done."

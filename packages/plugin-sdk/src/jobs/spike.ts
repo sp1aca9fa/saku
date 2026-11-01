@@ -113,11 +113,13 @@ export async function spikeReport(
   const secondaries = roles.filter((r) => r.role === 'secondary').map((r) => r.pluginKey);
   const symbols = await activeSymbols(db);
 
-  // Every daily run, oldest first; those that finished and stored results for their target.
+  // Every daily run, oldest first; those that finished and stored results for their target. A red
+  // re-check run (requirements 04, after the gate) is the daily job again for a day already
+  // processed: left out, so the day's own runs stay what is counted.
   const all = await db
     .select()
     .from(schema.jobRuns)
-    .where(eq(schema.jobRuns.jobType, 'daily'))
+    .where(and(eq(schema.jobRuns.jobType, 'daily'), eq(schema.jobRuns.recheck, false)))
     .orderBy(asc(schema.jobRuns.startedAt));
   const resultsOf = async (runId: string, date: TradingDate): Promise<Result[]> =>
     db

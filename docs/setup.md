@@ -59,9 +59,17 @@ sources you use (free accounts: Tiingo, Alpaca, Massive, FRED; ECB needs none). 
 pnpm db:migrate
 pnpm settings set base_currency <ISO code, e.g. EUR>   # once, before any data
 pnpm settings set time_zone <IANA zone, e.g. Europe/Paris>
+pnpm settings set red_recheck_minutes_before_open 60       # optional; 60 is the default
 pnpm symbols import templates/universe/us-etf-tier0.json
 pnpm user create <your username>                         # the first account is an admin
 ```
+
+`red_recheck_minutes_before_open` (whole minutes, 0 to 600; default 60): a day red at its first
+grading is checked again every hour until this many minutes before the next session's regular US
+open (09:30 New York, daylight saving followed), then its final instruction is sent (requirements
+04 "Red re-check before execution"; `docs/running.md`, "Red re-check runs"). A later deadline gives a
+corrected source more time but leaves you less time to read the final message before the open.
+A re-check already open keeps the deadline it opened with.
 
 ## 3. First data
 

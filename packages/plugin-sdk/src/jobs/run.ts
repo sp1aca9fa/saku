@@ -34,6 +34,7 @@ import {
   sendIntegrityFailed,
   sendJobFailure,
   sendParityFailed,
+  sendRecheckAlerts,
   sendRecomputeDiffers,
   sendRevisions,
   sendStandInClosures,
@@ -87,6 +88,13 @@ export interface RunOptions {
   afterDaily?: () => Promise<void>;
   /** On a complete daily or weekly run (stamp, heartbeat); returns whether the heartbeat was sent. */
   onComplete?: (job: 'daily' | 'weekly') => Promise<boolean>;
+  /**
+   * A red re-check run (requirements 04 "Red re-check before execution"): the daily job again for
+   * a day already processed, while a re-check is open (`cli/jobs.ts`). The same steps; recorded as
+   * a re-check run (the A1 gate counting leaves it out); `onComplete` is not called (the day's
+   * stamp and heartbeat belong to its own run, so the heartbeat keeps its meaning).
+   */
+  recheck?: boolean;
 }
 
 export interface RunResult {
@@ -97,7 +105,7 @@ export interface RunResult {
 
 export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Promise<RunResult> {
   const { job, target, sessions, log, alerting, now } = o;
-  const runId = await startRun(db, job, now, target);
+  const runId = await startRun(db, job, now, target, { recheck: o.recheck === true });
   let ok = false;
   let error: string | undefined;
   let heartbeatSent = false;
@@ -398,6 +406,8 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
         runId,
         sessions,
         to: target,
+        // The run's clock: a red day's re-check deadline is compared with it (requirements 04).
+        now: o.clock?.() ?? new Date(),
       });
       if (f.skipped) log.info(`Forward records: ${f.skipped}`);
       else {
@@ -405,6 +415,19 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
           `Forward records: ${f.appended} new entries, ${f.safeStateDays} on the safe state`,
         );
         for (const t of f.today) log.info(`${t.version}: ${t.allocation} (${t.dataStatus})`, t);
+        // A red day waiting for its re-check is data, not a failure: the run stays complete.
+        for (const r of f.rechecks) {
+          log.info(
+            `${r.version}: ${r.date} red, ${r.opened ? 're-check opened' : 'still red'}; ` +
+              `re-graded hourly until ${r.deadline}`,
+          );
+        }
+        for (const r of f.finals) log.info(`${r.version}: ${r.date} re-check final: ${r.outcome}`);
+        if (f.problems.length > 0) {
+          log.warn('Forward: days not recorded', { problems: f.problems });
+          markIncomplete('forward');
+          failures.push(...f.problems);
+        }
         // A stored version that no longer parses was skipped: the run is not complete, and the
         // admins' job-failure alert names each version and why (its days are caught up once the
         // definition parses again).
@@ -416,7 +439,12 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
             failures.push(`${e.version}: definition does not parse: ${e.error}`);
           }
         }
-        // Undelivered alerts are retried at the next check (sent ones are not repeated).
+        // Re-check messages first (a final before the next day's alert, which is compared with
+        // it), then the day alerts. Undelivered alerts are retried at the next check (sent ones
+        // are not repeated).
+        const rechecked = await sendRecheckAlerts(db, { ...alerting, sessions });
+        log.info(`Re-check alerts: ${rechecked.sent} sent`, { failed: rechecked.failed });
+        if (rechecked.failed.length > 0) markIncomplete('alerts');
         const sent = await sendStrategyAlerts(db, { ...alerting, sessions });
         log.info(`Alerts: ${sent.sent} sent`, { failed: sent.failed });
         if (sent.failed.length > 0) markIncomplete('alerts');
@@ -528,7 +556,7 @@ export async function runJob(db: Db, plugins: LoadedPlugins, o: RunOptions): Pro
     if (job === 'daily') await o.afterDaily?.();
     ok = incomplete.length === 0 && failures.length === 0;
     if (!ok) error = collected().join('; ');
-    if (ok && (job === 'daily' || job === 'weekly'))
+    if (ok && !o.recheck && (job === 'daily' || job === 'weekly'))
       heartbeatSent = (await o.onComplete?.(job)) ?? false;
   } catch (e) {
     ok = false;

@@ -613,6 +613,12 @@ export const jobRuns = sqliteTable(
     datesProcessed: text('dates_processed', { mode: 'json' }).$type<string[]>(),
     error: text('error'),
     heartbeatSent: integer('heartbeat_sent', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * A red re-check run (requirements 04 "Red re-check before execution"; 0014): a daily run for
+     * a day already processed, run again by the hourly check while a re-check is open. The A1
+     * gate counting leaves it out (the day's own run stays the day's run).
+     */
+    recheck: integer('recheck', { mode: 'boolean' }).notNull().default(false),
   },
   (t) => [
     index('job_runs_started_idx').on(t.jobType, t.startedAt),
@@ -727,6 +733,58 @@ export const forwardAnnotations = sqliteTable(
     createdAt: createdAt(),
   },
   (t) => [index('forward_annotations_version_idx').on(t.versionId, t.date)],
+);
+
+/**
+ * A day red at its first grading (requirements 04 "Red re-check before execution", decisions log
+ * 2026-11-01, C16; 0014), one row per version and date. Opened by the forward step with the first
+ * red grading (its time, reasons and decision, the provisional instruction's fallback) and the
+ * deadline; closed once with the final time and outcome, when the forward step appends the day's
+ * entry. A column once set is never changed and no row is deleted (triggers): the provisional and
+ * final sending times are filled once. `not_rechecked`: red at its first grading when no hourly
+ * check was left before the deadline (a late run), so the safe state was appended at once.
+ */
+export const RECHECK_OUTCOMES = ['cleared', 'safe_state', 'late', 'not_rechecked'] as const;
+export type RecheckOutcome = (typeof RECHECK_OUTCOMES)[number];
+
+export const redRechecks = sqliteTable(
+  'red_rechecks',
+  {
+    id: serial(),
+    versionId: text('version_id')
+      .notNull()
+      .references(() => strategyVersions.id),
+    date: text('date').notNull(),
+    /** The run's clock at the first red grading (ISO 8601 instant). */
+    firstRedAt: text('first_red_at').notNull(),
+    firstRunId: text('first_run_id').references(() => jobRuns.id),
+    /** The first red grading's reason codes. */
+    reasons: text('reasons', { mode: 'json' }).$type<string[]>().notNull(),
+    /** The re-check deadline (ISO 8601 instant): the next regular open less the setting. */
+    deadline: text('deadline').notNull(),
+    /**
+     * The first red grading's decision (allocation, holdings, data status, reasons, signals, ties):
+     * the safe-state instruction the provisional message gives as the fallback.
+     */
+    provisional: text('provisional', { mode: 'json' }).notNull(),
+    /** When the provisional message reached every channel it was sent to (null: not yet). */
+    provisionalSentAt: text('provisional_sent_at'),
+    /** The run's clock when the final instruction was decided and the entry appended. */
+    finalAt: text('final_at'),
+    finalRunId: text('final_run_id').references(() => jobRuns.id),
+    outcome: text('outcome', { enum: RECHECK_OUTCOMES }),
+    /** When the final message reached every channel it was sent to (null: not yet). */
+    finalSentAt: text('final_sent_at'),
+  },
+  (t) => [
+    uniqueIndex('red_rechecks_key_idx').on(t.versionId, t.date),
+    check(
+      'red_rechecks_outcome_check',
+      sql`${t.outcome} IS NULL OR ${oneOf(t.outcome, RECHECK_OUTCOMES)}`,
+    ),
+    // Closed with both its time and its outcome, or open with neither.
+    check('red_rechecks_final_check', sql`(${t.outcome} IS NULL) = (${t.finalAt} IS NULL)`),
+  ],
 );
 
 export const chainAnchors = sqliteTable('chain_anchors', {

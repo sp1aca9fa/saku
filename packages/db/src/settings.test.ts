@@ -4,6 +4,9 @@ import {
   getSetting,
   navTolerances,
   parseNavTolerances,
+  parseRecheckMinutes,
+  RECHECK_DEFAULT_MINUTES,
+  recheckMinutes,
   setSetting,
   unmatchedTolerances,
 } from './settings';
@@ -20,6 +23,27 @@ describe('settings', () => {
     await expect(setSetting(db, 'time_zone', 'Mars/Base')).rejects.toThrow();
     await setSetting(db, 'time_zone', 'Europe/Paris');
     expect(await getSetting(db, 'time_zone')).toBe('Europe/Paris');
+  });
+
+  it('validates the red re-check minutes: whole minutes 0..600, default 60', async () => {
+    const db = await testDb();
+    expect(RECHECK_DEFAULT_MINUTES).toBe(60);
+    expect(await recheckMinutes(db)).toEqual({ minutes: 60 });
+    for (const bad of ['', ' 60', '60 ', '-1', '1.5', '601', '1e2', 'sixty', '00601', '99999']) {
+      expect(parseRecheckMinutes(bad)).toBeNull();
+      await expect(setSetting(db, 'red_recheck_minutes_before_open', bad)).rejects.toThrow(/valid/);
+    }
+    for (const [text, n] of [
+      ['0', 0],
+      ['90', 90],
+      ['600', 600],
+    ] as const) {
+      await setSetting(db, 'red_recheck_minutes_before_open', text);
+      expect(await recheckMinutes(db)).toEqual({ minutes: n });
+    }
+    // A stored value that no longer parses (a hand edit) is reported, never read as the default.
+    await db.update(appSettings).set({ value: '9000' });
+    expect(await recheckMinutes(db)).toEqual({ invalid: '9000' });
   });
 
   it('validates the layer D NAV tolerances: a map of ticker to a fraction in (0, 0.2]', async () => {

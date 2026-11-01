@@ -48,6 +48,7 @@ import {
   type Db,
   USAGE_SYMBOL_WINDOW_MS,
   getSetting,
+  openRechecks,
   schema,
   standInList,
   standInMatchesBar,
@@ -202,6 +203,20 @@ export async function monthReady(
       why:
         `No complete daily run has processed ${last}, the last trading day of ${month}, yet ` +
         `(latest: ${daily ?? 'none'}).`,
+    };
+  }
+  // A day of the month red at its first grading has no entry until its re-check's final
+  // (requirements 04 "Red re-check before execution"): audited after it, so it is never read as a
+  // missing day. Before its deadline that is the normal wait; after it the daily job should have
+  // finished it (it may be stuck).
+  const open = (await openRechecks(db)).filter((r) => r.date <= last);
+  if (open.length > 0) {
+    const late = open.filter((r) => o.now.getTime() > Date.parse(r.deadline));
+    const list = open.map((r) => `${r.date} (deadline ${localTime(r.deadline, o.timeZone)})`);
+    return {
+      ok: false,
+      kind: late.length > 0 ? 'daily' : 'clock',
+      why: `Red re-checks of ${month} still open: ${[...new Set(list)].join(', ')} ${o.timeZone}.`,
     };
   }
   return { ok: true };

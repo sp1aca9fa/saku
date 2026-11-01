@@ -2,7 +2,9 @@
 //
 //   pnpm bootstrap         full history from every source (first install, new symbols)
 //   pnpm daily             once per trading day, at the first check after the day's data is
-//                          final; exits at once when the day is done (the hourly timer calls it)
+//                          final; exits at once when the day is done (the hourly timer calls it),
+//                          unless a red day waits for its re-check: then the daily job runs again
+//                          for it (a re-check run) until its final instruction (requirements 04)
 //   pnpm daily --force     run again for the latest final day
 //   pnpm weekly            full-history refetch (revisions reported), checks, recompute, layer E
 //   pnpm monthly           the audit report of the previous month (and earlier ones never
@@ -27,7 +29,7 @@
 import { Sessions } from '@saku/data';
 import { tradingDateOf } from '@saku/core';
 import { join } from 'node:path';
-import { activeSymbols, createDb } from '@saku/db';
+import { activeSymbols, createDb, openRechecks } from '@saku/db';
 import { backupDatabase, backupDir, localDay, pruneBackups } from '@saku/db/backup';
 import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
@@ -175,12 +177,22 @@ if (job === 'monthly') {
   process.exit(ok ? 0 : 1);
 }
 
+/**
+ * A red re-check run (requirements 04 "Red re-check before execution"): the day is done, but a day
+ * red at its first grading is graded again by every hourly check until its deadline.
+ */
+let recheck = false;
 if (job === 'daily' && !force && (readStamp('daily') ?? '') >= target) {
   // Done for the day; a heartbeat that failed then is tried again (not the whole run).
   if ((readStamp('heartbeat') ?? '') < target && (await heartbeat()))
     writeStamp('heartbeat', target);
-  held.release();
-  process.exit(0);
+  const open = await openRechecks(db);
+  if (open.length === 0) {
+    held.release();
+    process.exit(0);
+  }
+  recheck = true;
+  log.info(`Red re-check: ${open.map((r) => `${r.date} (deadline ${r.deadline})`).join(', ')}`);
 }
 
 // From here on, the jobs that record a run.
@@ -213,6 +225,7 @@ try {
     parityDir: join(findRepoRoot(), 'plugins', 'test', 'testfol'),
     beforeRefetch: backup,
     afterDaily: backup,
+    recheck,
     onComplete: async (ran) => {
       // The weekly run has its own check and no stamp.
       if (ran === 'weekly') return heartbeat('HEALTHCHECK_WEEKLY_URL');

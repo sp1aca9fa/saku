@@ -5,7 +5,7 @@
 import { type Json, canonicalJson } from '@saku/core';
 import { createHash } from 'node:crypto';
 import { and, asc, desc, eq, isNull, or } from 'drizzle-orm';
-import type { Db } from './client';
+import type { Db, Tx } from './client';
 import { forwardAnnotations, forwardEntries, journalEntries, strategyVersions } from './schema';
 
 export const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
@@ -78,7 +78,7 @@ export async function allVersions(db: Db): Promise<Version[]> {
   return db.select().from(strategyVersions).orderBy(asc(strategyVersions.registeredAt));
 }
 
-export async function lastEntry(db: Db, versionId: string): Promise<ForwardEntry | undefined> {
+export async function lastEntry(db: Db | Tx, versionId: string): Promise<ForwardEntry | undefined> {
   const [row] = await db
     .select()
     .from(forwardEntries)
@@ -99,9 +99,12 @@ export interface ForwardInput {
   detail: { [key: string]: Json };
 }
 
-/** Appends the next day of a version's forward record, chained to the previous hash. */
+/**
+ * Appends the next day of a version's forward record, chained to the previous hash. `db` may be a
+ * transaction, so an entry and what records it elsewhere (a closed re-check) commit together.
+ */
 export async function appendForward(
-  db: Db,
+  db: Db | Tx,
   version: Version,
   e: ForwardInput,
   runId: string | null,
@@ -142,6 +145,19 @@ export async function appendForward(
   return row!;
 }
 
+/** A version's entry for one date, if recorded. */
+export async function entryOn(
+  db: Db,
+  versionId: string,
+  date: string,
+): Promise<ForwardEntry | undefined> {
+  const [row] = await db
+    .select()
+    .from(forwardEntries)
+    .where(and(eq(forwardEntries.versionId, versionId), eq(forwardEntries.date, date)));
+  return row;
+}
+
 export async function forwardRecord(db: Db, versionId: string): Promise<ForwardEntry[]> {
   return db
     .select()
@@ -175,7 +191,7 @@ export async function verifyChain(db: Db, version: Version): Promise<string[]> {
 }
 
 export async function annotate(
-  db: Db,
+  db: Db | Tx,
   o: { versionId: string; date: string; kind: string; detail: Json; runId: string | null },
 ): Promise<void> {
   await db.insert(forwardAnnotations).values(o);

@@ -3,6 +3,7 @@ export * from './client';
 export * from './closed-events';
 export * from './env';
 export * from './market';
+export * from './rechecks';
 export * from './runs';
 export * from './settings';
 export * from './stand-ins';

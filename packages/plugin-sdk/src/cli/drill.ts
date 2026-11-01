@@ -2,7 +2,9 @@
 // copy of the database, with the real alert channels; every alert is marked as a drill. Nothing
 // is recorded: no forward record, timestamp, stamp, heartbeat or run in the live database
 // (jobs/drill.ts). Runs only on the server. Exits 0 only when the day was red, each registered
-// strategy applied its safe state and its alert reached at least one channel.
+// strategy applied its safe state, its provisional message reached at least one channel, and at
+// the simulated last re-check before the deadline it was still red and its final message ("the
+// safe state stands") reached at least one channel.
 import { Sessions } from '@saku/data';
 import { dbConfigFromEnv, loadRootEnv } from '@saku/db/env';
 import { drillSummary, redDrill } from '../jobs/drill';
