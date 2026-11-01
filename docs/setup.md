@@ -61,6 +61,8 @@ pnpm settings set base_currency <ISO code, e.g. EUR>   # once, before any data
 pnpm settings set time_zone <IANA zone, e.g. Europe/Paris>
 pnpm settings set red_recheck_minutes_before_open 60       # optional; 60 is the default
 pnpm symbols import templates/universe/us-etf-tier0.json
+# Tier 1 (benchmarks, diversification; 03-assets, stage C2): only when you start C2
+# pnpm symbols import templates/universe/us-etf-tier1.json
 pnpm user create <your username>                         # the first account is an admin
 ```
 

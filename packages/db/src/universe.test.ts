@@ -33,6 +33,34 @@ describe('Tier 0 universe template', () => {
     expect(symbols.every((s) => s.domicile === 'US')).toBe(true);
   });
 
+  it('the Tier 1 template (03-assets, C2) imports unleveraged US funds with no underlying', async () => {
+    const file = join(findRepoRoot(), 'templates', 'universe', 'us-etf-tier1.json');
+    const db = await testDb();
+    await upsertSymbols(db, parseSymbolList(JSON.parse(readFileSync(file, 'utf8'))));
+    const symbols = await activeSymbols(db);
+    expect(symbols.map((s) => s.ticker)).toEqual(
+      ['VT', 'VTI', 'IWM', 'EFA', 'VWO', 'SHY', 'AGG', 'TIP', 'VNQ', 'DBC'].concat([
+        'XLB',
+        'XLC',
+        'XLE',
+        'XLF',
+        'XLI',
+        'XLK',
+        'XLP',
+        'XLRE',
+        'XLU',
+        'XLV',
+        'XLY',
+      ]),
+    );
+    expect(
+      symbols.every(
+        (s) =>
+          s.tier === 1 && s.leverageFactor === 1 && s.domicile === 'US' && !s.underlyingSymbolId,
+      ),
+    ).toBe(true);
+  });
+
   it('refuses a universe file whose symbols do not state their leverage, or are malformed', () => {
     const ok = { ticker: 'AAA', tier: 0, assetClass: 'equity', currency: 'USD', leverageFactor: 1 };
     expect(

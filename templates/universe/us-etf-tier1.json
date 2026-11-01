@@ -1,0 +1,191 @@
+[
+  {
+    "ticker": "VT",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "Vanguard"
+  },
+  {
+    "ticker": "VTI",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "Vanguard"
+  },
+  {
+    "ticker": "IWM",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "iShares"
+  },
+  {
+    "ticker": "EFA",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "iShares"
+  },
+  {
+    "ticker": "VWO",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "Vanguard"
+  },
+  {
+    "ticker": "SHY",
+    "tier": 1,
+    "assetClass": "bond",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "iShares"
+  },
+  {
+    "ticker": "AGG",
+    "tier": 1,
+    "assetClass": "bond",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "iShares"
+  },
+  {
+    "ticker": "TIP",
+    "tier": 1,
+    "assetClass": "bond",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "iShares"
+  },
+  {
+    "ticker": "VNQ",
+    "tier": 1,
+    "assetClass": "real_estate",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "Vanguard"
+  },
+  {
+    "ticker": "DBC",
+    "tier": 1,
+    "assetClass": "commodity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "Invesco"
+  },
+  {
+    "ticker": "XLB",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  },
+  {
+    "ticker": "XLC",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  },
+  {
+    "ticker": "XLE",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  },
+  {
+    "ticker": "XLF",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  },
+  {
+    "ticker": "XLI",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  },
+  {
+    "ticker": "XLK",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  },
+  {
+    "ticker": "XLP",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  },
+  {
+    "ticker": "XLRE",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  },
+  {
+    "ticker": "XLU",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  },
+  {
+    "ticker": "XLV",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  },
+  {
+    "ticker": "XLY",
+    "tier": 1,
+    "assetClass": "equity",
+    "currency": "USD",
+    "leverageFactor": 1,
+    "domicile": "US",
+    "issuer": "State Street"
+  }
+]
