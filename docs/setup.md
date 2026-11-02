@@ -260,3 +260,5 @@ sudo systemctl daemon-reload && sudo systemctl enable --now saku-update.timer
 ```
 
 By hand, any time: `ssh -t <server> code/saku/ops/update-server.sh`.
+
+To turn the server off safely (waits for running jobs): see "Turning the server off" in `docs/running.md`.

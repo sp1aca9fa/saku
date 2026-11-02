@@ -71,6 +71,21 @@ happens at the next start. Services run at lower priority with a CPU cap.
   window of the next run, and by the weekly full-history run.
 - Jobs are safe to repeat: stored data is never overwritten, a changed value is a new revision.
 
+## Turning the server off
+
+```bash
+sudo ops/safe-shutdown.sh [--also <prefix>]... [--wait <minutes>] [--no-poweroff] [--dry-run]
+```
+
+It stops the `saku-*` timers (and `<prefix>-*` for each `--also`, for other apps on the machine),
+waits up to `--wait` minutes (default 15) while a job or update they trigger is running, stops the
+other matching services, syncs, and powers off. `--dry-run` lists what it would do and changes
+nothing. If a job is still running after the wait it asks before stopping it; with no answer (no
+terminal) it starts the timers again and shuts nothing down (exit 1). A stopped job is redone after
+the restart: its lock is taken over and the next run catches up (see "Locks, stamps and catching
+up"). The timers are only stopped, never disabled, so they come back at boot (with
+`--no-poweroff`, also by `sudo systemctl start <timers>`, which the script prints).
+
 ## Red re-check runs
 
 A strategy's day that is red at its first grading (after the A1 gate) is not recorded at once
