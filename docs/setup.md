@@ -235,10 +235,11 @@ Users' languages: `pnpm settings set primary_language ja` (the default for users
 
 Each daily run writes `~/.local/share/saku/backups/saku-<date>.db.gz` (checked with SQLite's
 integrity check before it is kept) and keeps 30 days plus the first of each month for 12 months.
-`pnpm backup` makes one now. Copy them off the machine; from another computer, for example:
+`pnpm backup` makes one now. Copy them off the machine with `ops/copy-backups.sh` from another
+computer (a Windows scheduled task can run it; see `docs/backups.md`):
 
 ```bash
-rsync -a --delete <server>:.local/share/saku/backups/ ~/saku-backups/
+ops/copy-backups.sh <server>
 ```
 
 `pnpm restore <file> [target.db]` unpacks a backup into a new database file only (never over an

@@ -21,15 +21,36 @@ logs.
 
 ## Off-machine copy
 
-A backup on the same machine does not survive losing the machine. Copy them elsewhere, for
-example from another computer with `rsync` (placeholder host and user):
+A backup on the same machine does not survive losing the machine. `ops/copy-backups.sh` copies
+the server's backups to the PC you read results on, over ssh (the ssh host must log in with a key,
+no password; the script never prompts), and keeps an analysis copy there (the newest backup,
+unpacked) for read-only tools.
 
 ```bash
-rsync -a --delete <user>@<server>:.local/share/saku/backups/ ~/saku-backups/
+ops/copy-backups.sh <server> [folder]            # copy now
+ops/copy-backups.sh install <server> [folder]    # Windows, from WSL: register the scheduled task
 ```
 
-Run it from a scheduler on that computer (cron or a systemd timer), and check now and then that
-the newest file is recent. `--delete` mirrors the server's pruning; drop it to keep everything.
+- `install` registers (or replaces) the Windows task `saku-backup-copy`: it runs 10 minutes after
+  logon and every 6 hours from 00:30 while the PC is on, catches up after sleep, and runs in a
+  hidden console (no window). The folder is made absolute and stored in the task.
+- Folder for the copies: the argument, else `SAKU_COPY_DIR`, else `~/backups/saku`. It is never
+  this machine's own data folder, so local development backups do not mix with the server's.
+- Remote folder: `SAKU_REMOTE_BACKUP_DIR`, else `.local/share/saku/backups` (relative to the ssh
+  user's home). Only `saku-*.db.gz` files are copied.
+- The copy mirrors the server's pruning (`--delete`), but only when the server holds 3 or more
+  non-empty backups. With fewer (a new or wiped disk) nothing is deleted here and the log says so. If the
+  count itself fails (ssh error), the run stops without copying or deleting.
+- Analysis copy: `SAKU_ANALYSIS_DB`, else `saku/analysis/saku.db` under the data folder
+  (`SAKU_DATA_DIR`, else `$XDG_DATA_HOME` or `~/.local/share`). It is refreshed only when the
+  newest local backup is newer. The backup is unpacked to a `.part` file, checked with SQLite's
+  integrity check (if `sqlite3` is installed; otherwise the log says the check was skipped), then
+  moved into place. If that fails, the old copy stays and the run exits with an error.
+- The script refuses to run when `CI` or `VERCEL` is set.
+- Log: `copy-backups.log` in the state folder (`SAKU_STATE_DIR`, else `$XDG_STATE_HOME` or
+  `~/.local/state`, under `saku`), one dated header per run, the number of local backups and the
+  newest name. Check now and then that the newest name is recent:
+  `tail -n 20 ~/.local/state/saku/copy-backups.log`.
 
 ## Restore
 
