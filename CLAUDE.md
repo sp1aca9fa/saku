@@ -77,27 +77,23 @@ Every user-facing string goes through `packages/content` (next-intl); `en.json` 
 - CI gates: lint, typecheck, tests, build, `pnpm docs:check`, tooltip and metric coverage; language coverage from D1.
 
 ## Agents (the main session orchestrates)
-Agents are shared across projects (the `selfhost-blueprint` repo's `claude/agents`, linked into `~/.claude`); this project's profile is `docs/agents.md` (the app, trust territory, domain checklist, and the model and effort per role: pass those as `model` and `effort` every time an agent is started). `/ship <task>` runs the whole loop. The main session plans, writes the spec, routes, triages and commits; it implements only trivial changes itself (a review fix of a few lines, docs, a comment). Subagents cannot spawn subagents.
+The loop is the shared `/ship` (`~/.claude/commands/ship.md`, from the `selfhost-blueprint` repo
+linked into `~/.claude`): tiers 0-3 decided by the changed files, Tier 3 handling, which questions
+may stop the work, how to write for the owner, the setup review. Read it before any Tier 1-3 work,
+with or without `/ship`. This project's profile is `docs/agents.md`: risk class, trust-territory
+paths, domain checklist, the model and effort per role (pass them as `model` and `effort` every
+time an agent is started), the owner's list, standing rules. The main session plans, writes the
+spec, routes, triages and commits; it implements only trivial changes itself (a review fix of a
+few lines, docs, a comment). Subagents cannot spawn subagents.
 
-**Tiers** (judge by the diff; trust territory decides the whole change):
 | Tier | When | Review |
 |---|---|---|
 | 0 | Docs, comments, config with no behavior change, test-only changes, a renaming refactor with unchanged tests | None; CHECKS only |
 | 1 | Product code outside trust territory (CLI wording and glue, tooling, ops scripts with no data effect; UI without numbers or signals) | `code-reviewer-light`; `ux-reviewer` if UI |
-| 2 | Trust territory: data pipeline, checks and health, engine, indicators, backtests, forward records and chain, alerts about signals, money, tax, auth and authorization, migrations, secrets handling; any new page | `code-reviewer`; `ux-reviewer` and `trust-reviewer` if UI |
+| 2 | A file on the trust-territory paths (`docs/agents.md`); any new page | `code-reviewer`; `ux-reviewer` and `trust-reviewer` if UI |
+| 3 | Tier 2 the normal loop cannot verify (`/ship` section 1 triggers) | plan review, then normal and adversarial review, `triage` |
 
-A Tier 0 or 1 change that fails CHECKS twice moves up a tier. Never review Tier 0 "to be safe".
-
-**Loop:**
-1. Spec in `.agent-runs/<date>-<slug>/spec.md` (`docs/spec-template.md`): goal, acceptance criteria, the requirement sections it rests on (point to them, don't copy), tier. Unclear current-stage details: the conservative reading, under "Assumed". Unclear later-stage details: left out and put to the owner.
-2. Build: `builder` for routine chunks, `builder-heavy` for trust territory, design, an ambiguous spec, or after a builder failed. Give the spec path, the chunk and CHECKS; never paste code. Chunks are reviewed per chunk, not per edit.
-3. Gates: CHECKS (`pnpm check:all`); on failure back to the builder, at most 2 tries. From D1, Tier 1 and 2 UI: the page crawler once for the changed pages.
-4. Review: the tier's reviewers in one message (parallel). Code reviewers get the commit range, spec path and CHECKS output. UX and trust reviewers get only screenshot paths and one line per page (`docs/pages.md`), nothing else.
-5. Triage: the main session verifies a single reviewer's findings against the code itself; `triage` only when two or more reviewers ran. Fixes go to a builder in one batch (or are done directly when trivial). Re-review only Tier 2 logic fixes, by the reviewer whose finding it was; fixes that only touch comments, docs or tests are not re-reviewed. At most 2 fix rounds; what is still open goes in the report.
-6. Log facts in `.agent-runs/<date>-<slug>/log.md` (tier and why, chunks, gate results, finding counts, decisions) and one row per reviewer run in `plugins/ops/agent-ledger.csv` (`date,slug,tier,reviewer,findings,accepted,rejected,duplicate`). Update `plugins/ops/actions.md` (steps, decisions, work log).
-7. `summarizer` for long logs, check output, crawl reports or pasted server output.
-
-**Stop and ask** only for: a destructive or irreversible action; pushing or deploying; a new dependency, external service or cost; a request that conflicts with the requirements; a choice that changes what a signal means, how money or risk is shown, or which data is trusted, that the requirements do not decide; two failed fix rounds on a bug. When the owner asked for continuous work, prepare the decision, put it in `plugins/ops/actions.md` section C with a recommendation, and continue with other work.
+UI reviews (`ux-reviewer`, `trust-reviewer`, the page crawler) start at D1.
 
 ## Communication
 The report after each task (and at the end of a `/ship` run), short, no step recap:

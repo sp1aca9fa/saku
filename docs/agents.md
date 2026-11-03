@@ -1,8 +1,8 @@
 # Agent profile
 
 Read by the shared agents (the `selfhost-blueprint` repo's `claude/agents`, linked into
-`~/.claude`) and by the orchestrator. The loop, tiers and report format are in `CLAUDE.md`
-("Agents").
+`~/.claude`) and by the orchestrator. The loop and tiers are the shared `/ship`
+(`~/.claude/commands/ship.md`); the report format is in `CLAUDE.md`.
 
 ## The app
 
@@ -17,11 +17,23 @@ once written, cannot be corrected (only annotated).
   break).
 - Private: `plugins/ops/claude-rules.md` (read it if it exists).
 
+## Risk class
+
+A (silent and lasting): forward records are hash-chained and never corrected, and signals, money
+and tax are acted on.
+
 ## Trust territory (Tier 2)
 
-Data pipeline, checks and data health, engine and indicators, backtests, forward records and the
-hash chain, alerts about signals, money, tax, auth and authorization, migrations, secrets
+Areas: data pipeline, checks and data health, engine and indicators, backtests, forward records
+and the hash chain, alerts about signals, money, tax, auth and authorization, migrations, secrets
 handling; any new page.
+
+Paths (a changed file here makes the change Tier 2):
+- `packages/core/`, `packages/reference/`, `packages/data/`, `packages/db/`, `packages/auth/`
+- `packages/plugin-sdk/src/` except `cli/` files that only change wording or argument parsing
+- `plugins-public/src/`, `plugins/` code (not `plugins/ops/`)
+- `ops/update-server.sh`, `ops/ci-status.sh`, `ops/systemd/`
+- any app page or server route (from D1)
 
 ## Domain checklist
 
@@ -37,8 +49,17 @@ handling; any new page.
 
 ## Owner decides
 
-What a signal means, how money or risk is shown, which data is trusted (when the requirements do
-not decide), requirement changes, new dependencies, services or costs.
+A closed list; anything else the orchestrator decides and reports. What a signal means, how money
+or risk is shown, which data is trusted (when the requirements do not decide), requirement
+changes, tax rules the owner's cases do not settle.
+
+## Standing rules
+
+- 2026-10-29: reviewer findings: fix what is right, take the recommended option on cosmetic
+  asks, skip what is wrong; ideas that fit the current stage are built, others go to
+  `docs/backlog.md`.
+- 2026-11-01: admin-only operational alerts (about the server and the runs, never data or
+  signals) may go out before the A1 gate.
 
 ## Texts and time
 
@@ -59,6 +80,7 @@ The orchestrator passes these values as `model` and `effort` when it starts each
 | builder-heavy | opus | high | chained records and money: mistakes cannot be recomputed away |
 | code-reviewer-light | sonnet | medium | |
 | code-reviewer | opus | high | accepted findings in nearly every run so far |
+| Tier 3: builder-heavy, code-reviewer | opus | xhigh | plan, build, normal and adversarial review |
 | ux-reviewer | sonnet | medium | Tier 1 and 2 UI, from D1 |
 | trust-reviewer | sonnet | medium | Tier 2 UI, from D1 |
 | triage | opus | medium | when two or more reviewers ran |
@@ -67,12 +89,18 @@ The orchestrator passes these values as `model` and `effort` when it starts each
 ## Reviews used
 
 - Tier 0: none. Tier 1: code-reviewer-light (+ ux-reviewer if UI, from D1). Tier 2:
-  code-reviewer (+ ux-reviewer and trust-reviewer if UI, from D1).
+  code-reviewer (+ ux-reviewer and trust-reviewer if UI, from D1). Tier 3: code-reviewer on the
+  plan, then code-reviewer normal and adversarial, triage.
 - Page crawler for screenshots: from D1 (phone, wide, dark; Japanese too when translated).
 
 ## Paths
 
 - Spec template: `docs/spec-template.md`.
 - Run logs: `.agent-runs/<date>-<slug>/` (git-ignored).
-- Ledger: `plugins/ops/agent-ledger.csv`.
+- Ledgers: `plugins/ops/agent-ledger.csv` (per reviewer run), `plugins/ops/run-ledger.csv` (per
+  task, from 2026-11-03).
 - Owner's actions: `plugins/ops/actions.md` (done items and the work log in `actions-done.md`).
+
+## Setup changes
+
+- 2026-11-03: risk class A recorded; Tier 3 row added (`xhigh`); run ledger started.
