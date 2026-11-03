@@ -55,6 +55,8 @@ changes, tax rules the owner's cases do not settle.
 
 ## Standing rules
 
+Confirmed by the owner 2026-11-04.
+
 - 2026-10-29: reviewer findings: fix what is right, take the recommended option on cosmetic
   asks, skip what is wrong; ideas that fit the current stage are built, others go to
   `docs/backlog.md`.
