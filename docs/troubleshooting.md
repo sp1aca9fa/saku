@@ -194,7 +194,18 @@ Pings only follow a fully successful run: the daily one (`HEALTHCHECK_URL`) and 
 
 The update script goes back to the previous version when a step fails and does not retry that
 version until a newer push; the admins are alerted. The reason is in
-`~/.local/state/saku/update.log`.
+`~/.local/state/saku/update.log`. When going back fails too (the log says "Going back failed too"),
+the alert says the server is stuck and healthchecks.io gets a failure. That log line names the
+version to go back to (`<before>`); go back by hand, then read what each command prints:
+
+```bash
+cd ~/code/saku
+git reset --hard <before> && git submodule update --init --force
+# The Node that version names (the failed update may have moved the link to a newer one):
+nvm install && nvm use
+ln -sfn "$(dirname "$(dirname "$(nvm which "$(cat .nvmrc)")")")" ~/.local/share/saku/node
+pnpm install --frozen-lockfile
+```
 
 ## Jobs refuse to run
 

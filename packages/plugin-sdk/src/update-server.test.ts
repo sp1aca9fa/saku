@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -81,7 +82,9 @@ beforeEach(() => {
   mkdirSync(join(dir, 'bin'));
   writeFileSync(
     join(dir, 'gitconfig'),
-    '[user]\n\tname = Test\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n',
+    // File transport for the private submodule's throwaway repo (the server uses ssh).
+    '[user]\n\tname = Test\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n' +
+      '[protocol "file"]\n\tallow = always\n',
   );
   git(dir, 'init', '-q', '--bare', 'origin.git');
   git(dir, 'clone', '-q', 'origin.git', 'work');
@@ -520,5 +523,273 @@ describe('ops/update-server.sh by hand', () => {
     expect(r.status).toBe(0);
     expect(r.out).toContain(`CI passed on ${git(repo, 'rev-parse', '--short', second)}.`);
     expect(head()).toBe(second);
+  });
+});
+
+// The private submodule's folder move (plugins/ to private/, its name staying `plugins`), as the
+// server's checkout lives it: a bare private repo, the old layout on origin, the server's clone
+// with its own submodule url (the deploy-key alias; the url in .gitmodules does not exist here).
+describe('ops/update-server.sh: the private folder move', () => {
+  const REAL_GIT = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  // Fake git: the real one, recording each call in "git-calls", except that a call starting with
+  // the first line of "git-fails" fails from its Nth time on (N: the second line).
+  const FAKE_GIT = `#!/usr/bin/env bash
+echo "$*" >>"$FAKE_DIR/git-calls"
+if [ -e "$FAKE_DIR/git-fails" ] && [[ "$*" == "$(sed -n 1p "$FAKE_DIR/git-fails")"* ]]; then
+  n=$(( $(cat "$FAKE_DIR/git-count" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" >"$FAKE_DIR/git-count"
+  if [ "$n" -ge "$(sed -n 2p "$FAKE_DIR/git-fails")" ]; then echo "fake git: $* failed" >&2; exit 1; fi
+fi
+exec ${REAL_GIT} "$@"
+`;
+  let priv: string;
+  let p0: string;
+  let c0: string;
+
+  const pwork = () => join(dir, 'pwork');
+  const work = () => join(dir, 'work');
+
+  /** A new commit on the private repo's main, its src/index.ts holding `text`; returns its sha. */
+  function pushPrivate(text: string): string {
+    writeFileSync(join(pwork(), 'src', 'index.ts'), `${text}\n`);
+    git(pwork(), 'commit', '-qam', text);
+    git(pwork(), 'push', '-q', 'origin', 'main');
+    return git(pwork(), 'rev-parse', 'HEAD');
+  }
+
+  /** A commit on origin's main with the submodule `name` at `path` on `sha`; returns its sha. */
+  function pushLayout(message: string, path: string, sha: string, name = 'plugins'): string {
+    for (const old of ['plugins', 'private']) {
+      git(work(), 'rm', '-q', '--cached', '--ignore-unmatch', old);
+      rmSync(join(work(), old), { recursive: true, force: true });
+    }
+    writeFileSync(
+      join(work(), '.gitmodules'),
+      `[submodule "${name}"]\n\tpath = ${path}\n\turl = /nonexistent/saku-private.git\n`,
+    );
+    git(work(), 'update-index', '--add', '--cacheinfo', `160000,${sha},${path}`);
+    git(work(), 'add', '.gitmodules');
+    git(work(), 'commit', '-qm', message);
+    git(work(), 'push', '-q', 'origin', 'main');
+    // Not checked out in this clone: an empty folder, so `commit -a` keeps the submodule.
+    mkdirSync(join(work(), path), { recursive: true });
+    return git(work(), 'rev-parse', 'HEAD');
+  }
+
+  /** A commit moving the submodule (at `path`) to the private repo's `sha`. */
+  function pushBump(sha: string, path = 'private'): string {
+    git(work(), 'update-index', '--cacheinfo', `160000,${sha},${path}`);
+    git(work(), 'commit', '-qm', `bump ${path}`);
+    git(work(), 'push', '-q', 'origin', 'main');
+    return git(work(), 'rev-parse', 'HEAD');
+  }
+
+  const raw = (...args: string[]) =>
+    spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: gitEnv() }).stdout;
+  const porcelain = () => git(repo, 'status', '--porcelain');
+  const worktree = () =>
+    git(repo, 'config', '-f', join('.git', 'modules', 'plugins', 'config'), 'core.worktree');
+  const content = (folder: string) =>
+    readFileSync(join(repo, folder, 'src', 'index.ts'), 'utf8').trim();
+  const up = (from: string, to: string, sub: string) =>
+    `Saku is up: ${shortOf(from)} -> ${shortOf(to)} (plug-ins ${sub.slice(0, 7)}).`;
+
+  beforeEach(() => {
+    priv = join(dir, 'priv.git');
+    git(dir, 'init', '-q', '--bare', 'priv.git');
+    git(dir, 'clone', '-q', 'priv.git', 'pwork');
+    mkdirSync(join(pwork(), 'src'));
+    writeFileSync(join(pwork(), 'src', 'index.ts'), 'v0\n');
+    git(pwork(), 'add', 'src');
+    git(pwork(), 'commit', '-qm', 'v0');
+    git(pwork(), 'push', '-q', 'origin', 'main');
+    p0 = git(pwork(), 'rev-parse', 'HEAD');
+    c0 = pushLayout('old layout', 'plugins', p0);
+    // The server on the old layout, its private checkout made as docs/setup.md says.
+    git(repo, 'fetch', '-q', 'origin');
+    git(repo, 'merge', '-q', '--ff-only', 'origin/main');
+    git(repo, 'config', 'submodule.plugins.url', priv);
+    git(repo, 'submodule', 'update', '--init', '-q');
+    expect(content('plugins')).toBe('v0');
+    ci('success');
+  });
+
+  it('moves: the same module folder, the deploy-key url kept, the old folder left untracked', () => {
+    const c1 = pushLayout('move', 'private', p0);
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(head()).toBe(c1);
+    expect(readFileSync(join(repo, 'private', '.git'), 'utf8').trim()).toBe(
+      'gitdir: ../.git/modules/plugins',
+    );
+    expect(worktree()).toBe('../../../private');
+    expect(git(repo, 'config', 'submodule.plugins.url')).toBe(priv);
+    expect(git(join(repo, 'private'), 'remote', 'get-url', 'origin')).toBe(priv);
+    expect(raw('config', '--get', 'submodule.private.url')).toBe('');
+    expect(raw('submodule', 'status')).toMatch(new RegExp(`^ ${p0} private `));
+    expect(porcelain()).toBe('?? plugins/');
+    expect(content('private')).toBe('v0');
+    expect(log()).toContain(up(c0, c1, p0));
+    expect(existsSync(join(state, 'update-failed'))).toBe(false);
+  });
+
+  it('a failed check goes back across the move and alerts (not stuck)', () => {
+    const c1 = pushLayout('move', 'private', p0);
+    writeFileSync(join(dir, 'pnpm-fails'), 'test');
+    expect(run().status).toBe(1);
+    expect(head()).toBe(c0);
+    expect(log()).toContain(
+      `Update to ${shortOf(c1)} failed at 'check': going back to ${shortOf(c0)}.`,
+    );
+    expect(log()).toContain(`Back on ${shortOf(c0)}.`);
+    expect(read('pnpm-calls')).toContain(
+      `alert update-failed --from ${shortOf(c0)} --to ${shortOf(c1)} --step check\n`,
+    );
+    expect(read('pnpm-calls')).not.toContain('--stuck');
+    expect(raw('submodule', 'status')).toMatch(new RegExp(`^ ${p0} plugins `));
+    expect(worktree()).toBe('../../../plugins');
+    expect(porcelain()).toBe('?? private/');
+    expect(content('plugins')).toBe('v0');
+    expect(readFileSync(join(state, 'update-failed'), 'utf8').trim()).toBe(c1);
+  });
+
+  it('after a failed move, the next push moves again; a later bump lands in private/', () => {
+    pushLayout('move', 'private', p0);
+    writeFileSync(join(dir, 'pnpm-fails'), 'test');
+    expect(run().status).toBe(1);
+    rmSync(join(dir, 'pnpm-fails'));
+    const c2 = push('second');
+    expect(run().status).toBe(0);
+    expect(head()).toBe(c2);
+    expect(worktree()).toBe('../../../private');
+    expect(porcelain()).toBe('?? plugins/');
+
+    const p1 = pushPrivate('v1');
+    const c3 = pushBump(p1);
+    expect(run().status).toBe(0);
+    expect(head()).toBe(c3);
+    expect(content('private')).toBe('v1');
+    expect(content('plugins')).toBe('v0');
+    expect(log()).toContain(up(c2, c3, p1));
+  });
+
+  it('undo after the move: a commit moving back recreates plugins/ from the module folder', () => {
+    pushLayout('move', 'private', p0);
+    expect(run().status).toBe(0);
+    renameSync(join(repo, 'plugins'), join(dir, 'old-plugins-folder'));
+    const back = pushLayout('move back', 'plugins', p0);
+    expect(run().status).toBe(0);
+    expect(head()).toBe(back);
+    expect(content('plugins')).toBe('v0');
+    expect(raw('submodule', 'status')).toMatch(new RegExp(`^ ${p0} plugins `));
+    expect(worktree()).toBe('../../../plugins');
+    expect(porcelain()).toBe('?? private/');
+  });
+
+  it('undo after a bump: moving back keeps the bumped private commit', () => {
+    pushLayout('move', 'private', p0);
+    expect(run().status).toBe(0);
+    renameSync(join(repo, 'plugins'), join(dir, 'old-plugins-folder'));
+    const p1 = pushPrivate('v1');
+    pushBump(p1);
+    expect(run().status).toBe(0);
+    const back = pushLayout('move back', 'plugins', p1);
+    expect(run().status).toBe(0);
+    expect(head()).toBe(back);
+    expect(content('plugins')).toBe('v1');
+    expect(raw('submodule', 'status')).toMatch(new RegExp(`^ ${p1} plugins `));
+    expect(porcelain()).toBe('?? private/');
+  });
+
+  it('undo after a bump with the old plugins/ folder still there: it gets the bumped commit', () => {
+    pushLayout('move', 'private', p0);
+    expect(run().status).toBe(0);
+    const p1 = pushPrivate('v1');
+    pushBump(p1);
+    expect(run().status).toBe(0);
+    // The leftover holds the old commit's files, its .git file pointing at the shared module.
+    expect(content('plugins')).toBe('v0');
+    const back = pushLayout('move back', 'plugins', p1);
+    expect(run().status).toBe(0);
+    expect(head()).toBe(back);
+    expect(content('plugins')).toBe('v1');
+    expect(raw('submodule', 'status')).toMatch(new RegExp(`^ ${p1} plugins `));
+    expect(worktree()).toBe('../../../plugins');
+    expect(git(join(repo, 'plugins'), 'status', '--porcelain')).toBe('');
+    expect(porcelain()).toBe('?? private/');
+  });
+
+  it('a move that also bumps the private commit, then fails: back on the old commit, clean', () => {
+    const p1 = pushPrivate('v1');
+    const c1 = pushLayout('move and bump', 'private', p1);
+    writeFileSync(join(dir, 'pnpm-fails'), 'test');
+    expect(run().status).toBe(1);
+    expect(head()).toBe(c0);
+    expect(log()).toContain(`Back on ${shortOf(c0)}.`);
+    expect(read('pnpm-calls')).toContain(`--to ${shortOf(c1)} --step check\n`);
+    expect(read('pnpm-calls')).not.toContain('--stuck');
+    expect(raw('submodule', 'status')).toMatch(new RegExp(`^ ${p0} plugins `));
+    expect(content('plugins')).toBe('v0');
+    expect(git(join(repo, 'plugins'), 'status', '--porcelain')).toBe('');
+
+    // The next push moves again over the copy that failed: private/ at the bumped commit, clean.
+    rmSync(join(dir, 'pnpm-fails'));
+    const c2 = push('second');
+    expect(run().status).toBe(0);
+    expect(head()).toBe(c2);
+    expect(content('private')).toBe('v1');
+    expect(raw('submodule', 'status')).toMatch(new RegExp(`^ ${p1} private `));
+    expect(worktree()).toBe('../../../private');
+    expect(git(join(repo, 'private'), 'status', '--porcelain')).toBe('');
+    expect(porcelain()).toBe('?? plugins/');
+    expect(log()).toContain(up(c0, c2, p1));
+  });
+
+  for (const [what, call, nth] of [
+    ['the submodule update', 'submodule update', '2'],
+    ['the reset', 'reset', '1'],
+  ] as const) {
+    it(`${what} failing on the way back: stuck, alerted, healthchecks.io told, logged`, () => {
+      writeFileSync(join(dir, 'bin', 'git'), FAKE_GIT);
+      chmodSync(join(dir, 'bin', 'git'), 0o755);
+      writeFileSync(join(dir, 'git-fails'), `${call}\n${nth}\n`);
+      writeFileSync(join(repo, '.env'), 'HEALTHCHECK_URL=https://hc.example/ping/abc\n');
+      const c1 = pushLayout('move', 'private', p0);
+      writeFileSync(join(dir, 'pnpm-fails'), 'test');
+      expect(run().status).toBe(1);
+      expect(log()).toContain(`fake git: ${call}`);
+      // The stuck line gives the way back by hand, with the version to go back to.
+      expect(log()).toContain(
+        `Going back failed too: the jobs may not run. Go back by hand, in ${repo}: ` +
+          `git reset --hard ${shortOf(c0)} && git submodule update --init --force, then the Node ` +
+          'link and pnpm install --frozen-lockfile (docs/troubleshooting.md, "An update rolled back")',
+      );
+      expect(log()).not.toContain('Back on');
+      expect(read('pnpm-calls')).toContain(
+        `alert update-failed --from ${shortOf(c0)} --to ${shortOf(c1)} --step check --stuck`,
+      );
+      expect(read('pnpm-calls')).toContain(
+        `update:log --from ${shortOf(c0)} --to ${shortOf(c1)} --failed check`,
+      );
+      // Installed going forward and again on the way back, after the failed step.
+      expect(read('pnpm-calls').match(/install --frozen-lockfile/g)).toHaveLength(2);
+      expect(read('curl-calls')).toContain('https://hc.example/ping/abc/fail');
+      // Each step of the way back runs even when the one before it failed.
+      const calls = read('git-calls').split('\n');
+      const reset = calls.indexOf(`reset -q --hard ${shortOf(c0)}`);
+      expect(reset).toBeGreaterThan(-1);
+      expect(calls.lastIndexOf('submodule update --init --force')).toBeGreaterThan(reset);
+    });
+  }
+
+  it('a renamed submodule name loses the deploy-key url: fails at pull, goes back', () => {
+    const c1 = pushLayout('move, renamed', 'private', p0, 'private');
+    expect(run().status).toBe(1);
+    expect(head()).toBe(c0);
+    expect(log()).toContain(`Update to ${shortOf(c1)} failed at 'pull'`);
+    expect(log()).toContain(`Back on ${shortOf(c0)}.`);
+    expect(read('pnpm-calls')).toContain(`--to ${shortOf(c1)} --step pull\n`);
+    expect(git(repo, 'config', 'submodule.plugins.url')).toBe(priv);
+    expect(content('plugins')).toBe('v0');
   });
 });

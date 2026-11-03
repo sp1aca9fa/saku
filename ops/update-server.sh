@@ -199,6 +199,19 @@ ci_waits() {
   ci_write
 }
 
+# The private submodule's checked-out commit (short), from `git submodule status` so it holds
+# wherever .gitmodules puts the folder; none when there is no submodule or it is not checked out
+# (`git -C <folder>` in an empty folder would answer for the main repo instead).
+private_head() {
+  local line
+  line="$(git submodule status 2>/dev/null)" || line=""
+  line="${line%%$'\n'*}"
+  case "$line" in
+    '' | -*) echo none ;;
+    *) printf '%s\n' "${line:1:7}" ;;
+  esac
+}
+
 # The new version starts and passes its own checks.
 check_version() {
   pnpm --silent plugins >/dev/null && pnpm typecheck && pnpm test
@@ -281,8 +294,13 @@ main() {
     shift
     "$@"
   }
+  # --force: the private checkout exactly at the commit the new version records, also when the
+  # update moves its folder onto a copy left from an earlier layout (the submodule's index then
+  # describes the other folder, and a plain checkout refuses or leaves stale files). Tracked edits
+  # in that checkout are discarded (the server never edits it); untracked files stay unless the new
+  # commit tracks the same path (then they are overwritten).
   if run pull git merge -q --ff-only "$target" &&
-    run pull git submodule update --init &&
+    run pull git submodule update --init --force &&
     run node ensure_node &&
     run install pnpm install --frozen-lockfile &&
     run migrate pnpm db:migrate &&
@@ -290,7 +308,7 @@ main() {
     local after
     after="$(git rev-parse --short HEAD)"
     rm -f "$failed_file" "$ci_file"
-    echo "Saku is up: $before -> $after (plug-ins $(git -C plugins rev-parse --short HEAD 2>/dev/null || echo none))."
+    echo "Saku is up: $before -> $after (plug-ins $(private_head))."
     if [ "$before" != "$after" ]; then
       pnpm --silent update:log --from "$before" --to "$after" || true
     fi
@@ -300,14 +318,19 @@ main() {
   echo "$target" >"$failed_file"
   target="$short"
   echo "Update to $target failed at '$step': going back to $before."
-  git reset -q --hard "$before"
-  git submodule update --init
+  # Every step of the way back is tried even when one before it failed, and a failure never ends
+  # the script here (set -e): it is reported as stuck below (activity log, alert, healthchecks.io).
   local stuck=""
-  if ensure_node && pnpm install --frozen-lockfile; then
+  git reset -q --hard "$before" || stuck="--stuck"
+  # --force as above: the private checkout back at the commit the old version records.
+  git submodule update --init --force || stuck="--stuck"
+  { ensure_node && pnpm install --frozen-lockfile; } || stuck="--stuck"
+  if [ -z "$stuck" ]; then
     echo "Back on $before."
   else
-    echo "Going back failed too: the jobs may not run. Run ops/update-server.sh by hand."
-    stuck="--stuck"
+    echo "Going back failed too: the jobs may not run. Go back by hand, in $PWD:" \
+      "git reset --hard $before && git submodule update --init --force, then the Node link and" \
+      "pnpm install --frozen-lockfile (docs/troubleshooting.md, \"An update rolled back\")"
   fi
   pnpm --silent update:log --from "$before" --to "$target" --failed "$step" || true
   # shellcheck disable=SC2086
