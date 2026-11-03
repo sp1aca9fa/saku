@@ -77,7 +77,7 @@ Every user-facing string goes through `packages/content` (next-intl); `en.json` 
 - CI gates: lint, typecheck, tests, build, `pnpm docs:check`, tooltip and metric coverage; language coverage from D1.
 
 ## Agents (the main session orchestrates)
-Agents are in `.claude/agents/`; `/ship <task>` runs the whole loop. The main session plans, writes the spec, routes, triages and commits; it implements only trivial changes itself (a review fix of a few lines, docs, a comment). Subagents cannot spawn subagents.
+Agents are shared across projects (the `selfhost-blueprint` repo's `claude/agents`, linked into `~/.claude`); this project's profile is `docs/agents.md` (the app, trust territory, domain checklist, and the model and effort per role: pass those as `model` and `effort` every time an agent is started). `/ship <task>` runs the whole loop. The main session plans, writes the spec, routes, triages and commits; it implements only trivial changes itself (a review fix of a few lines, docs, a comment). Subagents cannot spawn subagents.
 
 **Tiers** (judge by the diff; trust territory decides the whole change):
 | Tier | When | Review |
@@ -90,12 +90,12 @@ A Tier 0 or 1 change that fails CHECKS twice moves up a tier. Never review Tier 
 
 **Loop:**
 1. Spec in `.agent-runs/<date>-<slug>/spec.md` (`docs/spec-template.md`): goal, acceptance criteria, the requirement sections it rests on (point to them, don't copy), tier. Unclear current-stage details: the conservative reading, under "Assumed". Unclear later-stage details: left out and put to the owner.
-2. Build: `builder` (Sonnet) for routine chunks, `builder-heavy` (Opus) for trust territory, design, an ambiguous spec, or after a builder failed. Give the spec path, the chunk and CHECKS; never paste code. Chunks are reviewed per chunk, not per edit.
+2. Build: `builder` for routine chunks, `builder-heavy` for trust territory, design, an ambiguous spec, or after a builder failed. Give the spec path, the chunk and CHECKS; never paste code. Chunks are reviewed per chunk, not per edit.
 3. Gates: CHECKS (`pnpm check:all`); on failure back to the builder, at most 2 tries. From D1, Tier 1 and 2 UI: the page crawler once for the changed pages.
 4. Review: the tier's reviewers in one message (parallel). Code reviewers get the commit range, spec path and CHECKS output. UX and trust reviewers get only screenshot paths and one line per page (`docs/pages.md`), nothing else.
 5. Triage: the main session verifies a single reviewer's findings against the code itself; `triage` only when two or more reviewers ran. Fixes go to a builder in one batch (or are done directly when trivial). Re-review only Tier 2 logic fixes, by the reviewer whose finding it was; fixes that only touch comments, docs or tests are not re-reviewed. At most 2 fix rounds; what is still open goes in the report.
-6. Log facts in `.agent-runs/<date>-<slug>/log.md` (tier and why, chunks, gate results, finding counts, decisions) and one row per reviewer run in `.agent-runs/ledger.csv` (`date,slug,tier,reviewer,findings,accepted,rejected,duplicate`). Update `plugins/ops/actions.md` (steps, decisions, work log).
-7. `summarizer` (Haiku) for long logs, check output, crawl reports or pasted server output.
+6. Log facts in `.agent-runs/<date>-<slug>/log.md` (tier and why, chunks, gate results, finding counts, decisions) and one row per reviewer run in `plugins/ops/agent-ledger.csv` (`date,slug,tier,reviewer,findings,accepted,rejected,duplicate`). Update `plugins/ops/actions.md` (steps, decisions, work log).
+7. `summarizer` for long logs, check output, crawl reports or pasted server output.
 
 **Stop and ask** only for: a destructive or irreversible action; pushing or deploying; a new dependency, external service or cost; a request that conflicts with the requirements; a choice that changes what a signal means, how money or risk is shown, or which data is trusted, that the requirements do not decide; two failed fix rounds on a bug. When the owner asked for continuous work, prepare the decision, put it in `plugins/ops/actions.md` section C with a recommendation, and continue with other work.
 
@@ -109,6 +109,6 @@ Open issues: <unresolved after 2 rounds, known limits; or none>
 Assumed: <every assumption about trading, statistics, data or tax (tax with the rule it rests on); or none>
 Backlog ideas: <or none>
 Reviewers: <each that ran: findings N, accepted N; useful, noisy or redundant (from the ledger)>
-Agent feedback: <only if an agent was unhelpful: why, and which line of its file to change>
+Agent feedback: <only if an agent was unhelpful: why, and which line of `docs/agents.md` (or, if it holds for every project, of the shared agent) to change>
 ```
 A reviewer is noisy when over 70% of its findings were rejected across this and its last 3 runs; redundant when it had no accepted finding in its last 3 runs, or each was also found by another reviewer.

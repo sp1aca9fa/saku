@@ -5,6 +5,8 @@ new user would, before the owner does. The reviewer gets screenshots and one lin
 it is for, nothing else: no code, no spec, no history. Knowing how a page was built makes it
 easier to forgive.
 
+Who the reviewer is: a new user who has never seen this app and does not know the math behind it.
+
 ## What the reviewer is given
 
 - Screenshots of each changed page: phone, wide and dark, in the install's languages when the page

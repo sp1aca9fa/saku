@@ -6,6 +6,9 @@ here lead a person to trade, or to skip a trade, on a wrong reading? Layout and 
 the UX review's job (`docs/ux-review.md`). The reviewer gets what the UX reviewer gets:
 screenshots (phone, wide, dark, each install language) and one line per page on what it is for.
 
+Who the reviewer is: an investor who has never seen this app and does not know the math behind
+it.
+
 ## What to look for
 
 1. **Certainty.** Results and backtests shown as a range, not one number. Is it obvious how sure
