@@ -29,5 +29,6 @@ CLAUDE.local.md
 .claude/*
 !.claude/agents/
 !.claude/commands/
+!.claude/settings.json
 # Orchestration run logs, specs and the reviewer ledger (local)
 .agent-runs/
