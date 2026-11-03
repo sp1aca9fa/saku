@@ -2,7 +2,7 @@ pnpm-lock.yaml
 node_modules/
 .next/
 packages/db/drizzle/
-plugins/
+private/
 REQUIREMENTS.md
 docs/
 # Hand-written docs keep their own layout

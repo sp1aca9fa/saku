@@ -9,10 +9,10 @@ stored. A plug-in never writes to the database.
 | Folder | For |
 |---|---|
 | `plugins-public/` | Plug-ins for official APIs, with neutral names, and the template |
-| `plugins/` | Your own plug-ins, usually a private git repo mounted as a submodule (unofficial, scraped or personal sources go only here) |
+| `private/` | Your own plug-ins, usually a private git repo mounted as a submodule (unofficial, scraped or personal sources go only here) |
 
 Each folder is a package whose `src/index.ts` exports one array per kind it has. A missing folder
-is skipped, so the public repo builds, tests and runs without `plugins/`. Real recorded provider
+is skipped, so the public repo builds, tests and runs without `private/`. Real recorded provider
 responses go only in the private repo; public fixtures are synthetic.
 
 ## Kinds and methods
@@ -168,7 +168,7 @@ made-up country and a tax FX source for a made-up bank there, each with fixtures
 its `README.md`). The template is not loaded
 by the jobs.
 
-1. Copy `plugins-public/template/` to a new folder (in `plugins/` for a private plug-in, with
+1. Copy `plugins-public/template/` to a new folder (in `private/` for a private plug-in, with
    its own `package.json`, `tsconfig.json` and `src/index.ts`; see how `plugins-public/` is set up).
 2. Rename the source, set its `key`, `info` and limits from the provider's terms.
 3. Replace the fixtures with the provider's answers saved as files, and map them in the source.
@@ -238,7 +238,7 @@ Use `fixtureContext` from `@saku/plugin-sdk/testing`: a context whose HTTP clien
 saved files and never touches the network. It records the URLs, headers and bodies requested, so a
 test can check that the key is not in the URL. The template test shows the pattern: the mapping to
 raw bars, key handling, and failing loudly when an answer changes shape. Run with `pnpm test`
-(the `plugins/` package is tested when it is checked out). No test makes a live call.
+(the `private/` package is tested when it is checked out). No test makes a live call.
 
 ## Checklist before turning a source on
 

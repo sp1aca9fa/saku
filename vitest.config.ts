@@ -3,12 +3,12 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    // The private `plugins/` submodule is tested when it is checked out.
+    // The private submodule (`private/`, registry's PRIVATE_DIR) is tested when it is checked out.
     projects: [
       'packages/*',
       'apps/*',
       'plugins-public',
-      ...(existsSync('plugins/package.json') ? ['plugins'] : []),
+      ...(existsSync('private/package.json') ? ['private'] : []),
     ],
   },
 });

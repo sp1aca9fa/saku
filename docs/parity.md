@@ -7,11 +7,11 @@ as a red layer E result. Code: `packages/plugin-sdk/src/jobs/parity.ts`; it runs
 and the weekly run.
 
 Summary stats may be kept in this public file. Daily equity curves and saved testfol pages stay in
-the private `plugins/` submodule.
+the private submodule (`private/`).
 
 ## A case
 
-A folder `plugins/test/testfol/<case>/` (private) holding `case.json`:
+A folder `private/test/testfol/<case>/` (private) holding `case.json`:
 
 ```json
 {
@@ -66,12 +66,12 @@ Unverified until the first real case: these steps and where testfol shows each n
 
 1. Build the strategy in testfol's tactical allocation backtest with SPY (not SPYSIM), a start date
    on or after 1993-02-01, and testfol's default (same-close) timing.
-2. Run it and save the page (or a screenshot) in `plugins/ops/` (private).
+2. Run it and save the page (or a screenshot) in `private/ops/` (private).
 3. Note from the results: the first and last date of the results, CAGR, max drawdown, and the
    number of switches from the Trading Stats tab. testfol's definition of a switch is unverified
    until the first real case (Saku's is below).
 4. Write the same strategy as Saku strategy JSON (check it with `pnpm strategy check <file>`),
-   add `"execution": "same_close"`, and save `plugins/test/testfol/<case>/case.json` as above.
+   add `"execution": "same_close"`, and save `private/test/testfol/<case>/case.json` as above.
 5. Run `pnpm verify` on the server. The log shows one `Layer E testfol_parity` line per case.
 
 ## How Saku computes the case

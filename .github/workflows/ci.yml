@@ -11,7 +11,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      # The private plugins/ submodule is not checked out; everything here runs on synthetic data.
+      # The private submodule (private/) is not checked out; everything here runs on synthetic data.
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4

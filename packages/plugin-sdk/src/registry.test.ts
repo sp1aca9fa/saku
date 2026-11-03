@@ -41,7 +41,7 @@ describe('plug-in registry', () => {
     );
     const loaded = await loadPlugins(root);
     expect(loaded.bars.map((b) => b.info.key)).toEqual(['example']);
-    expect(loaded.missing).toEqual(['plugins']);
+    expect(loaded.missing).toEqual(['private']);
   });
 
   it('every shipped calendar table loads as sessions (a bad table fails here, not every job)', async () => {

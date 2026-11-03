@@ -38,7 +38,7 @@ flowchart LR
 | Component | Responsibility | Stage |
 |---|---|---|
 | `packages/plugin-sdk` | Plug-in contracts, polite HTTP client, jobs CLI | A1 |
-| `plugins-public/`, `plugins/` | Source plug-ins (public, private), tax regimes, templates | A1, C1 |
+| `plugins-public/`, `private/` | Source plug-ins (public, private), tax regimes, templates | A1, C1 |
 | `packages/data` | Verification layers, severity rules, stand-in rule, fault injection, calendars | A |
 | `packages/db` | Schema, migrations, queries, user CLI, seed, backup and restore | A1 |
 | `packages/auth` | Passwords, TOTP, backup codes, secret encryption | A1 (tables, CLI), D1 (UI) |

@@ -54,5 +54,5 @@ full server setup is in `docs/setup.md`.
 ## Public and private code
 
 `plugins-public/` holds plug-ins for official APIs and a runnable template. Your own plug-ins
-(unofficial, scraped or personal sources) go in `plugins/`, usually a private git repo mounted as
-a submodule. A missing `plugins/` folder is skipped.
+(unofficial, scraped or personal sources) go in `private/`, usually a private git repo mounted as
+a submodule. A missing `private/` folder is skipped.

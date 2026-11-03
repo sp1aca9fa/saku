@@ -1,7 +1,7 @@
 # Template plug-in
 
 Example Market Data: a made-up bar provider, to copy when writing a plug-in for a real one. It is
-not loaded by the jobs (only `src/index.ts` of `plugins-public/` and `plugins/` are).
+not loaded by the jobs (only `src/index.ts` of `plugins-public/` and `private/` are).
 
 - `src/example-bars.ts`: the `BarSource` (daily bars and ticker metadata)
 - `src/index.ts`: a package entry point, one array per kind (`bars`, `taxFx`, `taxRegimes`)

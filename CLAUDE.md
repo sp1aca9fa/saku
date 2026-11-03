@@ -21,14 +21,14 @@ If a request conflicts with the requirements, point out the conflict and ask bef
 - Don't implement unrequested features; put ideas in `docs/backlog.md` and mention them.
 - Small changes: one feature or fix per branch/PR, with tests.
 - Ask before adding a dependency (MIT, Apache 2.0, BSD, ISC only; never GPL/AGPL/LGPL), an external service, or anything that could cost money.
-- Never commit API keys, `.env` files or market data to the public repo. Real recorded responses go only in the private `plugins/` submodule.
+- Never commit API keys, `.env` files or market data to the public repo. Real recorded responses go only in the private `private/` submodule.
 - Requirement changes: edit the split files in `docs/requirements/`, run `pnpm docs:build`, add a `14-decisions-log.md` entry. Never edit `REQUIREMENTS.md` directly.
 - Unsure about a provider's limits or terms: check current docs and record findings in `docs/data-spike.md` or `docs/data-pipeline.md`.
 - The app makes no LLM/AI API calls.
 
 ## Agnostic core (mandatory)
 - Nothing particular to one country, provider, broker, language or person is hardcoded in core. It is a plug-in (`docs/requirements/15-plugins.md`) or an admin setting.
-- Public plug-ins use official APIs; unofficial, scraped or personal ones go in the private `plugins/` submodule. Public examples and tests use neutral made-up names.
+- Public plug-ins use official APIs; unofficial, scraped or personal ones go in the private `private/` submodule. Public examples and tests use neutral made-up names.
 - Plug-ins never call `fetch` directly (use the SDK's HTTP client) and never write to the database.
 
 ## Language (mandatory)

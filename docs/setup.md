@@ -13,7 +13,8 @@ Related guides: `docs/running.md` (jobs, schedule, logs), `docs/backups.md`, `do
 
 ```bash
 git clone https://github.com/<you>/saku.git ~/code/saku && cd ~/code/saku
-# Optional: your private plug-ins (see "Private plug-ins" below).
+# Optional: your private plug-ins (see "Private plug-ins" below). The submodule's folder is
+# private/; its git name stays plugins (the url setting below uses the name).
 git config submodule.plugins.url git@github-saku-private:<you>/saku-private.git
 git submodule update --init
 
@@ -282,5 +283,19 @@ sudo systemctl daemon-reload && sudo systemctl enable --now saku-update.timer
 ```
 
 By hand, any time: `ssh -t <server> code/saku/ops/update-server.sh`.
+
+Installs from before 2026-11-04 have the private checkout at `plugins/`. The update that brings the
+move checks the same private commit out in `private/` (same submodule url, same module folder) and
+leaves the old `plugins/` folder untracked (`git status`: `?? plugins/`); nothing reads it any
+more. Git commands inside the leftover `plugins/` act on `private/`: never run git there.
+Once `update.log` shows that update as up, move the old folder away (it is kept, not deleted; any
+`diff` line means it holds something the private repo does not: look before moving):
+
+```bash
+cd ~/code/saku
+test -z "$(git ls-files plugins)" && test -n "$(git ls-files private)" &&
+  diff -rq --exclude=.git plugins private && mv -T -n plugins ~/.local/state/saku/old-plugins-folder
+! test -e plugins && test -z "$(git status --porcelain)" && echo OK   # OK only
+```
 
 To turn the server off safely (waits for running jobs): see "Turning the server off" in `docs/running.md`.

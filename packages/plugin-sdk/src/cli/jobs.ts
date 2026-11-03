@@ -10,7 +10,7 @@
 //   pnpm monthly           the audit report of the previous month (and earlier ones never
 //                          stored), stored and sent in short form to the admins (jobs/monthly.ts)
 //   pnpm verify            layers A-C over the full history and layer E (core vs reference,
-//                          incremental vs full, testfol parity cases in plugins/test/testfol)
+//                          incremental vs full, testfol parity cases in private/test/testfol)
 //                          on the stored data, no fetching
 //   pnpm checks            the same as pnpm verify (its A1 name)
 //   pnpm probe             A1: the last sessions of one ticker from every bar source, to a log
@@ -46,6 +46,7 @@ import {
   allInfos,
   loadPlugins,
   notifierContexts,
+  PARITY_DIR,
   pluginContext,
   providerUsageStore,
   savePluginInfos,
@@ -243,7 +244,7 @@ try {
     },
     code: codeVersion(),
     databaseUrl: dbConfigFromEnv().url,
-    parityDir: join(findRepoRoot(), 'plugins', 'test', 'testfol'),
+    parityDir: join(findRepoRoot(), PARITY_DIR),
     beforeRefetch: backup,
     afterDaily: backup,
     recheck,

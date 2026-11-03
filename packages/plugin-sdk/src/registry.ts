@@ -37,12 +37,21 @@ import type {
 } from './types';
 
 /**
- * Plug-in packages, loaded by path so the public repo works without the private `plugins/`
- * submodule (a missing folder is skipped).
+ * The private submodule's folder (requirements 12 and 15; `.gitmodules` names it as the path, a
+ * guard test keeps the two equal). It holds the admin's own plug-ins and private operation.
+ */
+export const PRIVATE_DIR = 'private';
+
+/** The testfol parity cases, inside the private folder (requirements 13 "testfol parity"). */
+export const PARITY_DIR = join(PRIVATE_DIR, 'test', 'testfol');
+
+/**
+ * Plug-in packages, loaded by path so the public repo works without the private submodule (a
+ * missing folder is skipped).
  */
 export const PLUGIN_PACKAGES = [
   { dir: 'plugins-public', private: false },
-  { dir: 'plugins', private: true },
+  { dir: PRIVATE_DIR, private: true },
 ] as const;
 
 export interface LoadedPlugins extends Required<PluginModule> {

@@ -602,13 +602,13 @@ packages/notify          Discord, Telegram
 packages/export          AI export
 packages/mcp             Read-only MCP server
 plugins-public/          Publishable plug-ins (Tiingo, FRED, ECB, Alpaca/Massive, Japan tax regime) and the templates
-plugins/                 Private plug-ins, ops, notes (git submodule `saku-private`; optional)
+private/                 Private plug-ins, ops, notes (git submodule `saku-private`; optional)
 library/, templates/, fixtures/ (synthetic only), scripts/
 docs/ (requirements/, system-design.md, evidence/, data-pipeline.md, indicators.md, parity.md,
        robustness-score.md, strategy-library.md, plugins.md, setup.md, running.md, backups.md,
        languages.md, backlog.md, stage-reviews.md, target-reviews.md, data-spike.md)
 ```
-`plugins/` is not a pnpm workspace member (the public lockfile never depends on it); it imports `@saku/*` through the root `node_modules`, and typecheck and tests include it when present. Commit inside it first, then commit the pointer in the main repo.
+`private/` is not a pnpm workspace member (the public lockfile never depends on it); it imports `@saku/*` through the root `node_modules`, and typecheck and tests include it when present. Commit inside it first, then commit the pointer in the main repo.
 
 ## Hosting (self-hosted)
 - One always-on machine (the owner's: a mini PC with Ubuntu Server, shared with Tora) runs everything as plain systemd services under the owner's user, no Docker:
@@ -654,7 +654,7 @@ docs/ (requirements/, system-design.md, evidence/, data-pipeline.md, indicators.
 | Data | Where it lives | Runs |
 |---|---|---|
 | Synthetic bars and provider responses in each provider's exact shape | Public repo (`fixtures/`, plug-in tests, the templates) | `pnpm check:all` and GitHub Actions CI on every push |
-| Real recorded provider responses | Private submodule (`plugins/test/fixtures`) | Locally and on the server when the submodule is present |
+| Real recorded provider responses | Private submodule (`private/test/fixtures`) | Locally and on the server when the submodule is present |
 | Real market data (full history) | The server's database | `pnpm verify` on the server, weekly: testfol parity, core vs reference, incremental vs full, layer checks over full history. Results stored and shown on the admin page; a failure alerts admins. |
 
 Market data and testfol daily equity curves are never committed to the public repo; testfol summary stats may be.
@@ -662,7 +662,7 @@ Market data and testfol daily equity curves are never committed to the public re
 - CI gates (GitHub Actions on the public repo, synthetic data only, no secrets): lint, typecheck, tests, build, `REQUIREMENTS.md` up to date (`pnpm docs:check`), tooltip and metric coverage; language coverage from D1.
 
 ## testfol parity
-- Fixtures in `plugins/test/testfol/<case>/` (private, real data): YAML, date range, stats, daily equity CSV if available. Summary stats may also be kept in the public `docs/parity.md`.
+- Fixtures in `private/test/testfol/<case>/` (private, real data): YAML, date range, stats, daily equity CSV if available. Summary stats may also be kept in the public `docs/parity.md`.
 - Use SPY (not SPYSIM), start after 1993-02-01, `execution: same_close` (testfol's timing).
 - Tolerances: CAGR ± 0.3pp, max drawdown ± 1.0pp, switches ± 5%. Differences documented in `docs/parity.md`.
 
@@ -692,6 +692,7 @@ Market data and testfol daily equity curves are never committed to the public re
 - 2026-11-01 (owner, C17-C21): An issuer distribution without its currency is refused when stored, like a NAV. A strategy comparing a plain price (or its average) with a fixed level is refused at strategy check (a split rescales earlier plain prices); total return or the fund's own average instead; comparing with the price as known each day only if a library strategy needs it. A fund with a dividend or split dated on a closed market day stays red from the next session until the source corrects the date or an admin resolves it with a reason (the event is never moved by Saku). A source that lists dividends late declares its delay; within it, a dividend it does not list yet is "pending", not a disagreement, green only when another secondary confirmed the primary's dividend; after it, compared as usual. A provider's rounding cut-off for recalculated adjusted values is set from its measured rounding (2.5x the largest seen), within the SDK maximum.
 - 2026-11-01 (owner): While A1 and A2 collect live data, development continues into stages B and then C on synthetic and stored data. Nothing beyond stage A goes live (no registration, forward records or alerts from B or C features) before stage A's gates pass and the stage review is done; A items keep priority.
 - 2026-11-01 (B1 build, interpretation): A comparison's tolerance band is built on the reference's absolute value (true above ref + |ref| x t, false below ref - |ref| x t). For a positive reference this is the formula in 05; for a negative one (drawdowns, negative returns, new in B1) the formula as written would swap its bounds and lose the hysteresis that 05 calls symmetric. No registered strategy has a negative reference.
+- 2026-11-04 (owner): The private submodule's folder is `private/` (was `plugins/`): it holds the admin's whole private operation (own plug-ins, ops, notes, real recorded responses), not only plug-ins. Its git name stays `plugins`, so an existing checkout keeps its submodule url (the server's read-only deploy key) and its module folder; the self-update moves the folder, and the old `plugins/` folder is left for the admin to move away (docs/setup.md). Earlier entries keep the old path.
 <!-- split: docs/requirements/15-plugins.md -->
 # 15. Plug-ins
 
@@ -730,7 +731,7 @@ Each job run saves the descriptions to the database. The web app lists them in S
 | Folder | For |
 |---|---|
 | `plugins-public/` | Public plug-ins (official APIs: Tiingo, FRED, ECB, Alpaca/Massive; the Japan tax regime) and the templates |
-| `plugins/` | The admin's own plug-ins, usually a private git repo mounted as a submodule (the owner's: `saku-private`). A missing folder is skipped: the public repo builds, tests and runs without it. |
+| `private/` | The admin's own plug-ins, usually a private git repo mounted as a submodule (the owner's: `saku-private`). A missing folder is skipped: the public repo builds, tests and runs without it. |
 
 ## Templates
 Runnable templates in `plugins-public/template/`: a `BarSource` for a made-up provider and a `TaxRegime` for a made-up country (one taxable account, one tax-advantaged account with an annual limit), each with fixtures and a passing test. A new plug-in starts by copying a template. `docs/plugins.md` documents every interface method and a checklist before turning a source on (terms checked, `noAi` set when needed, tests on fixtures pass, one real run looks right, role starts as secondary or check until its numbers agree).

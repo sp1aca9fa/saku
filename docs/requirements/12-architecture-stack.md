@@ -55,13 +55,13 @@ packages/notify          Discord, Telegram
 packages/export          AI export
 packages/mcp             Read-only MCP server
 plugins-public/          Publishable plug-ins (Tiingo, FRED, ECB, Alpaca/Massive, Japan tax regime) and the templates
-plugins/                 Private plug-ins, ops, notes (git submodule `saku-private`; optional)
+private/                 Private plug-ins, ops, notes (git submodule `saku-private`; optional)
 library/, templates/, fixtures/ (synthetic only), scripts/
 docs/ (requirements/, system-design.md, evidence/, data-pipeline.md, indicators.md, parity.md,
        robustness-score.md, strategy-library.md, plugins.md, setup.md, running.md, backups.md,
        languages.md, backlog.md, stage-reviews.md, target-reviews.md, data-spike.md)
 ```
-`plugins/` is not a pnpm workspace member (the public lockfile never depends on it); it imports `@saku/*` through the root `node_modules`, and typecheck and tests include it when present. Commit inside it first, then commit the pointer in the main repo.
+`private/` is not a pnpm workspace member (the public lockfile never depends on it); it imports `@saku/*` through the root `node_modules`, and typecheck and tests include it when present. Commit inside it first, then commit the pointer in the main repo.
 
 ## Hosting (self-hosted)
 - One always-on machine (the owner's: a mini PC with Ubuntu Server, shared with Tora) runs everything as plain systemd services under the owner's user, no Docker:

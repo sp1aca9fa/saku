@@ -15,7 +15,7 @@ once written, cannot be corrected (only annotated).
 
 - Public: `CLAUDE.md`, all of it (the data, numerics, integrity and agnostic-core rules never
   break).
-- Private: `plugins/ops/claude-rules.md` (read it if it exists).
+- Private: `private/ops/claude-rules.md` (read it if it exists).
 
 ## Risk class
 
@@ -31,7 +31,7 @@ handling; any new page.
 Paths (a changed file here makes the change Tier 2):
 - `packages/core/`, `packages/reference/`, `packages/data/`, `packages/db/`, `packages/auth/`
 - `packages/plugin-sdk/src/` except `cli/` files that only change wording or argument parsing
-- `plugins-public/src/`, `plugins/` code (not `plugins/ops/`)
+- `plugins-public/src/`, `private/` code (not `private/ops/`)
 - `ops/update-server.sh`, `ops/ci-status.sh`, `ops/systemd/`
 - any app page or server route (from D1)
 
@@ -99,9 +99,9 @@ The orchestrator passes these values as `model` and `effort` when it starts each
 
 - Spec template: `docs/spec-template.md`.
 - Run logs: `.agent-runs/<date>-<slug>/` (git-ignored).
-- Ledgers: `plugins/ops/agent-ledger.csv` (per reviewer run), `plugins/ops/run-ledger.csv` (per
+- Ledgers: `private/ops/agent-ledger.csv` (per reviewer run), `private/ops/run-ledger.csv` (per
   task, from 2026-11-03).
-- Owner's actions: `plugins/ops/actions.md` (done items and the work log in `actions-done.md`).
+- Owner's actions: `private/ops/actions.md` (done items and the work log in `actions-done.md`).
 
 ## Setup changes
 

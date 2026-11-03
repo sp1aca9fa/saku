@@ -4,7 +4,7 @@
 // reference would share. A case outside a tolerance is red until the cause is found and
 // documented in `docs/parity.md`; tolerances are never widened to make a case pass.
 //
-// A case is a folder `<dir>/<case>/` (the private `plugins/test/testfol/`) holding `case.json`:
+// A case is a folder `<dir>/<case>/` (the private `private/test/testfol/`, registry's PARITY_DIR) holding `case.json`:
 //   { "strategy": <strategy JSON, execution same_close>, "from": "YYYY-MM-DD", "to": "YYYY-MM-DD",
 //     "stats": { "cagr": <fraction>, "maxDrawdown": <negative fraction>, "switches": <integer> } }
 // `from` is the first day of testfol's results and must be Saku's first decision day (the warm-up

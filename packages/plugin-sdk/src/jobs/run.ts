@@ -88,7 +88,7 @@ export interface RunOptions {
   databaseUrl?: string;
   /** For tests: replaces the disk's statfs. */
   statfs?: Statfs;
-  /** The testfol parity cases (`plugins/test/testfol`); missing or empty: none run. */
+  /** The testfol parity cases (`private/test/testfol`); missing or empty: none run. */
   parityDir?: string;
   /** Before the weekly refetch rewrites stored history (the backup); a throw fails the run. */
   beforeRefetch?: () => Promise<void>;

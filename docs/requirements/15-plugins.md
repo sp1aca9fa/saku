@@ -35,7 +35,7 @@ Each job run saves the descriptions to the database. The web app lists them in S
 | Folder | For |
 |---|---|
 | `plugins-public/` | Public plug-ins (official APIs: Tiingo, FRED, ECB, Alpaca/Massive; the Japan tax regime) and the templates |
-| `plugins/` | The admin's own plug-ins, usually a private git repo mounted as a submodule (the owner's: `saku-private`). A missing folder is skipped: the public repo builds, tests and runs without it. |
+| `private/` | The admin's own plug-ins, usually a private git repo mounted as a submodule (the owner's: `saku-private`). A missing folder is skipped: the public repo builds, tests and runs without it. |
 
 ## Templates
 Runnable templates in `plugins-public/template/`: a `BarSource` for a made-up provider and a `TaxRegime` for a made-up country (one taxable account, one tax-advantaged account with an annual limit), each with fixtures and a passing test. A new plug-in starts by copying a template. `docs/plugins.md` documents every interface method and a checklist before turning a source on (terms checked, `noAi` set when needed, tests on fixtures pass, one real run looks right, role starts as secondary or check until its numbers agree).
