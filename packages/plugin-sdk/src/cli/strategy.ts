@@ -26,7 +26,10 @@
 //                    or chat id (kept out of the shell history), stored encrypted
 //   pnpm channel list|disable|enable|test [<channel id>] --user <username>
 //   pnpm alert update-failed --from <commit> --to <commit> --step <step> [--stuck]
-//                    (the update script, after going back)
+//                    (the update script, after going back; step ci: CI failed, nothing changed)
+//   pnpm alert update-waiting --from <commit> --to <commit> --status pending|unknown
+//                    (the update script, when a new version waited 24 h for GitHub CI)
+//                    Both exit 1 when every admin channel failed (the script tries again).
 import { type Strategy, isTradingDate, tradingDateOf } from '@saku/core';
 import { translator } from '@saku/content';
 import { Sessions } from '@saku/data';
@@ -48,7 +51,7 @@ import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { sendUpdateFailed } from '../jobs/alerts';
+import { noneDelivered, sendUpdateFailed, sendUpdateWaiting } from '../jobs/alerts';
 import { SYSTEM_CA } from '../jobs/anchor';
 import { chainLines, chainProblems, verifyChains } from '../jobs/chain-verify';
 import { openRecheckNote, recheckTimeZone } from '../jobs/recheck';
@@ -250,10 +253,14 @@ if (tool === 'strategy' && command === 'check') {
     );
     console.log('Sent.');
   } else fail('pnpm channel add|list|disable|enable|test');
-} else if (tool === 'alert' && command === 'update-failed') {
+} else if (tool === 'alert' && (command === 'update-failed' || command === 'update-waiting')) {
+  const status = command === 'update-waiting' ? flag('status') : undefined;
+  if (command === 'update-waiting' && status !== 'pending' && status !== 'unknown') {
+    fail('--status pending|unknown');
+  }
   const { notifiers } = await loadPlugins();
   const log = { info: () => {}, warn: (m: string, d?: object) => console.error(m, d ?? '') };
-  const sent = await sendUpdateFailed(db, {
+  const base = {
     date: tradingDateOf(new Date()),
     notifiers,
     authSecret: process.env.AUTH_SECRET?.trim() ?? '',
@@ -261,12 +268,20 @@ if (tool === 'strategy' && command === 'check') {
     log,
     from: flag('from') ?? fail('--from <commit>'),
     to: flag('to') ?? fail('--to <commit>'),
-    step: flag('step') ?? 'unknown',
-    stuck: rest.includes('--stuck'),
-  });
+  };
+  const sent =
+    status === 'pending' || status === 'unknown'
+      ? await sendUpdateWaiting(db, { ...base, status })
+      : await sendUpdateFailed(db, {
+          ...base,
+          step: flag('step') ?? 'unknown',
+          stuck: rest.includes('--stuck'),
+        });
   console.log(
     `Admin alert: ${sent.sent} sent${sent.failed.length ? `, ${sent.failed.length} failed` : ''}.`,
   );
+  // Every channel failed: exit 1, so the update script tries again at its next check.
+  if (noneDelivered(sent)) process.exitCode = 1;
 } else {
   fail(
     'Usage: pnpm strategy check [--registration]|register|list|show|verify|recompute ... | pnpm journal add|list ... | pnpm channel ... ' +

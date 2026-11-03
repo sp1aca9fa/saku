@@ -42,6 +42,8 @@ import {
   sendStandInCorrections,
   sendStrategyAlerts,
   sendUpdateFailed,
+  sendUpdateWaiting,
+  noneDelivered,
   standInClosedDetail,
   standInClosedText,
   standInDetail,
@@ -481,6 +483,78 @@ describe('admin alerts', () => {
     expect(sent[1]!.text).toContain('データ状態: 黄');
     // Only admin channels: the owner's ordinary channel got none of these.
     expect(sent.every((m) => m.target === 'ops')).toBe(true);
+  });
+
+  it('a CI failure says the server never left; a 24 h CI wait has its own text, once', async () => {
+    const { db, owner } = await setup();
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const { notifier, sent } = fakeNotifier();
+    const base = { ...options(notifier, '2026-01-05'), from: 'abc1234' };
+    const ci = { ...base, to: 'def5678', step: 'ci', stuck: false };
+    expect((await sendUpdateFailed(db, ci)).sent).toBe(1);
+    expect(sent[0]!.text.split('\n').slice(0, 2)).toEqual([
+      'Saku: the update to def5678 failed at the ci step',
+      'GitHub CI failed on def5678, so the server did not update and keeps running abc1234. It tries again when a newer version is pushed, or when ops/update-server.sh is run by hand.',
+    ]);
+    expect(sent[0]!.text).not.toContain('went back');
+
+    for (const [status, words] of [
+      ['pending', 'not finished or not started'],
+      ['unknown', 'no usable answer from GitHub'],
+    ] as const) {
+      const wait = { ...base, to: `${status}1`, status };
+      expect((await sendUpdateWaiting(db, wait)).sent).toBe(1);
+      expect((await sendUpdateWaiting(db, wait)).sent).toBe(0);
+      expect(sent.at(-1)!.text.split('\n')[0]).toBe(
+        `Saku: the server has not updated for 24 h and keeps running abc1234; the newest version, ${status}1, is waiting for GitHub CI (${words}). Check the repo's Actions tab (a commit CI never runs on is never installed automatically), or run ops/update-server.sh on the server by hand.`,
+      );
+    }
+    // Its own subject: the failed-update alert for the same version still goes out.
+    expect((await sendUpdateWaiting(db, { ...base, to: 'def5678', status: 'pending' })).sent).toBe(
+      1,
+    );
+    expect(sent).toHaveLength(4);
+  });
+
+  it('update alerts no channel took: none delivered, not recorded, sent on the retry', async () => {
+    const { db, owner } = await setup();
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const down = fakeNotifier(true);
+    const up = fakeNotifier();
+    const base = { from: 'abc1234', to: 'def5678' };
+    const send = [
+      (n: Notifier) =>
+        sendUpdateFailed(db, { ...options(n, '2026-01-05'), ...base, step: 'ci', stuck: false }),
+      (n: Notifier) =>
+        sendUpdateWaiting(db, { ...options(n, '2026-01-05'), ...base, status: 'pending' }),
+    ];
+    for (const s of send) {
+      const failed = await s(down.notifier);
+      expect(failed.sent).toBe(0);
+      expect(noneDelivered(failed)).toBe(true);
+      const retried = await s(up.notifier);
+      expect(retried).toEqual({ sent: 1, failed: [] });
+      expect(noneDelivered(retried)).toBe(false);
+      expect(noneDelivered(await s(up.notifier))).toBe(false);
+    }
+    expect(up.sent).toHaveLength(2);
+    // No admin channel at all: nothing to retry.
+    expect(noneDelivered({ sent: 0, failed: [] })).toBe(false);
+  });
+
+  it('the CI texts in Japanese', async () => {
+    const { db, owner } = await setup('ja');
+    await addChannel(db, owner, { type: 'fake', target: 'ops', admin: true, authSecret: SECRET });
+    const { notifier, sent } = fakeNotifier();
+    const base = { ...options(notifier, '2026-01-05'), from: 'abc1234', to: 'def5678' };
+    await sendUpdateFailed(db, { ...base, step: 'ci', stuck: false });
+    await sendUpdateWaiting(db, { ...base, status: 'unknown' });
+    expect(sent[0]!.text).toContain(
+      'GitHub の CI が def5678 で失敗したため、サーバーは更新せず abc1234 のまま動作しています。',
+    );
+    expect(sent[1]!.text).toContain(
+      'Saku: サーバーは 24 時間更新されておらず、abc1234 のまま動作しています。最新の def5678 は GitHub の CI を待っています(GitHub から有効な応答がありません)。',
+    );
   });
 
   it("states the latest grade of the latest date: a weekly pass's green over an older daily red", async () => {

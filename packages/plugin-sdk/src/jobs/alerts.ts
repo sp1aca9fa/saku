@@ -293,6 +293,13 @@ export interface AlertSummary {
   failed: string[];
 }
 
+/**
+ * Nothing reached anyone and some channel failed: the caller should try again (the update script
+ * retries until its alert is sent). Only delivered alerts are recorded (`deliver`), so a retry is
+ * not taken for a repeat.
+ */
+export const noneDelivered = (s: AlertSummary): boolean => s.sent === 0 && s.failed.length > 0;
+
 /** Today's strategy alerts to each owner's channels (library versions have no recipient). */
 export async function sendStrategyAlerts(
   db: Db,
@@ -816,18 +823,55 @@ export function sendDataHealthAdmin(
   });
 }
 
-/** A self-update that failed, once per target version and day. */
+/**
+ * A self-update that failed, once per target version and day. Step `ci`: GitHub CI failed on the
+ * new version, so the server never left `from` (ops/update-server.sh).
+ */
 export function sendUpdateFailed(
   db: Db,
   o: AlertOptions & { from: string; to: string; step: string; stuck: boolean },
 ): Promise<AlertSummary> {
+  const body = o.stuck
+    ? 'alerts.update.stuck'
+    : o.step === 'ci'
+      ? 'alerts.update.ci'
+      : 'alerts.update.back';
   return sendAdminAlert(db, {
     ...o,
     subject: `update:${o.to}`,
     type: 'update_failed',
     lines: (t) => [
       { keep: t('alerts.update.title', { to: o.to, step: o.step }) },
-      { keep: t(o.stuck ? 'alerts.update.stuck' : 'alerts.update.back', { from: o.from }) },
+      { keep: t(body, { from: o.from, to: o.to }) },
+    ],
+  });
+}
+
+/** What GitHub said while a new version waited for its CI run. */
+export type UpdateWaitStatus = 'pending' | 'unknown';
+
+/**
+ * A self-update that has waited 24 h for GitHub CI to pass on `to` (still running or not
+ * started, or no usable answer); the server keeps running `from`. The update script asks once
+ * per version; it is a self-update that did not happen, so it goes out as one (`update_failed`,
+ * an operational alert before the A1 gate), under its own subject.
+ */
+export function sendUpdateWaiting(
+  db: Db,
+  o: AlertOptions & { from: string; to: string; status: UpdateWaitStatus },
+): Promise<AlertSummary> {
+  return sendAdminAlert(db, {
+    ...o,
+    subject: `update-wait:${o.to}`,
+    type: 'update_failed',
+    lines: (t) => [
+      {
+        keep: t('alerts.update.waiting', {
+          to: o.to,
+          from: o.from,
+          status: t(`alerts.update.ciStatus.${o.status}`),
+        }),
+      },
     ],
   });
 }

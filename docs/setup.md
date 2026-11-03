@@ -254,6 +254,27 @@ tests). Never while a job runs (it waits for the next check), and no job starts 
 step fails, it goes back to the version before and does not try that version again until a newer
 push. Every update is in the activity log; the log is `~/.local/state/saku/update.log`.
 
+It installs a new commit only after GitHub CI passed on that exact commit (`ops/ci-status.sh` reads
+its check runs; the repo is public, so no token), and updates to that commit even when a later one
+arrived meanwhile (that one waits for its own CI). While CI runs, or when GitHub gives no usable
+answer (no network, an error, its rate limit), nothing changes and the next check asks again; the
+update log notes it once per commit and status. When the server has gone 24 hours without updating
+because CI is not green (counted from the server's own version, so newer pushes do not restart it;
+an update or a reported CI failure does), the admins are told once and it keeps waiting. An alert no admin channel took is
+sent again at each check until one does. Only a passed run counts: a failed or unanswered check
+never updates the server. When CI failed, the server stays where it is, does not ask about that
+commit again until a newer push, and the admins get the failed-update alert with the step `ci` (in
+the activity log too). The private plug-ins are not gated (CI does not check them out). By hand, the
+script prints the commit's CI status as a warning and updates anyway. A fork without CI sets
+`SAKU_UPDATE_REQUIRE_CI=0` in `.env`.
+
+- CI failed, then a re-run passed on the same commit: the server does not notice by itself. Run
+  `ops/update-server.sh` by hand, or delete `~/.local/state/saku/update-failed` and the next check
+  updates.
+- A commit CI never runs on (`[skip ci]` in its message, a push that changes only ignored paths, a
+  disabled workflow) is never installed by the automatic update: it waits, and the 24-hour alert
+  says so. Push a commit CI runs on, or update by hand.
+
 ```bash
 sudo cp ops/systemd/saku-update.* /etc/systemd/system/
 sudo sed -i "s/<user>/$USER/g" /etc/systemd/system/saku-update.service

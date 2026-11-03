@@ -85,7 +85,13 @@
     "update": {
       "title": "Saku: the update to {to} failed at the {step} step",
       "back": "The server went back to {from} and keeps running it. It tries again when a newer version is pushed; the update log on the server has the details.",
-      "stuck": "Going back to {from} failed too, so the jobs may not run. Run ops/update-server.sh on the server by hand."
+      "stuck": "Going back to {from} failed too, so the jobs may not run. Run ops/update-server.sh on the server by hand.",
+      "ci": "GitHub CI failed on {to}, so the server did not update and keeps running {from}. It tries again when a newer version is pushed, or when ops/update-server.sh is run by hand.",
+      "waiting": "Saku: the server has not updated for 24 h and keeps running {from}; the newest version, {to}, is waiting for GitHub CI ({status}). Check the repo's Actions tab (a commit CI never runs on is never installed automatically), or run ops/update-server.sh on the server by hand.",
+      "ciStatus": {
+        "pending": "not finished or not started",
+        "unknown": "no usable answer from GitHub"
+      }
     },
     "reason": {
       "check": {
