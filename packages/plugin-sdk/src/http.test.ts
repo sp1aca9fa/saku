@@ -1,16 +1,24 @@
 import { USAGE_REQUEST_WINDOW_MS, USAGE_SYMBOL_WINDOW_MS } from '@saku/db';
+import {
+  getDefaultAutoSelectFamilyAttemptTimeout,
+  setDefaultAutoSelectFamilyAttemptTimeout,
+} from 'node:net';
 import { describe, expect, it } from 'vitest';
 import {
   BlockedError,
+  CONNECT_ATTEMPT_MS,
   HttpError,
   PoliteHttp,
   type PoliteHttpOptions,
   QuotaError,
+  RequestFailedError,
   SYMBOL_WINDOW_MS,
   SymbolQuotaError,
   type UsageStore,
   WINDOWS,
+  causeCode,
   mergeFormerIds,
+  raiseConnectAttemptTimeout,
   redactUrl,
 } from './http';
 
@@ -616,5 +624,91 @@ describe('PoliteHttp quota guard', () => {
   it('the database store keeps the windows the guard needs', () => {
     expect(USAGE_SYMBOL_WINDOW_MS).toBe(SYMBOL_WINDOW_MS);
     expect(USAGE_REQUEST_WINDOW_MS).toBeGreaterThanOrEqual(Math.max(...WINDOWS.map((w) => w.ms)));
+  });
+});
+
+describe('connect attempt timeout', () => {
+  /** Runs `body` with the process's attempt timeout set to `start`, then restores the original. */
+  function withTimeout(start: number, body: () => void) {
+    const before = getDefaultAutoSelectFamilyAttemptTimeout();
+    try {
+      setDefaultAutoSelectFamilyAttemptTimeout(start);
+      body();
+    } finally {
+      setDefaultAutoSelectFamilyAttemptTimeout(before);
+    }
+  }
+
+  it("is raised from Node's default to at least 1000 ms when a client is constructed", () => {
+    withTimeout(250, () => {
+      new PoliteHttp();
+      expect(getDefaultAutoSelectFamilyAttemptTimeout()).toBeGreaterThanOrEqual(1000);
+      expect(CONNECT_ATTEMPT_MS).toBe(1000);
+    });
+  });
+
+  it('never lowers a larger value already set', () => {
+    withTimeout(5000, () => {
+      new PoliteHttp();
+      expect(getDefaultAutoSelectFamilyAttemptTimeout()).toBe(5000);
+      raiseConnectAttemptTimeout();
+      expect(getDefaultAutoSelectFamilyAttemptTimeout()).toBe(5000);
+    });
+  });
+
+  it('is raised again by a new client after something lowered it', () => {
+    withTimeout(250, () => {
+      new PoliteHttp();
+      expect(getDefaultAutoSelectFamilyAttemptTimeout()).toBe(1000);
+      setDefaultAutoSelectFamilyAttemptTimeout(250);
+      new PoliteHttp();
+      expect(getDefaultAutoSelectFamilyAttemptTimeout()).toBe(1000);
+    });
+  });
+});
+
+describe('a request that got no answer', () => {
+  const failed = (cause: unknown) => () => {
+    throw new TypeError('fetch failed', { cause });
+  };
+
+  it("keeps the cause's error code, not its text", async () => {
+    const cause = Object.assign(new Error('connect ETIMEDOUT 192.0.2.1:443'), {
+      code: 'ETIMEDOUT',
+    });
+    const { http } = fakeClient([failed(cause)], { retries: 2 });
+    const e = await http.text('https://example.test/a').catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(RequestFailedError);
+    expect((e as RequestFailedError).message).toBe(
+      'request failed after 3 tries: https://example.test/a',
+    );
+    expect((e as RequestFailedError).name).toBe('Error');
+    expect((e as RequestFailedError).code).toBe('ETIMEDOUT');
+  });
+
+  it('finds the code inside an AggregateError over each address tried', () => {
+    const each = [new Error('a'), Object.assign(new Error('b'), { code: 'ENETUNREACH' })];
+    expect(causeCode(new TypeError('fetch failed', { cause: new AggregateError(each) }))).toBe(
+      'ENETUNREACH',
+    );
+  });
+
+  it('has no code when none is known or it is not of the usual shape', async () => {
+    expect(causeCode(new TypeError('fetch failed'))).toBeUndefined();
+    expect(causeCode(Object.assign(new Error('x'), { code: 'https://example.test/x' }))).toBe(
+      undefined,
+    );
+    expect(causeCode(Object.assign(new Error('x'), { code: 23 }))).toBeUndefined();
+    expect(causeCode(null)).toBeUndefined();
+    expect(causeCode('ETIMEDOUT')).toBeUndefined();
+    const { http } = fakeClient([failed(undefined)], { retries: 0 });
+    const e = await http.text('https://example.test/a').catch((x: unknown) => x);
+    expect((e as RequestFailedError).code).toBeUndefined();
+  });
+
+  it('stops walking a cause chain that loops', () => {
+    const a: { cause?: unknown } = {};
+    a.cause = a;
+    expect(causeCode(a)).toBeUndefined();
   });
 });

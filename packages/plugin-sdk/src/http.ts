@@ -14,6 +14,10 @@
 // challenge page answered to any of them stops them all for the run: the provider blocked us, and
 // a sibling sending on would work around the block (requirements 15). A 403 stops only the client
 // it was answered to (it can refuse one endpoint or plan, not the provider).
+import {
+  getDefaultAutoSelectFamilyAttemptTimeout,
+  setDefaultAutoSelectFamilyAttemptTimeout,
+} from 'node:net';
 import type { ProviderLimits } from './types';
 
 /** The provider refused us (403, 429, a challenge page): the source stops for this run. */
@@ -52,6 +56,64 @@ export class HttpError extends Error {
   ) {
     super(`HTTP ${status} for ${url}${detail ? `: ${detail}` : ''}`);
     this.name = 'HttpError';
+  }
+}
+
+/**
+ * A request that got no answer after every try (the connection failed or timed out). `code`: the
+ * underlying cause's error code when one is known (e.g. `ETIMEDOUT`, `ECONNREFUSED`), so a log can
+ * say why without the cause's own text. The name stays `Error`, so messages read as before.
+ */
+export class RequestFailedError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
+  }
+}
+
+/** An error code as Node and undici write them (`ETIMEDOUT`, `UND_ERR_CONNECT_TIMEOUT`). */
+const ERROR_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/**
+ * The first error code in a failed fetch's cause chain: fetch throws `TypeError('fetch failed')`
+ * whose `cause` carries the code, or an `AggregateError` over each address tried. Only a code of
+ * the usual shape is kept; nothing else of the cause (its text can name addresses or the URL).
+ */
+export function causeCode(e: unknown, depth = 0): string | undefined {
+  if (depth > 4 || typeof e !== 'object' || e === null) return undefined;
+  const code = (e as { code?: unknown }).code;
+  if (typeof code === 'string' && ERROR_CODE.test(code)) return code;
+  const fromCause = causeCode((e as { cause?: unknown }).cause, depth + 1);
+  if (fromCause) return fromCause;
+  const errors = (e as { errors?: unknown }).errors;
+  if (Array.isArray(errors)) {
+    for (const inner of errors) {
+      const found = causeCode(inner, depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The time (ms) one TCP connect attempt to one address may take before Node tries the next.
+ * Node's fetch tries a host's addresses in turn (Happy Eyeballs, `autoSelectFamily`) and cuts each
+ * attempt at 250 ms by default. A distant host (healthchecks.io in Germany is about 270 ms from a
+ * server in Japan) then never connects: every attempt is cut, and fetch fails with ETIMEDOUT
+ * (seen on Node 24). 1000 ms leaves room for such a round trip and still moves on from a dead
+ * address within a second. Retries, pacing, quotas and the overall request timeout are unchanged.
+ */
+export const CONNECT_ATTEMPT_MS = 1000;
+
+/**
+ * Raises Node's default per-address connect attempt timeout to `CONNECT_ATTEMPT_MS`; a larger
+ * value already set (a flag or another caller) is kept, never lowered.
+ */
+export function raiseConnectAttemptTimeout(): void {
+  if (getDefaultAutoSelectFamilyAttemptTimeout() < CONNECT_ATTEMPT_MS) {
+    setDefaultAutoSelectFamilyAttemptTimeout(CONNECT_ATTEMPT_MS);
   }
 }
 
@@ -232,6 +294,8 @@ export class PoliteHttp {
   private symbol: string | null = null;
 
   constructor(options: PoliteHttpOptions = {}) {
+    // Before any request (`CONNECT_ATTEMPT_MS`); it never lowers, so every client may call it.
+    raiseConnectAttemptTimeout();
     this.ledger = {
       sent: [],
       symbols: new Map(),
@@ -535,7 +599,10 @@ export class PoliteHttp {
           continue;
         }
         const reason = e instanceof Error && e.name === 'TimeoutError' ? 'no answer' : 'failed';
-        throw new Error(`request ${reason} after ${attempt + 1} tries: ${shown}`);
+        throw new RequestFailedError(
+          `request ${reason} after ${attempt + 1} tries: ${shown}`,
+          causeCode(e),
+        );
       }
       if (res.status === 403 || res.status === 429) {
         // A 403 says why it refused (e.g. a plan limit), masked and cut like any 4xx excerpt.

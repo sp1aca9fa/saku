@@ -34,7 +34,7 @@ import { backupDatabase, backupDir, localDay, pruneBackups } from '@saku/db/back
 import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { codeVersion } from '../code-version';
-import { HttpError, PoliteHttp } from '../http';
+import { sendHeartbeat } from '../jobs/heartbeat';
 import { lock, readStamp, writeStamp } from '../jobs/lock';
 import { jobLogger } from '../jobs/log';
 import { probe } from '../jobs/probe';
@@ -273,16 +273,8 @@ async function backup() {
 async function heartbeat(envName = 'HEALTHCHECK_URL'): Promise<boolean> {
   const url = process.env[envName]?.trim();
   if (!url) return false;
-  try {
-    await new PoliteHttp({ retries: 2 }).text(url);
-    return true;
-  } catch (e) {
-    // The check's URL is its secret: the error is logged without it.
-    const error =
-      e instanceof HttpError ? `HTTP ${e.status}` : e instanceof Error ? e.name : 'error';
-    log.warn('Heartbeat ping failed', { check: envName, error });
-    return false;
-  }
+  // The check's URL is its secret: the warning gives the reason and cause code without it.
+  return sendHeartbeat(url, envName, log);
 }
 
 function spikeMarkdown(r: SpikeReport): string {
