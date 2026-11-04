@@ -86,6 +86,7 @@ The orchestrator passes these values as `model` and `effort` when it starts each
 | ux-reviewer | sonnet | medium | Tier 1 and 2 UI, from D1 |
 | trust-reviewer | sonnet | medium | Tier 2 UI, from D1 |
 | triage | opus | medium | when two or more reviewers ran |
+| challenger | opus | high | direction only, on request or at a stage's start |
 | summarizer | haiku | low | |
 
 ## Reviews used
@@ -106,3 +107,4 @@ The orchestrator passes these values as `model` and `effort` when it starts each
 ## Setup changes
 
 - 2026-11-03: risk class A recorded; Tier 3 row added (`xhigh`); run ledger started.
+- 2026-11-04: challenger added (opus high); evaluated per `/ship` section 8, not by the noisy or redundant triggers.
