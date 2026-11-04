@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { dbConfigFromEnv } from './env';
@@ -58,9 +60,8 @@ describe('database', () => {
 
 describe('dbConfigFromEnv', () => {
   it('defaults to saku.db in the data folder', () => {
-    expect(dbConfigFromEnv({ SAKU_DATA_DIR: '/tmp/saku-test-data' }).url).toBe(
-      'file:/tmp/saku-test-data/saku.db',
-    );
+    const dir = join(tmpdir(), 'saku-test-data');
+    expect(dbConfigFromEnv({ SAKU_DATA_DIR: dir }).url).toBe(`file:${join(dir, 'saku.db')}`);
   });
 
   it('refuses hosted databases', () => {

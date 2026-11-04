@@ -11,3 +11,15 @@ docs/
 
 # Official license text, kept verbatim
 LICENSE.md
+
+# Claude Code's sandbox mounts empty stand-ins at these names while a command runs; never repo files
+.bash_profile
+.bashrc
+.gitconfig
+.idea
+.mcp.json
+.profile
+.ripgreprc
+.vscode
+.zprofile
+.zshrc

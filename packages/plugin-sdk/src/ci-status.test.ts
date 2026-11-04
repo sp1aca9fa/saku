@@ -55,7 +55,7 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 function run(args: string[] = [SHA]) {
   const r = spawnSync('bash', [SCRIPT, ...args], {
     encoding: 'utf8',
-    env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, FAKE_DIR: dir, HOME: dir },
+    env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, FAKE_DIR: dir, HOME: dir, TMPDIR: dir },
   });
   return { status: r.status, out: r.stdout, err: r.stderr };
 }
