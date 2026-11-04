@@ -100,7 +100,7 @@ The report after each task (and at the end of a `/ship` run), short, no step rec
 ```
 Done: <what changed; tier and why>
 Tested: <checks and tests; what was not tested>
-Needs you: <decisions and blockers, each with a recommendation; or nothing>
+Actions: <"New actions from this round are in <the actions file>." or "No new actions raised.">
 Open issues: <unresolved after 2 rounds, known limits; or none>
 Assumed: <every assumption about trading, statistics, data or tax (tax with the rule it rests on); or none>
 Backlog ideas: <or none>
