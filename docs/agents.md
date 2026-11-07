@@ -108,3 +108,4 @@ The orchestrator passes these values as `model` and `effort` when it starts each
 
 - 2026-11-03: risk class A recorded; Tier 3 row added (`xhigh`); run ledger started.
 - 2026-11-04: challenger added (opus high); evaluated per `/ship` section 8, not by the noisy or redundant triggers.
+- 2026-11-07: from a spend measure over one session in each project, about a tenth of it avoidable around builders: builders auto-compact at 200k, a long rehearsal runs in the background with no polling and on a small sample while fixing, a start map goes in the builder's prompt, a stale resume above about 150k gives way to a fresh builder; the agent ledger gains `severe` and `fix_caused`; `spend-view.mjs` joins the setup review. No review step changed.
