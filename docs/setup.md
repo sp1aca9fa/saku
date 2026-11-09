@@ -195,7 +195,9 @@ which is pnpm's own security check).
 ## 5. Outside watch
 
 Create a check on healthchecks.io (free): period 1 day, grace 6 hours, and put its URL in `.env`
-as `HEALTHCHECK_URL`. Each fully successful daily run pings it; when pings stop (the machine is
+as `HEALTHCHECK_URL`. Each fully successful daily run pings it, and while the latest daily run
+succeeded the hourly check sends one keep-alive on each day with no session ping due, so weekends
+and holidays are not outages (`docs/running.md`, "Heartbeat"); when pings stop (the machine is
 down, a source keeps failing, a backup failed), healthchecks.io tells you. The machine cannot report
 its own outage.
 

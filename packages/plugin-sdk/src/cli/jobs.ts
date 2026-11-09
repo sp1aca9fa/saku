@@ -29,16 +29,16 @@
 import { Sessions } from '@saku/data';
 import { tradingDateOf } from '@saku/core';
 import { join } from 'node:path';
-import { activeSymbols, createDb, latestRecheckRun, openRechecks } from '@saku/db';
+import { activeSymbols, createDb } from '@saku/db';
 import { backupDatabase, backupDir, localDay, pruneBackups } from '@saku/db/backup';
 import { dbConfigFromEnv, findRepoRoot, loadRootEnv } from '@saku/db/env';
 import { exitIfUnmigrated } from '@saku/db/migrate';
 import { codeVersion } from '../code-version';
 import { sendHeartbeat } from '../jobs/heartbeat';
-import { lock, readStamp, writeStamp } from '../jobs/lock';
+import { dailyCheck, dailyPings } from '../jobs/daily-check';
+import { lock } from '../jobs/lock';
 import { jobLogger } from '../jobs/log';
 import { probe } from '../jobs/probe';
-import { dailyAction } from '../jobs/recheck';
 import { runJob } from '../jobs/run';
 import { GATE, type SpikeReport, spikeFrom, spikeReport, verdict } from '../jobs/spike';
 import { dailyAfterOf, dailyTarget } from '../jobs/target';
@@ -179,46 +179,15 @@ if (job === 'monthly') {
   process.exit(ok ? 0 : 1);
 }
 
-/**
- * A red re-check run (requirements 04 "Red re-check before execution"): the day is done, but a day
- * red at its first grading is graded again by every hourly check until its deadline.
- */
-let recheck = false;
-if (job === 'daily' && !force && (readStamp('daily') ?? '') >= target) {
-  // Done for the day; a heartbeat that failed then is tried again (not the whole run).
-  if ((readStamp('heartbeat') ?? '') < target && (await heartbeat()))
-    writeStamp('heartbeat', target);
-  const open = await openRechecks(db);
-  const next = dailyAction({
-    stamped: true,
-    force,
-    open,
-    now,
-    lastRecheck: await latestRecheckRun(db),
-  });
-  if (next.action === 'exit') {
-    // Stuck: the latest re-check run failed for these versions after their deadlines; its
-    // job-failure alert stands, and another full run every hour would only repeat it.
-    if (next.why === 'stuck') {
-      log.warn(
-        `Red re-checks past their deadline cannot close (see the last re-check run's error): ` +
-          `${open.map((r) => `${r.date} ${r.versionId}`).join(', ')}; not run again until fixed ` +
-          '(then pnpm daily --force)',
-      );
-    }
-    held.release();
-    process.exit(0);
-  }
-  recheck = true;
-  log.info(`Red re-check: ${open.map((r) => `${r.date} (deadline ${r.deadline})`).join(', ')}`);
-}
-
-// From here on, the jobs that record a run.
-let result: Awaited<ReturnType<typeof runJob>> | undefined;
-try {
-  result = await runJob(db, plugins, {
+// From here on, the jobs that record a run: one run of the job for a target.
+const runOnce = (o: {
+  target: string;
+  recheck: boolean;
+  onComplete: (job: 'daily' | 'weekly') => Promise<boolean>;
+}) =>
+  runJob(db, plugins, {
     job: job === 'verify' ? 'checks' : (job as 'bootstrap' | 'daily' | 'weekly' | 'checks'),
-    target,
+    target: o.target,
     sessions,
     seriesSessions,
     now,
@@ -229,7 +198,7 @@ try {
     log,
     context: (info) => pluginContext(info, log, { finalAfter }),
     alerting: {
-      date: target,
+      date: o.target,
       notifiers: plugins.notifiers,
       authSecret: process.env.AUTH_SECRET?.trim() ?? '',
       context: notifierContexts(log, providerUsageStore(db)),
@@ -247,22 +216,40 @@ try {
     parityDir: join(findRepoRoot(), PARITY_DIR),
     beforeRefetch: backup,
     afterDaily: backup,
-    recheck,
-    onComplete: async (ran) => {
-      // The weekly run has its own check and no stamp.
-      if (ran === 'weekly') return heartbeat('HEALTHCHECK_WEEKLY_URL');
-      writeStamp('daily', target);
-      const sent = await heartbeat();
-      if (sent) writeStamp('heartbeat', target);
-      return sent;
-    },
+    recheck: o.recheck,
+    onComplete: o.onComplete,
   });
+
+let code = 1;
+try {
+  if (job === 'daily') {
+    // The hourly check (jobs/daily-check.ts): the daily or re-check run, the session ping tried
+    // again, the heartbeat keep-alive on a day done (requirements 04 row H).
+    code = await dailyCheck(db, {
+      sessions,
+      finalAfter,
+      force,
+      now,
+      log,
+      run: runOnce,
+      // The check's URL is its secret: the warning gives the reason and cause code without it.
+      ...dailyPings(process.env, (url, check) => sendHeartbeat(url, check, log)),
+    });
+  } else {
+    // The weekly run has its own check and no stamp; runJob calls onComplete for no other job.
+    const result = await runOnce({
+      target,
+      recheck: false,
+      onComplete: async (ran) => ran === 'weekly' && heartbeat('HEALTHCHECK_WEEKLY_URL'),
+    });
+    code = result.ok ? 0 : 1;
+  }
 } catch (e) {
   log.warn('Run could not start or finish', { error: String(e) });
 } finally {
   held.release();
 }
-process.exit(result?.ok ? 0 : 1);
+process.exit(code);
 /** A checked copy of the database, before the weekly refetch and after the daily steps. */
 async function backup() {
   const b = await backupDatabase(dbConfigFromEnv().url, backupDir(), localDay(now));

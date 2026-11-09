@@ -68,7 +68,7 @@ Every user-facing string goes through `packages/content` (next-intl); `en.json` 
 
 ## Compute, jobs and MCP
 - Heavy computation runs in server jobs or the browser (Web Workers), never in a web request.
-- Jobs and plug-ins run only on the server; they refuse to run when `VERCEL` or `CI` is set. Idempotent, catch up on all unprocessed trading days, respect quotas, heartbeat only on full success.
+- Jobs and plug-ins run only on the server; they refuse to run when `VERCEL` or `CI` is set. Idempotent, catch up on all unprocessed trading days, respect quotas, heartbeat only on full success; the daily keep-alive only while requirements 04 row H holds.
 - MCP level 1 is read-only (reads the analysis copy; no writes, no notifications); compact responses (< 20,000 characters) including data-health status; `noAi` sources' raw data left out.
 - Migrations are add-only (drop in a later migration).
 

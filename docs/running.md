@@ -98,7 +98,8 @@ install's time zone.
 - While a re-check is open, the hourly check runs the daily job again for that day although it is
   stamped: fetch of the 10-session window, checks, the forward step for the waiting day only,
   alerts, backup. These runs are recorded as daily runs marked `recheck` (`job_runs.recheck`); they
-  write no stamp and send no heartbeat (the heartbeat stays the day's own run). A re-check run that
+  write no stamp and send no session ping (that stays the day's own run); a failed one withholds the
+  keep-alive and the retry of a failed session ping (see "Heartbeat"). A re-check run that
   finished every step is complete whatever the day grades (red is data, not a failure); one that
   did not is a failed run as any other (admins told, retried at the next check).
 - The day turns not red before the deadline: its normal decision is recorded (yellow rules if
@@ -133,7 +134,22 @@ install's time zone.
 ## Heartbeat
 
 After a fully successful daily run, Saku pings `HEALTHCHECK_URL` (healthchecks.io). When pings
-stop, the service alerts you. A failed ping is retried at the next check without redoing the run.
+stop, the service alerts you. A failed ping is retried at the next check without redoing the run,
+but only while the latest daily run (re-check and forced runs included) still succeeded; otherwise
+the check logs `No session ping retry` with the reason and sends nothing.
+
+Sessions are weekdays only, so the hourly check also sends the same check a keep-alive: one ping per
+New York calendar date with no session ping due (a date with no session, and the first session
+after such dates), while the latest final session is done and pinged, the latest daily run
+(re-check and forced runs included) succeeded for it, no red re-check is stuck, and that session is
+at most 7 calendar days old. On a session's own evening and on the next calendar day when that day is also a
+session, the session ping carries the check alone, as before. Otherwise it sends none and logs `No heartbeat keep-alive`
+with the reason. A day not done takes the run path and logs no keep-alive line: the run's own
+`daily not complete` line is the reason. So an outage still alerts within 30 hours of the last
+ping. A missed 20:20 run on a weekday alerts about 6 hours later. On the first session after a
+weekend or holiday it alerts about 10 hours later, up to about 29 if that day's keep-alive was only
+answered late. An unanswered keep-alive is tried at the next check. Its stamp is `keepalive`
+(`pending <date>` until answered); it never touches the `daily` or `heartbeat` stamps.
 
 The weekly refetch pings `HEALTHCHECK_WEEKLY_URL` the same way, after a fully successful run
 (optional; empty means no ping). Make it a second check on healthchecks.io with period 7 days and

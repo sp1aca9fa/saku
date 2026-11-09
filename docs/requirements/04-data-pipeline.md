@@ -69,7 +69,7 @@ Adjusted series: a **forward-accumulated total-return index** from raw close, di
 | | External golden values: testfol parity, TradingView-verified indicator values, owner-computed tax cases | See 13 | Every commit / weekly on real data |
 | F. Fault injection | Material corruptions (decimal shifts, missed splits or dividends, stale closes, missing days, duplicates, swapped tickers, timezone shifts) must be detected and must never produce a normal signal, with all sources available. Separately: a day with a single source is never green. | 100% of material faults | Every commit |
 | G. Revisions | Weekly diff; recompute and report which past signals would have differed (forward records annotated, never edited) | Any change | Weekly |
-| H. Liveness | Heartbeat ping on full success; daily data-health report; monthly audit report | n/a | Daily / monthly |
+| H. Liveness | Heartbeat ping on full success; a keep-alive ping once per calendar day (New York) on a date with no session and on the first session after such dates (never on a session's own evening or on the next calendar day when that day is also a session, when the session ping is due), while the latest final session is done and the latest daily run (re-check and forced runs included) succeeded, so non-trading days do not read as an outage; daily data-health report; monthly audit report | n/a | Daily / monthly |
 
 Checks, tolerances and rationale are documented in `docs/data-pipeline.md`.
 

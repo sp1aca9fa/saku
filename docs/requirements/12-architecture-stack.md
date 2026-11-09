@@ -72,7 +72,7 @@ docs/ (requirements/, system-design.md, evidence/, data-pipeline.md, indicators.
 - Folders: `~/.local/share/saku/` (database, backups, analysis copy), `~/.local/state/saku/` (logs, stamps, locks); `SAKU_STATE_DIR` for a second copy on the same machine.
 - Address: Tailscale Funnel on its own port (owner: `tailscale funnel --bg --https=8443 3001`). No router port opened.
 - Backups: a daily compressed copy of the database (30 days plus the first of each month for 12 months), copied off the machine (the owner: to their PC over ssh). `pnpm restore` loads a copy into a new, empty database only. Each user can download their own data (JSON) and load it into an empty account.
-- Outside watch: healthchecks.io gets a ping after each full daily success; it alerts when pings stop (the machine cannot report its own outage).
+- Outside watch: healthchecks.io gets a ping after each full daily success, and a keep-alive once per calendar day (New York) on dates with no session ping due, while the daily job is up to date and its latest run succeeded (weekends and holidays have no session); it alerts when pings stop (the machine cannot report its own outage).
 - Hosted options (e.g. Vercel + Turso) are not supported in v1; libSQL keeps them possible later.
 
 ## Risks of self-hosting

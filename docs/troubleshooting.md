@@ -187,8 +187,18 @@ A lock left by a dead process is taken over on the next start.
 ## No healthchecks.io ping
 
 Pings only follow a fully successful run: the daily one (`HEALTHCHECK_URL`) and the weekly one
-(`HEALTHCHECK_WEEKLY_URL`). Check the last run in `pnpm health`, the timer
-(`systemctl list-timers 'saku-*'`), and that the variable is set.
+(`HEALTHCHECK_WEEKLY_URL`), plus the daily keep-alive. Check the last run in `pnpm health`, the
+timer (`systemctl list-timers 'saku-*'`), and that the variable is set. A day not done (its run
+failed or has not run yet) logs no keep-alive line: the run's own `daily not complete` line is the
+reason. `No heartbeat keep-alive` in `~/.local/state/saku/logs/daily.log` gives why a done date had
+none: `session_ping_pending` (the session's own ping is not answered yet), `stuck` (a red re-check
+cannot close), `recheck_failed`, `run_failed`, `run_unfinished` or `no_run` (the latest daily run
+failed, never finished or is missing), `run_other_day` (that run is not for the stamped day, e.g.
+after a restore), `target_old` (no session for over 7 days: check the calendar plug-in),
+`not_done` (only when the `daily` stamp is not a date, or the target moved on during a re-check
+run). `No session ping retry` gives the same run reasons for a session ping not tried again. On a
+session's own evening and on the next calendar day when that day is also a session, no keep-alive is due (`session_due`: the session
+ping covers them); like a date already sent, it is not logged.
 
 ## An update rolled back
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   finishRun,
+  latestDailyRun,
   removeSourceRole,
   seedSourceRoles,
   setSourceRole,
@@ -17,6 +18,51 @@ describe('job runs', () => {
     await finishRun(db, id, { ok: false, error: 'boom', datesProcessed: ['2026-01-02'] });
     const [row] = await db.select().from(jobRuns);
     expect(row).toMatchObject({ status: 'failed', error: 'boom', datesProcessed: ['2026-01-02'] });
+  });
+});
+
+describe('latestDailyRun', () => {
+  const at = (iso: string) => new Date(iso);
+
+  it('is undefined with no daily run, even when other jobs ran', async () => {
+    const db = await testDb();
+    expect(await latestDailyRun(db)).toBeUndefined();
+    await finishRun(db, await startRun(db, 'weekly', at('2026-11-07T15:00:00Z')), { ok: true });
+    expect(await latestDailyRun(db)).toBeUndefined();
+  });
+
+  it('is the latest daily-kind row by start: a later re-check or forced row wins', async () => {
+    const db = await testDb();
+    const day = await startRun(db, 'daily', at('2026-11-06T01:20:00Z'), '2026-11-05');
+    await finishRun(db, day, { ok: true, datesProcessed: ['2026-11-05'] });
+    const re = await startRun(db, 'daily', at('2026-11-06T02:20:00Z'), '2026-11-05', {
+      recheck: true,
+    });
+    await finishRun(db, re, { ok: false, error: 'x', datesProcessed: ['2026-11-05'] });
+    expect(await latestDailyRun(db)).toEqual({
+      startedAt: '2026-11-06T02:20:00.000Z',
+      status: 'failed',
+      datesProcessed: ['2026-11-05'],
+    });
+    // A forced run killed after it started: still running, its target recorded at the start.
+    await startRun(db, 'daily', at('2026-11-06T15:00:00Z'), '2026-11-05');
+    expect(await latestDailyRun(db)).toMatchObject({
+      status: 'running',
+      datesProcessed: ['2026-11-05'],
+    });
+  });
+
+  it('ignores a later weekly, bootstrap or checks row', async () => {
+    const db = await testDb();
+    const day = await startRun(db, 'daily', at('2026-11-06T01:20:00Z'), '2026-11-05');
+    await finishRun(db, day, { ok: true, datesProcessed: ['2026-11-05'] });
+    for (const job of ['weekly', 'bootstrap', 'checks'] as const) {
+      await finishRun(db, await startRun(db, job, at('2026-11-07T15:00:00Z')), { ok: false });
+    }
+    expect(await latestDailyRun(db)).toMatchObject({
+      status: 'success',
+      datesProcessed: ['2026-11-05'],
+    });
   });
 });
 

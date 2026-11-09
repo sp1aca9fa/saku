@@ -103,6 +103,7 @@ flowchart TD
   B --> HB{Full success?}
   HB -- yes --> P[Ping heartbeat, stamp the day]
   HB -- no --> L[Log, admin alert, no ping, retry next check]
+  P --> KA[Later checks: one keep-alive ping per New York date with no session ping due, while the latest daily run succeeded]
 ```
 
 **State per trading date and ticker:** `pending` -> `fetched` -> `verified` (green/yellow/red) -> `evaluated` -> `notified`.
@@ -214,7 +215,7 @@ A plug-in package's `src/index.ts`: `export const bars: BarSource[] = [...]; exp
 Library evaluation, robustness sweeps and Monte Carlo run in server jobs (results stored) or in the browser via Web Workers. Server actions only serve light requests.
 
 ## 11. Error handling and observability
-Job runs and structured logs in `~/.local/state/saku/`; admin alert with the reason on failure; no heartbeat ping, so healthchecks.io alerts independently; retries, stand-in rule, then `pending`. Admin pages: server status (version, uptime, memory, disk, units, last runs, log tails), activity log, data health, quotas, chain status.
+Job runs and structured logs in `~/.local/state/saku/`; admin alert with the reason on failure; no heartbeat ping or keep-alive, so healthchecks.io alerts independently; retries, stand-in rule, then `pending`. Admin pages: server status (version, uptime, memory, disk, units, last runs, log tails), activity log, data health, quotas, chain status.
 
 ## 12. Security
 No sign-up; password + TOTP + backup codes; 2 devices per account; lockout; authorization in every server action and route; `owner_id` scoping with wrong-user tests; secrets only in the server's `.env`; TOTP secrets and alert targets encrypted with `AUTH_SECRET`; the app listens on localhost only and is reached through Funnel; MCP reads a read-only copy; dependency and license checks; Next.js kept patched.

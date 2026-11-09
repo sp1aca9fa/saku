@@ -41,6 +41,27 @@ export async function latestRecheckRun(
   return row;
 }
 
+/**
+ * The latest daily-kind run (the scheduled run, `--force` and re-check runs are all `daily` rows),
+ * if any: when it started, how it ended so far (`running` when it never finished), the dates it
+ * worked for. The heartbeat keep-alive reads it (requirements 04 row H).
+ */
+export async function latestDailyRun(
+  db: Db,
+): Promise<{ startedAt: string; status: string; datesProcessed: string[] | null } | undefined> {
+  const [row] = await db
+    .select({
+      startedAt: jobRuns.startedAt,
+      status: jobRuns.status,
+      datesProcessed: jobRuns.datesProcessed,
+    })
+    .from(jobRuns)
+    .where(eq(jobRuns.jobType, 'daily'))
+    .orderBy(desc(jobRuns.startedAt))
+    .limit(1);
+  return row;
+}
+
 export async function finishRun(
   db: Db,
   id: string,

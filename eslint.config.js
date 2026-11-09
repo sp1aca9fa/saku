@@ -3,7 +3,7 @@ import { defineConfig, globalIgnores } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
 export default defineConfig([
-  globalIgnores(['**/node_modules/', '**/.next/', 'packages/db/drizzle/']),
+  globalIgnores(['**/node_modules/', '**/.next/', 'packages/db/drizzle/', '.agent-runs/']),
   js.configs.recommended,
   tseslint.configs.recommended,
   {
